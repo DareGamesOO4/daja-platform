@@ -1,0 +1,18 @@
+{
+  "name": "@daja/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "types": "dist/main.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -b",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@daja/config": "0.1.0",
+    "@daja/database": "0.1.0",
+    "@daja/observability": "0.1.0"
+  }
+}

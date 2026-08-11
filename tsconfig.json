@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/config" },
+    { "path": "packages/contracts" },
+    { "path": "packages/database" },
+    { "path": "packages/observability" },
+    { "path": "packages/security" },
+    { "path": "packages/shared" },
+    { "path": "packages/validation" },
+    { "path": "apps/api" },
+    { "path": "apps/worker" }
+  ]
+}
