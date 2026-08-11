@@ -25,8 +25,9 @@ export async function resetDatabase(pool: pg.Pool): Promise<void> {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('Refusing to reset database outside NODE_ENV=test');
   }
-  await pool.query('DROP SCHEMA public CASCADE');
-  await pool.query('CREATE SCHEMA public');
+  await pool.query('DROP SCHEMA IF EXISTS public CASCADE');
+  await pool.query('CREATE SCHEMA public AUTHORIZATION daja_app');
+  await pool.query('GRANT ALL ON SCHEMA public TO public');
   await pool.query('GRANT ALL ON SCHEMA public TO daja_app');
 }
 
@@ -39,4 +40,17 @@ export function contextFor(organizationId: string) {
     roles: ['owner'],
     permissions: ['admin.users']
   };
+}
+
+export async function createFixtureUser(pool: pg.Pool, organizationId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO users (id, organization_id, email, display_name)
+     VALUES ($1, $2, $3, $4)`,
+    [
+      '00000000-0000-4000-8000-000000000003',
+      organizationId,
+      `fixture-${organizationId}@example.test`,
+      'Fixture User'
+    ]
+  );
 }

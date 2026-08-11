@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { loadConfig } from '@daja/config';
 import { createLogger } from '@daja/observability';
 import { createDatabase } from './pool.js';

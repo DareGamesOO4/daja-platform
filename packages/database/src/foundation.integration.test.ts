@@ -5,7 +5,12 @@ import { IdempotencyStore } from './idempotency.js';
 import { migrate } from './migrations.js';
 import { OrganizationRepository } from './repositories.js';
 import { TransactionManager } from './transaction.js';
-import { contextFor, createTestDatabase, resetDatabase } from '../test/helpers.js';
+import {
+  contextFor,
+  createFixtureUser,
+  createTestDatabase,
+  resetDatabase
+} from '../test/helpers.js';
 import type { Database } from './pool.js';
 import { createLogger } from '@daja/observability';
 import { loadConfig } from '@daja/config';
@@ -57,6 +62,7 @@ describe('foundation data access', () => {
   it('rejects audit row update and delete', async () => {
     const repository = new OrganizationRepository(database.pool);
     const organization = await repository.create({ name: 'Tenant A', slug: 'tenant-a' });
+    await createFixtureUser(database.pool, organization.id);
     const auditId = await new AuditRepository(database.pool).append({
       ctx: contextFor(organization.id),
       aggregateType: 'organization',

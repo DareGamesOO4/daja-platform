@@ -22,6 +22,7 @@ export default defineWorkspace([
       name: 'integration',
       include: ['packages/**/*.integration.test.ts', 'apps/**/*.integration.test.ts'],
       environment: 'node',
+      fileParallelism: false,
       env: {
         NODE_ENV: 'test',
         PORT: '3000',

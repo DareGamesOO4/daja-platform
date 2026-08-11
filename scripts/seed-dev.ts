@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { loadConfig } from '@daja/config';
 
 const config = loadConfig();

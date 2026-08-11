@@ -20,15 +20,12 @@ export function createDatabase(config: AppConfig, logger: Logger): Database {
     max: config.DB_POOL_MAX,
     statement_timeout: config.DB_STATEMENT_TIMEOUT_MS,
     idle_in_transaction_session_timeout: config.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS,
-    application_name: 'daja-platform'
+    application_name: 'daja-platform',
+    options: '-c search_path=public'
   });
 
   pool.on('error', (error) => {
     logger.error({ err: error }, 'PostgreSQL pool error');
-  });
-
-  pool.on('connect', (client) => {
-    void client.query('SET TIME ZONE UTC');
   });
 
   const query: Database['query'] = async <T extends QueryResultRow = QueryResultRow>(
