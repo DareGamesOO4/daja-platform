@@ -1,0 +1,187 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+import type pg from 'pg';
+import {
+  ResourceConflictError,
+  TenantAccessDeniedError,
+  ValidationFailedError
+} from '@daja/security';
+import type { RequestContext } from '@daja/shared';
+
+export class InventoryRepository {
+  constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
+
+  async createItem(
+    ctx: RequestContext,
+    input: {
+      variantId: string;
+      serialNumber?: string | null | undefined;
+      locationId?: string | null | undefined;
+      status?: string | undefined;
+    }
+  ) {
+    await this.assertVariant(ctx.organizationId, input.variantId);
+    if (input.locationId) {
+      await this.assertLocation(ctx.organizationId, input.locationId);
+    }
+    const status = input.status ?? 'in_stock';
+    const result = await this.client.query(
+      `INSERT INTO inventory_items (organization_id, variant_id, serial_number, status, current_location_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, variant_id AS "variantId", serial_number AS "serialNumber", status,
+                 current_location_id AS "currentLocationId", version`,
+      [
+        ctx.organizationId,
+        input.variantId,
+        input.serialNumber ?? null,
+        status,
+        input.locationId ?? null
+      ]
+    );
+    if (input.locationId && status === 'in_stock') {
+      await this.adjust(ctx, {
+        variantId: input.variantId,
+        inventoryItemId: result.rows[0].id,
+        locationId: input.locationId,
+        quantityDelta: 1,
+        sourceType: 'inventory_item_create',
+        sourceId: result.rows[0].id,
+        metadata: { serialNumber: input.serialNumber ?? null }
+      });
+    }
+    return result.rows[0];
+  }
+
+  async adjust(
+    ctx: RequestContext,
+    input: {
+      variantId: string;
+      inventoryItemId?: string | null | undefined;
+      locationId: string;
+      quantityDelta: number;
+      sourceType: string;
+      sourceId?: string | null | undefined;
+      metadata?: Record<string, unknown> | undefined;
+    }
+  ) {
+    if (!Number.isInteger(input.quantityDelta) || input.quantityDelta === 0) {
+      throw new ValidationFailedError('Inventory adjustment quantity must be a non-zero integer');
+    }
+    await this.assertVariant(ctx.organizationId, input.variantId);
+    await this.assertLocation(ctx.organizationId, input.locationId);
+    const existing = await this.client.query<{ quantity: number }>(
+      `SELECT quantity FROM inventory_balances
+       WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3
+       FOR UPDATE`,
+      [ctx.organizationId, input.locationId, input.variantId]
+    );
+    const current = existing.rows[0]?.quantity ?? 0;
+    const next = current + input.quantityDelta;
+    if (next < 0) {
+      throw new ResourceConflictError('Inventory balance cannot become negative', {
+        current,
+        attemptedDelta: input.quantityDelta
+      });
+    }
+    await this.client.query(
+      `INSERT INTO inventory_events (organization_id, variant_id, inventory_item_id, event_type, quantity_delta,
+                                     to_location_id, source_type, source_id, actor_user_id, metadata)
+       VALUES ($1, $2, $3, 'adjusted', $4, $5, $6, $7, $8, $9::jsonb)`,
+      [
+        ctx.organizationId,
+        input.variantId,
+        input.inventoryItemId ?? null,
+        input.quantityDelta,
+        input.locationId,
+        input.sourceType,
+        input.sourceId ?? null,
+        ctx.userId,
+        JSON.stringify(input.metadata ?? {})
+      ]
+    );
+    await this.client.query(
+      `INSERT INTO inventory_balances (organization_id, location_id, variant_id, quantity)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, location_id, variant_id) DO UPDATE
+       SET quantity = EXCLUDED.quantity, version = inventory_balances.version + 1, updated_at = now()`,
+      [ctx.organizationId, input.locationId, input.variantId, next]
+    );
+    return { variantId: input.variantId, locationId: input.locationId, quantity: next };
+  }
+
+  async moveItem(
+    ctx: RequestContext,
+    input: { inventoryItemId: string; toLocationId: string; reason: string }
+  ) {
+    await this.assertLocation(ctx.organizationId, input.toLocationId);
+    const item = await this.client.query(
+      `SELECT * FROM inventory_items WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+      [ctx.organizationId, input.inventoryItemId]
+    );
+    const row = item.rows[0];
+    if (!row) {
+      throw new TenantAccessDeniedError();
+    }
+    const fromLocationId = row.current_location_id as string | null;
+    if (fromLocationId === input.toLocationId) {
+      return { inventoryItemId: input.inventoryItemId, locationId: input.toLocationId };
+    }
+    if (fromLocationId) {
+      await this.adjust(ctx, {
+        variantId: row.variant_id,
+        inventoryItemId: input.inventoryItemId,
+        locationId: fromLocationId,
+        quantityDelta: -1,
+        sourceType: 'inventory_item_move',
+        sourceId: input.inventoryItemId,
+        metadata: { reason: input.reason, direction: 'from' }
+      });
+    }
+    await this.adjust(ctx, {
+      variantId: row.variant_id,
+      inventoryItemId: input.inventoryItemId,
+      locationId: input.toLocationId,
+      quantityDelta: 1,
+      sourceType: 'inventory_item_move',
+      sourceId: input.inventoryItemId,
+      metadata: { reason: input.reason, direction: 'to' }
+    });
+    await this.client.query(
+      `UPDATE inventory_items
+       SET current_location_id = $3, status = 'transferred', version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2`,
+      [ctx.organizationId, input.inventoryItemId, input.toLocationId]
+    );
+    return { inventoryItemId: input.inventoryItemId, locationId: input.toLocationId };
+  }
+
+  async balances(ctx: Pick<RequestContext, 'organizationId'>, variantId: string) {
+    const result = await this.client.query(
+      `SELECT location_id AS "locationId", variant_id AS "variantId", quantity, version, updated_at AS "updatedAt"
+       FROM inventory_balances
+       WHERE organization_id = $1 AND variant_id = $2
+       ORDER BY updated_at DESC`,
+      [ctx.organizationId, variantId]
+    );
+    return result.rows;
+  }
+
+  private async assertVariant(organizationId: string, variantId: string): Promise<void> {
+    const result = await this.client.query(
+      `SELECT 1 FROM product_variants WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [organizationId, variantId]
+    );
+    if (result.rowCount !== 1) {
+      throw new ValidationFailedError('Variant does not belong to organization');
+    }
+  }
+
+  private async assertLocation(organizationId: string, locationId: string): Promise<void> {
+    const result = await this.client.query(
+      `SELECT 1 FROM locations WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [organizationId, locationId]
+    );
+    if (result.rowCount !== 1) {
+      throw new ValidationFailedError('Location does not belong to organization');
+    }
+  }
+}

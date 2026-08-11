@@ -6,6 +6,14 @@ import { createLogger } from '@daja/observability';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { HealthController } from './health.controller.js';
 import { OrganizationsController } from './organizations.controller.js';
+import {
+  ImportsController,
+  InventoryController,
+  MediaController,
+  PublicCatalogController,
+  RfidController,
+  StaffCatalogController
+} from './plan2.controllers.js';
 
 const config = loadConfig();
 const logger = createLogger(config, 'api');
@@ -19,7 +27,16 @@ const logger = createLogger(config, 'api');
       }
     ])
   ],
-  controllers: [HealthController, OrganizationsController],
+  controllers: [
+    HealthController,
+    OrganizationsController,
+    PublicCatalogController,
+    StaffCatalogController,
+    MediaController,
+    RfidController,
+    InventoryController,
+    ImportsController
+  ],
   providers: [
     { provide: CONFIG, useValue: config },
     { provide: LOGGER, useValue: logger },

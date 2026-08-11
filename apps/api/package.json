@@ -17,6 +17,8 @@
     "@daja/observability": "0.1.0",
     "@daja/security": "0.1.0",
     "@daja/shared": "0.1.0",
-    "@daja/validation": "0.1.0"
+    "@daja/validation": "0.1.0",
+    "bullmq": "^5.58.0",
+    "zod": "^4.0.17"
   }
 }

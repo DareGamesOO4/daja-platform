@@ -21,7 +21,7 @@ describe('migrations', () => {
     await resetDatabase(database.pool);
     const status = await migrate(database.pool);
     expect(status.every((row) => row.applied)).toBe(true);
-    expect(status.map((row) => row.version)).toEqual(['001']);
+    expect(status.map((row) => row.version)).toEqual(['001', '002']);
   });
 
   it('does not rerun already applied migrations', async () => {

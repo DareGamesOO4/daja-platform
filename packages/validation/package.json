@@ -9,6 +9,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@daja/security": "0.1.0",
     "zod": "^4.0.17"
   }
 }

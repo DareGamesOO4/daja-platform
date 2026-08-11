@@ -3,6 +3,9 @@ export const ERROR_CODES = {
   tenantAccessDenied: 'TENANT_ACCESS_DENIED',
   idempotencyConflict: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
   validationFailed: 'VALIDATION_FAILED',
+  permissionDenied: 'PERMISSION_DENIED',
+  notFound: 'NOT_FOUND',
+  conflict: 'CONFLICT',
   internal: 'INTERNAL_ERROR',
   unavailable: 'SERVICE_UNAVAILABLE'
 } as const;
@@ -41,5 +44,35 @@ export class IdempotencyConflictError extends AppError {
       'Idempotency key was reused with a different request',
       409
     );
+  }
+}
+
+export class ValidationFailedError extends AppError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(ERROR_CODES.validationFailed, message, 400, details);
+  }
+}
+
+export class PermissionDeniedError extends AppError {
+  constructor(permission: string) {
+    super(ERROR_CODES.permissionDenied, 'Permission denied', 403, { permission });
+  }
+}
+
+export class ResourceNotFoundError extends AppError {
+  constructor(resource: string) {
+    super(ERROR_CODES.notFound, 'Resource not found', 404, { resource });
+  }
+}
+
+export class ResourceConflictError extends AppError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(ERROR_CODES.conflict, message, 409, details);
+  }
+}
+
+export function requirePermission(ctx: { permissions: string[] }, permission: string): void {
+  if (!ctx.permissions.includes(permission)) {
+    throw new PermissionDeniedError(permission);
   }
 }
