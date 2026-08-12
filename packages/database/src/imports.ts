@@ -8,6 +8,7 @@ import type { RequestContext } from '@daja/shared';
 export interface NormalizedImportRow {
   sourceId: string;
   name: string;
+  slug?: string;
   brand?: string;
   department?: string;
   category?: string;
@@ -131,17 +132,26 @@ export class ImportRepository {
     payload: NormalizedImportRow,
     sourceType: string
   ) {
-    const slug = slugify(`${payload.sourceId}-${payload.name}`);
+    const slug = payload.slug
+      ? slugify(payload.slug)
+      : slugify(`${payload.sourceId}-${payload.name}`);
     const conflictColumn = sourceType === 'firestore' ? 'legacy_firestore_id' : 'external_id';
     const legacyFirestoreId = sourceType === 'firestore' ? payload.sourceId : null;
     const externalId = sourceType === 'firestore' ? null : payload.sourceId;
+    const brandId = payload.brand ? await this.upsertImportedBrand(ctx, payload.brand) : null;
+    const categoryId = payload.category
+      ? await this.upsertImportedCategory(ctx, payload.category)
+      : null;
     const result = await this.client.query<{ id: string; slug: string }>(
-      `INSERT INTO products (organization_id, name, slug, description, legacy_firestore_id, external_id, published)
-       VALUES ($1, $2, $3, $4, $5, $6, false)
+      `INSERT INTO products (organization_id, name, slug, description, brand_id, primary_category_id, legacy_firestore_id, external_id, published)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (organization_id, ${conflictColumn}) WHERE ${conflictColumn} IS NOT NULL AND deleted_at IS NULL
        DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
+         brand_id = EXCLUDED.brand_id,
+         primary_category_id = EXCLUDED.primary_category_id,
+         published = EXCLUDED.published,
          version = products.version + 1,
          updated_at = now()
        RETURNING id, slug`,
@@ -150,8 +160,11 @@ export class ImportRepository {
         payload.name,
         slug,
         payload.description ?? null,
+        brandId,
+        categoryId,
         legacyFirestoreId,
-        externalId
+        externalId,
+        sourceType === 'firestore'
       ]
     );
     const row = result.rows[0];
@@ -159,6 +172,32 @@ export class ImportRepository {
       throw new Error('Imported product upsert did not return a row');
     }
     return row;
+  }
+
+  private async upsertImportedBrand(ctx: Pick<RequestContext, 'organizationId'>, name: string) {
+    const slug = slugify(name);
+    const result = await this.client.query<{ id: string }>(
+      `INSERT INTO brands (organization_id, name, slug, active)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organization_id, slug) WHERE deleted_at IS NULL
+       DO UPDATE SET name = EXCLUDED.name, active = true, updated_at = now(), version = brands.version + 1
+       RETURNING id`,
+      [ctx.organizationId, name, slug]
+    );
+    return requireReturnedId(result, 'brand');
+  }
+
+  private async upsertImportedCategory(ctx: Pick<RequestContext, 'organizationId'>, name: string) {
+    const slug = slugify(name);
+    const result = await this.client.query<{ id: string }>(
+      `INSERT INTO categories (organization_id, name, slug, active)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organization_id, COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::uuid), slug) WHERE deleted_at IS NULL
+       DO UPDATE SET name = EXCLUDED.name, active = true, updated_at = now(), version = categories.version + 1
+       RETURNING id`,
+      [ctx.organizationId, name, slug]
+    );
+    return requireReturnedId(result, 'category');
   }
 
   private async upsertImportedVariant(
@@ -176,13 +215,14 @@ export class ImportRepository {
     const existingRow = existing.rows[0];
     const result = await this.client.query<{ id: string }>(
       `INSERT INTO product_variants (organization_id, product_id, sku, gender, current_price_amount, currency, attributes, published)
-       VALUES ($1, $2, $3, $4, $5, 'RSD', $6::jsonb, false)
+       VALUES ($1, $2, $3, $4, $5, 'RSD', $6::jsonb, true)
        ON CONFLICT (organization_id, normalized_sku) WHERE deleted_at IS NULL
        DO UPDATE SET
          product_id = EXCLUDED.product_id,
          gender = EXCLUDED.gender,
          current_price_amount = EXCLUDED.current_price_amount,
          attributes = EXCLUDED.attributes,
+         published = EXCLUDED.published,
          version = product_variants.version + 1,
          updated_at = now()
        RETURNING id`,
@@ -214,7 +254,88 @@ export class ImportRepository {
         [ctx.organizationId, row.id, payload.priceMinor, ctx.userId]
       );
     }
+    await this.syncImportedMedia(ctx, productId, payload.imageUrls);
     return row;
+  }
+
+  private async syncImportedMedia(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    productId: string,
+    imageUrls: string[]
+  ): Promise<void> {
+    const originals = imageUrls.filter((url) => !isThumbnailUrl(url));
+    const thumbnails = imageUrls.filter(isThumbnailUrl);
+    await this.client.query(
+      `DELETE FROM product_media WHERE organization_id = $1 AND product_id = $2`,
+      [ctx.organizationId, productId]
+    );
+    for (const [index, url] of originals.entries()) {
+      const storageKey = storageKeyFromPublicUrl(url);
+      const mediaId = await this.upsertImportedMediaAsset(ctx, {
+        storageKey,
+        publicUrl: url,
+        role: 'original'
+      });
+      const thumbUrl = findThumbnailForOriginal(url, imageUrls, thumbnails);
+      if (thumbUrl) {
+        await this.upsertImportedDerivative(ctx, mediaId, thumbUrl);
+      }
+      await this.client.query(
+        `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
+         VALUES ($1, $2, $3, 'gallery', $4, $5)`,
+        [ctx.organizationId, productId, mediaId, index, index === 0]
+      );
+    }
+  }
+
+  private async upsertImportedMediaAsset(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    input: { storageKey: string; publicUrl: string; role: string }
+  ): Promise<string> {
+    const result = await this.client.query<{ id: string }>(
+      `INSERT INTO media_assets (
+         organization_id, storage_provider, storage_bucket, storage_key, public_url,
+         mime_type, status, metadata
+       )
+       VALUES ($1, 'r2', 'dajashop-images', $2, $3, 'image/webp', 'ready', $4::jsonb)
+       ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
+       DO UPDATE SET
+         public_url = EXCLUDED.public_url,
+         mime_type = EXCLUDED.mime_type,
+         status = 'ready',
+         metadata = media_assets.metadata || EXCLUDED.metadata,
+         updated_at = now(),
+         version = media_assets.version + 1
+       RETURNING id`,
+      [
+        ctx.organizationId,
+        input.storageKey,
+        input.publicUrl,
+        JSON.stringify({ sourceSystem: 'firestore', role: input.role })
+      ]
+    );
+    return requireReturnedId(result, 'media asset');
+  }
+
+  private async upsertImportedDerivative(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    mediaId: string,
+    thumbUrl: string
+  ): Promise<void> {
+    await this.client.query(
+      `INSERT INTO media_derivatives (
+         organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes
+       )
+       VALUES ($1, $2, 512, 512, 'image/webp', $3, $4, 0)
+       ON CONFLICT (media_asset_id, width)
+       DO UPDATE SET
+         height = EXCLUDED.height,
+         mime_type = EXCLUDED.mime_type,
+         storage_key = EXCLUDED.storage_key,
+         public_url = EXCLUDED.public_url,
+         size_bytes = EXCLUDED.size_bytes`,
+      [ctx.organizationId, mediaId, storageKeyFromPublicUrl(thumbUrl), thumbUrl]
+    );
   }
 
   async reconciliation(ctx: Pick<RequestContext, 'organizationId'>, jobId: string) {
@@ -581,6 +702,7 @@ function normalizeFirestoreDocument(document: FirestoreDocument): {
   const value: NormalizedImportRow = {
     sourceId,
     name,
+    ...(stringField(raw.slug) ? { slug: stringField(raw.slug) } : {}),
     priceMinor: Math.round(price * 100),
     imageUrls: images,
     specs: collectFirestoreSpecs(raw)
@@ -657,6 +779,65 @@ function collectFirestoreSpecs(
     }
   }
   return specs;
+}
+
+function isThumbnailUrl(url: string): boolean {
+  return /(?:^|[-_/])thumb(?:[-_.]|$)/i.test(url);
+}
+
+function findThumbnailForOriginal(
+  originalUrl: string,
+  imageUrls: string[],
+  thumbnails: string[]
+): string | null {
+  const originalIndex = imageUrls.indexOf(originalUrl);
+  const nextThumbnail = imageUrls
+    .slice(originalIndex + 1)
+    .find((candidate) => isThumbnailUrl(candidate));
+  if (nextThumbnail) {
+    return nextThumbnail;
+  }
+  const parsed = splitImageUrl(originalUrl);
+  return (
+    thumbnails.find((candidate) => {
+      const thumb = splitImageUrl(candidate);
+      return (
+        thumb.directory === parsed.directory &&
+        (thumb.basename === `${parsed.basename}-thumb` ||
+          thumb.basename.startsWith('thumb_') ||
+          thumb.basename.includes(parsed.basename))
+      );
+    }) ?? null
+  );
+}
+
+function splitImageUrl(url: string): { directory: string; basename: string } {
+  const key = storageKeyFromPublicUrl(url);
+  const slashIndex = key.lastIndexOf('/');
+  const directory = slashIndex === -1 ? '' : key.slice(0, slashIndex);
+  const filename = slashIndex === -1 ? key : key.slice(slashIndex + 1);
+  return {
+    directory,
+    basename: filename.replace(/\.[^.]+$/, '')
+  };
+}
+
+function storageKeyFromPublicUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+    return path.startsWith('images/') ? path.slice('images/'.length) : path;
+  } catch {
+    return url.replace(/^\/+/, '').replace(/^images\//, '');
+  }
+}
+
+function requireReturnedId(result: pg.QueryResult<{ id: string }>, resource: string): string {
+  const id = result.rows[0]?.id;
+  if (!id) {
+    throw new Error(`Imported ${resource} upsert did not return an id`);
+  }
+  return id;
 }
 
 function base64Url(value: string | Buffer): string {

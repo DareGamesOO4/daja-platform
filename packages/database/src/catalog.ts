@@ -162,14 +162,46 @@ export class CatalogRepository {
   async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
     const result = await this.client.query(
       `SELECT p.*, b.name AS brand_name, c.name AS category_name,
-              COALESCE(jsonb_agg(to_jsonb(v) ORDER BY v.current_price_amount) FILTER (WHERE v.id IS NOT NULL), '[]'::jsonb) AS variants
+              COALESCE(variants.items, '[]'::jsonb) AS variants,
+              COALESCE(media.items, '[]'::jsonb) AS images,
+              media.primary_image_url AS "primaryImageUrl",
+              media.thumbnail_url AS "thumbnailUrl"
        FROM products p
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
-       LEFT JOIN product_variants v ON v.product_id = p.id AND v.organization_id = p.organization_id
-         AND v.deleted_at IS NULL AND v.active AND v.published
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(to_jsonb(v) ORDER BY v.current_price_amount) AS items
+         FROM product_variants v
+         WHERE v.product_id = p.id AND v.organization_id = p.organization_id
+           AND v.deleted_at IS NULL AND v.active AND v.published
+       ) variants ON true
+       LEFT JOIN LATERAL (
+         SELECT
+           jsonb_agg(
+             jsonb_build_object(
+               'url', ma.public_url,
+               'thumb', thumb.public_url,
+               'role', pm.role,
+               'position', pm.position,
+               'isPrimary', pm.is_primary
+             )
+             ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
+           ) FILTER (WHERE ma.id IS NOT NULL) AS items,
+           (array_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS primary_image_url,
+           (array_agg(thumb.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
+         FROM product_media pm
+         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         LEFT JOIN LATERAL (
+           SELECT md.public_url
+           FROM media_derivatives md
+           WHERE md.media_asset_id = pm.media_asset_id
+           ORDER BY md.width ASC
+           LIMIT 1
+         ) thumb ON true
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+       ) media ON true
        WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL AND p.active AND p.published
-       GROUP BY p.id, b.name, c.name`,
+       LIMIT 1`,
       [ctx.organizationId, slug]
     );
     return result.rows[0] ?? null;

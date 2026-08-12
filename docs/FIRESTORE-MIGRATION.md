@@ -56,3 +56,23 @@ Result:
 - rows with multiple images: 20
 - distinct brands: 4
 - distinct categories: 7
+
+## Neon Staging Import 2026-08-12
+
+`products` was imported into Neon staging with `dryRun=false`.
+
+Result:
+
+- imported rows: 20
+- products: 20
+- variants: 20
+- brands: 4
+- categories: 7
+- media assets: 49
+- media derivatives: 49
+- product media links: 49
+- public products: 20
+
+The import preserves Firestore slugs, product brand/category mapping, image URLs, thumbnail URLs, and `specs` values where present.
+
+Inventory quantities were not inferred from Firestore product documents; catalog API currently returns `availableQuantity: 0` until the inventory source is connected.
