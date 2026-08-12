@@ -31,6 +31,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       | 'R2_BUCKET'
       | 'R2_ACCESS_KEY_ID'
       | 'R2_SECRET_ACCESS_KEY'
+      | 'R2_ENDPOINT'
       | 'MEDIA_PUBLIC_BASE_URL'
     >
   ) {
@@ -45,7 +46,8 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
     this.bucketName = config.R2_BUCKET;
     this.client = new S3Client({
       region: 'auto',
-      endpoint: `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      forcePathStyle: Boolean(config.R2_ENDPOINT),
       credentials: {
         accessKeyId: config.R2_ACCESS_KEY_ID,
         secretAccessKey: config.R2_SECRET_ACCESS_KEY

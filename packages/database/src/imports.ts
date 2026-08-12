@@ -1,9 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
 import type pg from 'pg';
+import { createSign } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
-import { CatalogRepository } from './catalog.js';
 
 export interface NormalizedImportRow {
   sourceId: string;
@@ -93,7 +93,7 @@ export class ImportRepository {
     const rows = await this.client.query(
       `SELECT id, normalized_payload
        FROM import_rows
-       WHERE organization_id = $1 AND import_job_id = $2 AND status = 'valid'
+       WHERE organization_id = $1 AND import_job_id = $2 AND status IN ('valid', 'imported')
        ORDER BY row_number`,
       [ctx.organizationId, jobId]
     );
@@ -104,25 +104,11 @@ export class ImportRepository {
       );
       return { jobId, dryRun: true, wouldImportRows: rows.rowCount };
     }
-    const catalog = new CatalogRepository(this.client);
     let imported = 0;
     for (const row of rows.rows as Array<{ id: string; normalized_payload: NormalizedImportRow }>) {
       const payload = row.normalized_payload;
-      const product = await catalog.createProduct(ctx, {
-        name: payload.name,
-        slug: slugify(`${payload.sourceId}-${payload.name}`),
-        description: payload.description ?? null,
-        externalId: payload.sourceId,
-        published: false
-      });
-      const variant = await catalog.createVariant(ctx, product.id, {
-        sku: payload.sourceId,
-        currentPriceAmount: payload.priceMinor,
-        currency: 'RSD',
-        gender: payload.gender ?? null,
-        attributes: payload.specs,
-        published: false
-      });
+      const product = await this.upsertImportedProduct(ctx, payload, jobRow.source_type);
+      const variant = await this.upsertImportedVariant(ctx, product.id, payload);
       await this.client.query(
         `UPDATE import_rows
          SET status = 'imported', target_product_id = $3, target_variant_id = $4
@@ -140,14 +126,127 @@ export class ImportRepository {
     return { jobId, dryRun: false, importedRows: imported };
   }
 
+  private async upsertImportedProduct(
+    ctx: RequestContext,
+    payload: NormalizedImportRow,
+    sourceType: string
+  ) {
+    const slug = slugify(`${payload.sourceId}-${payload.name}`);
+    const conflictColumn = sourceType === 'firestore' ? 'legacy_firestore_id' : 'external_id';
+    const legacyFirestoreId = sourceType === 'firestore' ? payload.sourceId : null;
+    const externalId = sourceType === 'firestore' ? null : payload.sourceId;
+    const result = await this.client.query<{ id: string; slug: string }>(
+      `INSERT INTO products (organization_id, name, slug, description, legacy_firestore_id, external_id, published)
+       VALUES ($1, $2, $3, $4, $5, $6, false)
+       ON CONFLICT (organization_id, ${conflictColumn}) WHERE ${conflictColumn} IS NOT NULL AND deleted_at IS NULL
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         version = products.version + 1,
+         updated_at = now()
+       RETURNING id, slug`,
+      [
+        ctx.organizationId,
+        payload.name,
+        slug,
+        payload.description ?? null,
+        legacyFirestoreId,
+        externalId
+      ]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error('Imported product upsert did not return a row');
+    }
+    return row;
+  }
+
+  private async upsertImportedVariant(
+    ctx: RequestContext,
+    productId: string,
+    payload: NormalizedImportRow
+  ) {
+    const existing = await this.client.query<{ id: string; current_price_amount: number }>(
+      `SELECT id, current_price_amount
+       FROM product_variants
+       WHERE organization_id = $1 AND normalized_sku = upper($2) AND deleted_at IS NULL
+       FOR UPDATE`,
+      [ctx.organizationId, payload.sourceId]
+    );
+    const existingRow = existing.rows[0];
+    const result = await this.client.query<{ id: string }>(
+      `INSERT INTO product_variants (organization_id, product_id, sku, gender, current_price_amount, currency, attributes, published)
+       VALUES ($1, $2, $3, $4, $5, 'RSD', $6::jsonb, false)
+       ON CONFLICT (organization_id, normalized_sku) WHERE deleted_at IS NULL
+       DO UPDATE SET
+         product_id = EXCLUDED.product_id,
+         gender = EXCLUDED.gender,
+         current_price_amount = EXCLUDED.current_price_amount,
+         attributes = EXCLUDED.attributes,
+         version = product_variants.version + 1,
+         updated_at = now()
+       RETURNING id`,
+      [
+        ctx.organizationId,
+        productId,
+        payload.sourceId,
+        payload.gender ?? null,
+        payload.priceMinor,
+        JSON.stringify(payload.specs)
+      ]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error('Imported variant upsert did not return a row');
+    }
+    if (!existingRow || existingRow.current_price_amount !== payload.priceMinor) {
+      if (existingRow) {
+        await this.client.query(
+          `UPDATE variant_prices
+           SET valid_until = now()
+           WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sell' AND valid_until IS NULL`,
+          [ctx.organizationId, row.id]
+        );
+      }
+      await this.client.query(
+        `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
+         VALUES ($1, $2, $3, 'RSD', 'sell', $4)`,
+        [ctx.organizationId, row.id, payload.priceMinor, ctx.userId]
+      );
+    }
+    return row;
+  }
+
   async reconciliation(ctx: Pick<RequestContext, 'organizationId'>, jobId: string) {
     const result = await this.client.query(
       `SELECT
          COUNT(*)::integer AS "sourceProductCount",
+         COUNT(target_product_id)::integer AS "targetProductCount",
          COUNT(*) FILTER (WHERE status = 'imported')::integer AS "productsImported",
          COUNT(*) FILTER (WHERE status = 'skipped')::integer AS "productsSkipped",
+         COUNT(*) FILTER (WHERE errors ? 'Invalid Cena' OR errors ? 'Invalid price')::integer AS "invalidPrices",
+         COUNT(*) FILTER (WHERE warnings ? 'Missing image')::integer AS "missingImages",
          COUNT(*) FILTER (WHERE jsonb_array_length(errors) > 0)::integer AS "failedRows",
-         jsonb_agg(DISTINCT raw_payload->>'Slika') FILTER (WHERE raw_payload ? 'Slika') AS "imageUrlDomains"
+         COALESCE(jsonb_agg(DISTINCT source_id) FILTER (
+           WHERE source_id IN (
+             SELECT source_id
+             FROM import_rows
+             WHERE organization_id = $1 AND import_job_id = $2 AND source_id IS NOT NULL
+             GROUP BY source_id
+             HAVING count(*) > 1
+           )
+         ), '[]'::jsonb) AS "duplicateLegacyIds",
+         COALESCE(jsonb_agg(DISTINCT normalized_payload->>'sourceId') FILTER (
+           WHERE normalized_payload->>'sourceId' IN (
+             SELECT normalized_payload->>'sourceId'
+             FROM import_rows
+             WHERE organization_id = $1 AND import_job_id = $2 AND normalized_payload ? 'sourceId'
+             GROUP BY normalized_payload->>'sourceId'
+             HAVING count(*) > 1
+           )
+         ), '[]'::jsonb) AS "duplicateSkus",
+         COALESCE(jsonb_agg(DISTINCT raw_payload->>'Slika') FILTER (WHERE raw_payload ? 'Slika'), '[]'::jsonb) AS "imageUrlDomains",
+         COUNT(*) FILTER (WHERE NOT (normalized_payload ? 'brand') OR NOT (normalized_payload ? 'category'))::integer AS "brandCategoryMappingIssues"
        FROM import_rows
        WHERE organization_id = $1 AND import_job_id = $2`,
       [ctx.organizationId, jobId]
@@ -157,7 +256,16 @@ export class ImportRepository {
 
   async createFirestoreJob(
     ctx: RequestContext,
-    input: { sourceName: string; dryRun: boolean; checkpoint?: Record<string, unknown> | undefined }
+    input: {
+      sourceName: string;
+      dryRun: boolean;
+      checkpoint?: Record<string, unknown> | undefined;
+      projectId?: string | undefined;
+      serviceAccountJson?: string | undefined;
+      collection?: string | undefined;
+      documentId?: string | undefined;
+      batchSize?: number | undefined;
+    }
   ) {
     const result = await this.client.query<{ id: string }>(
       `INSERT INTO import_jobs (organization_id, source_type, status, dry_run, source_name, checkpoint, created_by, summary)
@@ -170,7 +278,9 @@ export class ImportRepository {
         JSON.stringify(input.checkpoint ?? {}),
         ctx.userId,
         JSON.stringify({
-          note: 'Firestore tool is read-only; execution requires service-account credentials supplied at runtime.'
+          note: input.serviceAccountJson
+            ? 'Firestore read-only import initialized.'
+            : 'Firestore tool is read-only; execution requires service-account credentials supplied at runtime.'
         })
       ]
     );
@@ -178,7 +288,53 @@ export class ImportRepository {
     if (!row) {
       throw new Error('Firestore import job insert did not return an id');
     }
-    return { jobId: row.id, dryRun: input.dryRun };
+    if (!input.serviceAccountJson || !input.projectId) {
+      return { jobId: row.id, dryRun: input.dryRun, credentialsRequired: true };
+    }
+    const documents = await readFirestoreProducts(input);
+    let valid = 0;
+    let invalid = 0;
+    for (const [index, document] of documents.entries()) {
+      const normalized = normalizeFirestoreDocument(document);
+      if (normalized.errors.length === 0) {
+        valid += 1;
+      } else {
+        invalid += 1;
+      }
+      await this.client.query(
+        `INSERT INTO import_rows (organization_id, import_job_id, row_number, source_id, status, raw_payload, normalized_payload, warnings, errors)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
+        [
+          ctx.organizationId,
+          row.id,
+          index + 1,
+          document.id,
+          normalized.errors.length === 0 ? 'valid' : 'invalid',
+          JSON.stringify(document.raw),
+          JSON.stringify(normalized.value ?? {}),
+          JSON.stringify(normalized.warnings),
+          JSON.stringify(normalized.errors)
+        ]
+      );
+    }
+    await this.client.query(
+      `UPDATE import_jobs
+       SET status = 'validated', summary = $3::jsonb, checkpoint = $4::jsonb, updated_at = now()
+       WHERE organization_id = $1 AND id = $2`,
+      [
+        ctx.organizationId,
+        row.id,
+        JSON.stringify({ sourceRows: documents.length, validRows: valid, invalidRows: invalid }),
+        JSON.stringify({ nextPageToken: documents.at(-1)?.nextPageToken ?? null })
+      ]
+    );
+    return {
+      jobId: row.id,
+      dryRun: input.dryRun,
+      sourceRows: documents.length,
+      validRows: valid,
+      invalidRows: invalid
+    };
   }
 }
 
@@ -307,6 +463,174 @@ function normalizeWebshopRow(raw: Record<string, unknown>): {
     errors,
     value
   };
+}
+
+interface FirestoreDocument {
+  id: string;
+  raw: Record<string, unknown>;
+  nextPageToken?: string | undefined;
+}
+
+async function readFirestoreProducts(input: {
+  projectId?: string | undefined;
+  serviceAccountJson?: string | undefined;
+  collection?: string | undefined;
+  documentId?: string | undefined;
+  batchSize?: number | undefined;
+}): Promise<FirestoreDocument[]> {
+  if (!input.projectId || !input.serviceAccountJson) {
+    throw new ValidationFailedError('Firestore credentials are required');
+  }
+  const token = await createGoogleAccessToken(input.serviceAccountJson);
+  const collection = input.collection ?? 'products';
+  const batchSize = Math.min(Math.max(input.batchSize ?? 100, 1), 500);
+  const base = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(input.projectId)}/databases/(default)/documents/${encodeURIComponent(collection)}`;
+  const url = input.documentId
+    ? `${base}/${encodeURIComponent(input.documentId)}`
+    : `${base}?pageSize=${batchSize}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!response.ok) {
+    throw new ValidationFailedError('Firestore read failed', {
+      status: response.status,
+      body: await response.text()
+    });
+  }
+  const payload = (await response.json()) as {
+    name?: string;
+    fields?: Record<string, FirestoreValue>;
+    documents?: Array<{ name: string; fields?: Record<string, FirestoreValue> }>;
+    nextPageToken?: string;
+  };
+  const documents =
+    payload.documents ??
+    (payload.name ? [payload as { name: string; fields?: Record<string, FirestoreValue> }] : []);
+  return documents.map((document) => ({
+    id: document.name.split('/').at(-1) ?? document.name,
+    raw: decodeFirestoreFields(document.fields ?? {}),
+    ...(payload.nextPageToken ? { nextPageToken: payload.nextPageToken } : {})
+  }));
+}
+
+async function createGoogleAccessToken(serviceAccountJson: string): Promise<string> {
+  const serviceAccount = JSON.parse(serviceAccountJson) as {
+    client_email?: string;
+    private_key?: string;
+    token_uri?: string;
+  };
+  if (!serviceAccount.client_email || !serviceAccount.private_key) {
+    throw new ValidationFailedError('Invalid Firestore service account JSON');
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claim = base64Url(
+    JSON.stringify({
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/datastore.readonly',
+      aud: serviceAccount.token_uri ?? 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600
+    })
+  );
+  const unsigned = `${header}.${claim}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(serviceAccount.private_key);
+  const assertion = `${unsigned}.${base64Url(signature)}`;
+  const response = await fetch(serviceAccount.token_uri ?? 'https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion
+    })
+  });
+  if (!response.ok) {
+    throw new ValidationFailedError('Firestore auth failed', {
+      status: response.status,
+      body: await response.text()
+    });
+  }
+  const token = (await response.json()) as { access_token?: string };
+  if (!token.access_token) {
+    throw new ValidationFailedError('Firestore auth did not return an access token');
+  }
+  return token.access_token;
+}
+
+function normalizeFirestoreDocument(document: FirestoreDocument): {
+  value?: NormalizedImportRow;
+  warnings: string[];
+  errors: string[];
+} {
+  const raw = document.raw;
+  const sourceId = document.id;
+  const name = stringField(raw.Naziv) || stringField(raw.name) || stringField(raw.title);
+  const price = Number(
+    (stringField(raw.Cena) || stringField(raw.price)).replace(/[^\d.,-]/g, '').replace(',', '.')
+  );
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  if (!sourceId) errors.push('Missing Firestore document id');
+  if (!name) errors.push('Missing product name');
+  if (!Number.isFinite(price) || price < 0) errors.push('Invalid price');
+  const images = collectFirestoreImages(raw);
+  if (images.length === 0) warnings.push('Missing image');
+  if (errors.length > 0) {
+    return { warnings, errors };
+  }
+  const value: NormalizedImportRow = {
+    sourceId,
+    name,
+    priceMinor: Math.round(price * 100),
+    imageUrls: images,
+    specs: {}
+  };
+  const brand = stringField(raw.Brend) || stringField(raw.brand);
+  const category = stringField(raw.Kategorija) || stringField(raw.category);
+  const gender = stringField(raw.Pol) || stringField(raw.gender);
+  const description = stringField(raw.Opis) || stringField(raw.description);
+  if (brand) value.brand = brand;
+  if (category) value.category = category;
+  if (gender) value.gender = gender;
+  if (description) value.description = description;
+  return { warnings, errors, value };
+}
+
+type FirestoreValue = {
+  stringValue?: string;
+  integerValue?: string;
+  doubleValue?: number;
+  booleanValue?: boolean;
+  arrayValue?: { values?: FirestoreValue[] };
+  mapValue?: { fields?: Record<string, FirestoreValue> };
+  nullValue?: null;
+};
+
+function decodeFirestoreFields(fields: Record<string, FirestoreValue>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [key, decodeFirestoreValue(value)])
+  );
+}
+
+function decodeFirestoreValue(value: FirestoreValue): unknown {
+  if ('stringValue' in value) return value.stringValue;
+  if ('integerValue' in value) return Number(value.integerValue);
+  if ('doubleValue' in value) return value.doubleValue;
+  if ('booleanValue' in value) return value.booleanValue;
+  if ('arrayValue' in value) return value.arrayValue?.values?.map(decodeFirestoreValue) ?? [];
+  if ('mapValue' in value) return decodeFirestoreFields(value.mapValue?.fields ?? {});
+  return null;
+}
+
+function collectFirestoreImages(raw: Record<string, unknown>): string[] {
+  const candidates = [raw.images, raw.mainImageUrl, raw.thumbnailUrl, raw.image];
+  return candidates
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function base64Url(value: string | Buffer): string {
+  return Buffer.from(value).toString('base64url');
 }
 
 function stringField(value: unknown): string {

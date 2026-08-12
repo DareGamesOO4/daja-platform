@@ -27,6 +27,7 @@
     "db:migrate": "tsx packages/database/src/cli.ts migrate",
     "db:status": "tsx packages/database/src/cli.ts status",
     "db:seed:dev": "tsx scripts/seed-dev.ts",
+    "plan2:perf": "tsx scripts/plan2-performance-fixture.ts",
     "security:deps": "npm audit --audit-level=high"
   },
   "dependencies": {

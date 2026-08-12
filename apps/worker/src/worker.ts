@@ -140,7 +140,8 @@ async function processMediaJob(
   }
   const client = new S3Client({
     region: 'auto',
-    endpoint: `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    forcePathStyle: Boolean(config.R2_ENDPOINT),
     credentials: {
       accessKeyId: config.R2_ACCESS_KEY_ID,
       secretAccessKey: config.R2_SECRET_ACCESS_KEY

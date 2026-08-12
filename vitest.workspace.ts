@@ -13,6 +13,8 @@ export default defineWorkspace([
         REDIS_URL: 'redis://localhost:6379',
         API_PUBLIC_BASE_URL: 'http://localhost:3000',
         CORS_ALLOWED_ORIGINS: 'http://localhost:3000',
+        PUBLIC_ORGANIZATION_ID: '00000000-0000-4000-8000-000000000101',
+        R2_ENDPOINT: 'http://localhost:9000',
         LOG_LEVEL: 'silent'
       }
     }
@@ -30,6 +32,8 @@ export default defineWorkspace([
         REDIS_URL: 'redis://localhost:6379',
         API_PUBLIC_BASE_URL: 'http://localhost:3000',
         CORS_ALLOWED_ORIGINS: 'http://localhost:3000',
+        PUBLIC_ORGANIZATION_ID: '00000000-0000-4000-8000-000000000101',
+        R2_ENDPOINT: 'http://localhost:9000',
         LOG_LEVEL: 'silent'
       },
       testTimeout: 30000,

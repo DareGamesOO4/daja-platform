@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
 import {
   Body,
   Controller,
@@ -11,6 +11,7 @@ import {
   Query,
   Req
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
@@ -23,6 +24,7 @@ import {
   MediaRepository,
   OutboxRepository,
   R2MediaStorageAdapter,
+  type RedisConnection,
   RfidRepository,
   TransactionManager,
   type Database
@@ -39,8 +41,7 @@ import {
   uuidSchema
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
-import { resolveRequestContext } from './runtime/request-context.js';
-import type { Redis } from 'ioredis';
+import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 
 const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -76,11 +77,15 @@ const variantPatchSchema = variantCreateSchema.partial().extend({
 
 @Controller('public/catalog')
 export class PublicCatalogController {
-  constructor(@Inject(DATABASE) private readonly database: Database) {}
+  constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(DATABASE) private readonly database: Database,
+    @Inject(REDIS) private readonly redis: RedisConnection
+  ) {}
 
   @Get('products')
   async products(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
-    const ctx = resolveRequestContext(request);
+    const ctx = this.publicContext(request);
     return new CatalogRepository(this.database.pool).listPublicProducts(ctx, {
       brand: query.brand,
       category: query.category,
@@ -96,21 +101,36 @@ export class PublicCatalogController {
 
   @Get('products/:slug')
   async productBySlug(@Req() request: Request, @Param('slug') slug: string) {
-    const ctx = resolveRequestContext(request);
-    return new CatalogRepository(this.database.pool).getPublicProductBySlug(
+    const ctx = this.publicContext(request);
+    const normalizedSlug = parseWithSchema(slugSchema, slug);
+    const cacheKey = `catalog:slug:${ctx.organizationId}:${normalizedSlug}`;
+    const cached = await this.redis.client.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as unknown;
+    }
+    const product = await new CatalogRepository(this.database.pool).getPublicProductBySlug(
       ctx,
-      parseWithSchema(slugSchema, slug)
+      normalizedSlug
     );
+    await this.redis.client.set(cacheKey, JSON.stringify(product), 'EX', 120);
+    return product;
   }
 
   @Get('brands')
   async brands(@Req() request: Request) {
-    return new CatalogRepository(this.database.pool).listBrands(resolveRequestContext(request));
+    return new CatalogRepository(this.database.pool).listBrands(this.publicContext(request));
   }
 
   @Get('categories')
   async categories(@Req() request: Request) {
-    return new CatalogRepository(this.database.pool).listCategories(resolveRequestContext(request));
+    return new CatalogRepository(this.database.pool).listCategories(this.publicContext(request));
+  }
+
+  private publicContext(request: Request) {
+    if (!this.config.PUBLIC_ORGANIZATION_ID) {
+      return resolveRequestContext(request);
+    }
+    return resolvePublicRequestContext(request, this.config.PUBLIC_ORGANIZATION_ID);
   }
 }
 
@@ -118,7 +138,8 @@ export class PublicCatalogController {
 export class StaffCatalogController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
 
   @Post('products')
@@ -126,24 +147,28 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(productCreateSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const product = await new CatalogRepository(client).createProduct(ctx, input);
-      await new AuditRepository(client).append({
-        ctx,
-        aggregateType: 'product',
-        aggregateId: product.id,
-        operation: 'create',
-        afterPayload: product
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'ProductCreated',
-        aggregateType: 'product',
-        aggregateId: product.id,
-        payload: { productId: product.id, slug: product.slug }
-      });
-      return product;
-    });
+    const product = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const product = await new CatalogRepository(client).createProduct(ctx, input);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'product',
+          aggregateId: product.id,
+          operation: 'create',
+          afterPayload: product
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'ProductCreated',
+          aggregateType: 'product',
+          aggregateId: product.id,
+          payload: { productId: product.id, slug: product.slug }
+        });
+        return product;
+      }
+    );
+    await this.invalidateCatalog(ctx.organizationId, product.slug);
+    return product;
   }
 
   @Get('products/:id')
@@ -162,27 +187,31 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(productPatchSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const repository = new CatalogRepository(client);
-      const before = await repository.getProduct(ctx, productId);
-      const after = await repository.patchProduct(ctx, productId, input);
-      await new AuditRepository(client).append({
-        ctx,
-        aggregateType: 'product',
-        aggregateId: productId,
-        operation: 'update',
-        beforePayload: before,
-        afterPayload: after
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'ProductUpdated',
-        aggregateType: 'product',
-        aggregateId: productId,
-        payload: { productId, slug: after.slug, published: after.published }
-      });
-      return after;
-    });
+    const patched = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const repository = new CatalogRepository(client);
+        const before = await repository.getProduct(ctx, productId);
+        const after = await repository.patchProduct(ctx, productId, input);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'product',
+          aggregateId: productId,
+          operation: 'update',
+          beforePayload: before,
+          afterPayload: after
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'ProductUpdated',
+          aggregateType: 'product',
+          aggregateId: productId,
+          payload: { productId, slug: after.slug, published: after.published }
+        });
+        return { beforeSlug: before.slug, after };
+      }
+    );
+    await this.invalidateCatalog(ctx.organizationId, patched.beforeSlug, patched.after.slug);
+    return patched.after;
   }
 
   @Delete('products/:id')
@@ -190,26 +219,30 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const repository = new CatalogRepository(client);
-      const before = await repository.getProduct(ctx, productId);
-      await repository.softDeleteProduct(ctx, productId);
-      await new AuditRepository(client).append({
-        ctx,
-        aggregateType: 'product',
-        aggregateId: productId,
-        operation: 'soft_delete',
-        beforePayload: before
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'ProductUpdated',
-        aggregateType: 'product',
-        aggregateId: productId,
-        payload: { productId, deleted: true }
-      });
-      return { deleted: true };
-    });
+    const deleted = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const repository = new CatalogRepository(client);
+        const before = await repository.getProduct(ctx, productId);
+        await repository.softDeleteProduct(ctx, productId);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'product',
+          aggregateId: productId,
+          operation: 'soft_delete',
+          beforePayload: before
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'ProductUpdated',
+          aggregateType: 'product',
+          aggregateId: productId,
+          payload: { productId, deleted: true }
+        });
+        return { deleted: true, slug: before.slug };
+      }
+    );
+    await this.invalidateCatalog(ctx.organizationId, deleted.slug);
+    return { deleted: true };
   }
 
   @Post('products/:id/variants')
@@ -218,24 +251,30 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(variantCreateSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const variant = await new CatalogRepository(client).createVariant(ctx, productId, input);
-      await new AuditRepository(client).append({
-        ctx,
-        aggregateType: 'variant',
-        aggregateId: variant.id,
-        operation: 'create',
-        afterPayload: variant
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'ProductUpdated',
-        aggregateType: 'product',
-        aggregateId: productId,
-        payload: { productId, variantId: variant.id }
-      });
-      return variant;
-    });
+    const created = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const repository = new CatalogRepository(client);
+        const product = await repository.getProduct(ctx, productId);
+        const variant = await repository.createVariant(ctx, productId, input);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'variant',
+          aggregateId: variant.id,
+          operation: 'create',
+          afterPayload: variant
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'ProductUpdated',
+          aggregateType: 'product',
+          aggregateId: productId,
+          payload: { productId, variantId: variant.id }
+        });
+        return { productSlug: product.slug, variant };
+      }
+    );
+    await this.invalidateCatalog(ctx.organizationId, created.productSlug);
+    return created.variant;
   }
 
   @Patch('variants/:id')
@@ -244,29 +283,44 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.write');
     const variantId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(variantPatchSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const { before, after, priceChanged } = await new CatalogRepository(client).patchVariant(
-        ctx,
-        variantId,
-        input
-      );
-      await new AuditRepository(client).append({
-        ctx,
-        aggregateType: 'variant',
-        aggregateId: variantId,
-        operation: priceChanged ? 'price_change' : 'update',
-        beforePayload: before,
-        afterPayload: after
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: priceChanged ? 'PriceChanged' : 'ProductUpdated',
-        aggregateType: 'variant',
-        aggregateId: variantId,
-        payload: { variantId, productId: after.productId, price: after.currentPriceAmount }
-      });
-      return after;
-    });
+    const patched = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const repository = new CatalogRepository(client);
+        const { before, after, priceChanged } = await repository.patchVariant(
+          ctx,
+          variantId,
+          input
+        );
+        const product = await repository.getProduct(ctx, after.productId);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'variant',
+          aggregateId: variantId,
+          operation: priceChanged ? 'price_change' : 'update',
+          beforePayload: before,
+          afterPayload: after
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: priceChanged ? 'PriceChanged' : 'ProductUpdated',
+          aggregateType: 'variant',
+          aggregateId: variantId,
+          payload: { variantId, productId: after.productId, price: after.currentPriceAmount }
+        });
+        return { productSlug: product.slug, after };
+      }
+    );
+    await this.invalidateCatalog(ctx.organizationId, patched.productSlug);
+    return patched.after;
+  }
+
+  private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {
+    const keys = slugs
+      .filter((slug): slug is string => Boolean(slug))
+      .map((slug) => `catalog:slug:${organizationId}:${slug}`);
+    if (keys.length > 0) {
+      await this.redis.client.del(...keys);
+    }
   }
 }
 
@@ -276,7 +330,7 @@ export class MediaController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(REDIS) private readonly redis: Redis
+    @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
 
   @Post('uploads')
@@ -307,41 +361,60 @@ export class MediaController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'media.upload');
     const id = parseWithSchema(uuidSchema, mediaId);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const result = await new MediaRepository(client).completeUpload(
-        ctx,
-        id,
-        new R2MediaStorageAdapter(this.config)
-      );
-      await new Queue('media-processing', { connection: this.redis }).add('process-media', {
+    const result = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const result = await new MediaRepository(client).completeUpload(
+          ctx,
+          id,
+          new R2MediaStorageAdapter(this.config)
+        );
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'MediaUploaded',
+          aggregateType: 'media_asset',
+          aggregateId: id,
+          payload: { mediaId: id }
+        });
+        return result;
+      }
+    );
+    const queue = new Queue('media-processing', { connection: this.redis.client });
+    try {
+      await queue.add('process-media', {
         organizationId: ctx.organizationId,
         mediaId: id
       });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'MediaUploaded',
-        aggregateType: 'media_asset',
-        aggregateId: id,
-        payload: { mediaId: id }
-      });
-      return result;
-    });
+    } finally {
+      await queue.close();
+    }
+    return result;
   }
 }
 
 @Controller()
 export class RfidController {
   constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
 
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Get('public/rfid/resolve/:epc')
   async resolve(@Req() request: Request, @Param('epc') epc: string) {
-    return new RfidRepository(this.database.pool).resolvePublic(
-      resolveRequestContext(request),
-      epc
-    );
+    const ctx = this.config.PUBLIC_ORGANIZATION_ID
+      ? resolvePublicRequestContext(request, this.config.PUBLIC_ORGANIZATION_ID)
+      : resolveRequestContext(request);
+    const normalizedEpc = epc.replace(/[\s:._-]/g, '').toUpperCase();
+    const cacheKey = `rfid:resolve:${ctx.organizationId}:${normalizedEpc}`;
+    const cached = await this.redis.client.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as unknown;
+    }
+    const resolved = await new RfidRepository(this.database.pool).resolvePublic(ctx, epc);
+    await this.redis.client.set(cacheKey, JSON.stringify(resolved), 'EX', 60);
+    return resolved;
   }
 
   @Get('rfid/tags/:id')
@@ -372,7 +445,28 @@ export class RfidController {
       }),
       body
     );
-    return new RfidRepository(this.database.pool).createTag(ctx, input);
+    const tag = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const tag = await new RfidRepository(client).createTag(ctx, input);
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          operation: 'create',
+          afterPayload: tag
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'RfidTagStatusChanged',
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          payload: { tagId: tag.id, status: tag.status }
+        });
+        return tag;
+      }
+    );
+    await this.invalidateRfid(ctx.organizationId, tag.epc);
+    return tag;
   }
 
   @Post('rfid/tags/:id/assign')
@@ -387,20 +481,32 @@ export class RfidController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const tag = await new RfidRepository(client).assignTag(ctx, {
-        tagId: parseWithSchema(uuidSchema, id),
-        ...input
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'RfidTagAssigned',
-        aggregateType: 'rfid_tag',
-        aggregateId: tag.id,
-        payload: { tagId: tag.id, inventoryItemId: input.inventoryItemId }
-      });
-      return tag;
-    });
+    const tag = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const tag = await new RfidRepository(client).assignTag(ctx, {
+          tagId: parseWithSchema(uuidSchema, id),
+          ...input
+        });
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          operation: 'assign',
+          afterPayload: tag,
+          reason: input.reason
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'RfidTagAssigned',
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          payload: { tagId: tag.id, inventoryItemId: input.inventoryItemId }
+        });
+        return tag;
+      }
+    );
+    await this.invalidateRfid(ctx.organizationId, tag.epc);
+    return tag;
   }
 
   @Post('rfid/tags/:id/unassign')
@@ -414,20 +520,32 @@ export class RfidController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const tag = await new RfidRepository(client).unassignTag(ctx, {
-        tagId: parseWithSchema(uuidSchema, id),
-        ...input
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'RfidTagUnassigned',
-        aggregateType: 'rfid_tag',
-        aggregateId: tag.id,
-        payload: { tagId: tag.id }
-      });
-      return tag;
-    });
+    const tag = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const tag = await new RfidRepository(client).unassignTag(ctx, {
+          tagId: parseWithSchema(uuidSchema, id),
+          ...input
+        });
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          operation: 'unassign',
+          afterPayload: tag,
+          reason: input.reason
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'RfidTagUnassigned',
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          payload: { tagId: tag.id }
+        });
+        return tag;
+      }
+    );
+    await this.invalidateRfid(ctx.organizationId, tag.epc);
+    return tag;
   }
 
   @Patch('rfid/tags/:id/status')
@@ -442,20 +560,32 @@ export class RfidController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const tag = await new RfidRepository(client).updateStatus(ctx, {
-        tagId: parseWithSchema(uuidSchema, id),
-        ...input
-      });
-      await new OutboxRepository(client).append({
-        ctx,
-        eventType: 'RfidTagStatusChanged',
-        aggregateType: 'rfid_tag',
-        aggregateId: tag.id,
-        payload: { tagId: tag.id, status: input.status }
-      });
-      return tag;
-    });
+    const tag = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const tag = await new RfidRepository(client).updateStatus(ctx, {
+          tagId: parseWithSchema(uuidSchema, id),
+          ...input
+        });
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          operation: 'status_change',
+          afterPayload: tag,
+          ...(input.reason ? { reason: input.reason } : {})
+        });
+        await new OutboxRepository(client).append({
+          ctx,
+          eventType: 'RfidTagStatusChanged',
+          aggregateType: 'rfid_tag',
+          aggregateId: tag.id,
+          payload: { tagId: tag.id, status: input.status }
+        });
+        return tag;
+      }
+    );
+    await this.invalidateRfid(ctx.organizationId, tag.epc);
+    return tag;
   }
 
   @Get('rfid/tags/:id/events')
@@ -463,6 +593,10 @@ export class RfidController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'rfid.read');
     return new RfidRepository(this.database.pool).listEvents(ctx, parseWithSchema(uuidSchema, id));
+  }
+
+  private async invalidateRfid(organizationId: string, epc: string) {
+    await this.redis.client.del(`rfid:resolve:${organizationId}:${epc}`);
   }
 }
 
@@ -486,9 +620,28 @@ export class InventoryController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new InventoryRepository(client).createItem(ctx, input)
-    );
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const item = await new InventoryRepository(client).createItem(ctx, input);
+      await new AuditRepository(client).append({
+        ctx,
+        aggregateType: 'inventory_item',
+        aggregateId: item.id,
+        operation: 'create',
+        afterPayload: item
+      });
+      await new OutboxRepository(client).append({
+        ctx,
+        eventType: 'InventoryAdjusted',
+        aggregateType: 'inventory_item',
+        aggregateId: item.id,
+        payload: {
+          inventoryItemId: item.id,
+          variantId: item.variantId,
+          locationId: item.currentLocationId
+        }
+      });
+      return item;
+    });
   }
 
   @Post('adjustments')
@@ -507,9 +660,30 @@ export class InventoryController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new InventoryRepository(client).adjust(ctx, input)
-    );
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const balance = await new InventoryRepository(client).adjust(ctx, input);
+      await new AuditRepository(client).append({
+        ctx,
+        aggregateType: 'inventory_balance',
+        aggregateId: input.variantId,
+        operation: 'adjust',
+        afterPayload: balance,
+        reason: input.sourceType
+      });
+      await new OutboxRepository(client).append({
+        ctx,
+        eventType: 'InventoryAdjusted',
+        aggregateType: 'variant',
+        aggregateId: input.variantId,
+        payload: {
+          variantId: input.variantId,
+          locationId: input.locationId,
+          quantityDelta: input.quantityDelta,
+          quantity: balance.quantity
+        }
+      });
+      return balance;
+    });
   }
 
   @Post('items/:id/move')
@@ -520,12 +694,28 @@ export class InventoryController {
       z.object({ toLocationId: uuidSchema, reason: z.string().trim().min(1) }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new InventoryRepository(client).moveItem(ctx, {
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const moved = await new InventoryRepository(client).moveItem(ctx, {
         inventoryItemId: parseWithSchema(uuidSchema, id),
         ...input
-      })
-    );
+      });
+      await new AuditRepository(client).append({
+        ctx,
+        aggregateType: 'inventory_item',
+        aggregateId: moved.inventoryItemId,
+        operation: 'move',
+        afterPayload: moved,
+        reason: input.reason
+      });
+      await new OutboxRepository(client).append({
+        ctx,
+        eventType: 'InventoryMoved',
+        aggregateType: 'inventory_item',
+        aggregateId: moved.inventoryItemId,
+        payload: moved
+      });
+      return moved;
+    });
   }
 
   @Get('variants/:variantId/balances')
@@ -542,6 +732,7 @@ export class InventoryController {
 @Controller('imports')
 export class ImportsController {
   constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
@@ -594,10 +785,17 @@ export class ImportsController {
       z.object({
         sourceName: z.string().trim().min(1),
         dryRun: z.boolean().default(true),
-        checkpoint: z.record(z.string(), z.unknown()).optional()
+        checkpoint: z.record(z.string(), z.unknown()).optional(),
+        collection: z.string().trim().min(1).optional(),
+        documentId: z.string().trim().min(1).optional(),
+        batchSize: z.coerce.number().int().positive().max(500).optional()
       }),
       body
     );
-    return new ImportRepository(this.database.pool).createFirestoreJob(ctx, input);
+    return new ImportRepository(this.database.pool).createFirestoreJob(ctx, {
+      ...input,
+      serviceAccountJson: this.config.FIRESTORE_SERVICE_ACCOUNT_JSON || undefined,
+      projectId: this.config.FIRESTORE_PROJECT_ID || undefined
+    });
   }
 }

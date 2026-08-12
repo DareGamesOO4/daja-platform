@@ -23,6 +23,18 @@ export function resolveRequestContext(request: Request): RequestContext {
   };
 }
 
+export function resolvePublicRequestContext(
+  request: Request,
+  organizationId: string
+): Pick<RequestContext, 'requestId' | 'correlationId' | 'organizationId'> {
+  const requestId = header(request, 'x-request-id') ?? createRequestId();
+  return {
+    requestId,
+    correlationId: header(request, 'x-correlation-id') ?? requestId,
+    organizationId
+  };
+}
+
 function requiredHeader(request: Request, name: string): string {
   const value = header(request, name);
   if (!value) {

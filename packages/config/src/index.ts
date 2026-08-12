@@ -27,7 +27,11 @@ const envSchema = z.object({
   R2_BUCKET: optionalPreparedSecret,
   R2_ACCESS_KEY_ID: optionalPreparedSecret,
   R2_SECRET_ACCESS_KEY: optionalPreparedSecret,
-  MEDIA_PUBLIC_BASE_URL: optionalPreparedSecret
+  R2_ENDPOINT: optionalPreparedSecret,
+  MEDIA_PUBLIC_BASE_URL: optionalPreparedSecret,
+  PUBLIC_ORGANIZATION_ID: optionalPreparedSecret,
+  FIRESTORE_SERVICE_ACCOUNT_JSON: optionalPreparedSecret,
+  FIRESTORE_PROJECT_ID: optionalPreparedSecret
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
