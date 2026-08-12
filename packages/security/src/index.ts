@@ -1,4 +1,7 @@
 export const ERROR_CODES = {
+  authenticationRequired: 'AUTHENTICATION_REQUIRED',
+  invalidCredentials: 'INVALID_CREDENTIALS',
+  invalidToken: 'INVALID_TOKEN',
   resourceVersionConflict: 'RESOURCE_VERSION_CONFLICT',
   tenantAccessDenied: 'TENANT_ACCESS_DENIED',
   idempotencyConflict: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
@@ -34,6 +37,24 @@ export class TenantAccessDeniedError extends AppError {
       'The resource is not available in this organization',
       404
     );
+  }
+}
+
+export class AuthenticationRequiredError extends AppError {
+  constructor(message = 'Authentication is required') {
+    super(ERROR_CODES.authenticationRequired, message, 401);
+  }
+}
+
+export class InvalidCredentialsError extends AppError {
+  constructor() {
+    super(ERROR_CODES.invalidCredentials, 'Invalid credentials', 401);
+  }
+}
+
+export class InvalidTokenError extends AppError {
+  constructor(message = 'Invalid authentication token') {
+    super(ERROR_CODES.invalidToken, message, 401);
   }
 }
 
@@ -76,3 +97,5 @@ export function requirePermission(ctx: { permissions: string[] }, permission: st
     throw new PermissionDeniedError(permission);
   }
 }
+
+export * from './jwt.js';

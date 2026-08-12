@@ -1,9 +1,24 @@
 import type { Request } from 'express';
 import { createRequestId, type RequestContext } from '@daja/shared';
+import { AuthenticationRequiredError } from '@daja/security';
+import type { RequestWithAuthContext } from '../auth.controller.js';
 
 export function resolveRequestContext(request: Request): RequestContext {
   const requestId = header(request, 'x-request-id') ?? createRequestId();
   const correlationId = header(request, 'x-correlation-id') ?? requestId;
+  const authenticated = (request as RequestWithAuthContext).authContext;
+  if (authenticated) {
+    return {
+      ...authenticated,
+      requestId,
+      correlationId
+    };
+  }
+
+  if (process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
+    throw new AuthenticationRequiredError();
+  }
+
   const organizationId = requiredHeader(request, 'x-organization-id');
   const userId = requiredHeader(request, 'x-user-id');
   const roles = splitHeader(header(request, 'x-roles'));

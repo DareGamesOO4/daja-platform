@@ -23,6 +23,15 @@ const envSchema = z.object({
   DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
   DB_SLOW_QUERY_MS: z.coerce.number().int().positive().default(250),
+  JWT_ACCESS_SECRET: optionalPreparedSecret,
+  JWT_REFRESH_SECRET: optionalPreparedSecret,
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
+  TRUSTED_IDENTITY_HEADERS: z
+    .enum(['true', 'false'])
+    .optional()
+    .default('false')
+    .transform((value) => value === 'true'),
   R2_ACCOUNT_ID: optionalPreparedSecret,
   R2_BUCKET: optionalPreparedSecret,
   R2_ACCESS_KEY_ID: optionalPreparedSecret,

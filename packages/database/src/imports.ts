@@ -527,7 +527,7 @@ async function createGoogleAccessToken(serviceAccountJson: string): Promise<stri
   const claim = base64Url(
     JSON.stringify({
       iss: serviceAccount.client_email,
-      scope: 'https://www.googleapis.com/auth/datastore.readonly',
+      scope: 'https://www.googleapis.com/auth/datastore',
       aud: serviceAccount.token_uri ?? 'https://oauth2.googleapis.com/token',
       iat: now,
       exp: now + 3600
@@ -583,7 +583,7 @@ function normalizeFirestoreDocument(document: FirestoreDocument): {
     name,
     priceMinor: Math.round(price * 100),
     imageUrls: images,
-    specs: {}
+    specs: collectFirestoreSpecs(raw)
   };
   const brand = stringField(raw.Brend) || stringField(raw.brand);
   const category = stringField(raw.Kategorija) || stringField(raw.category);
@@ -626,7 +626,37 @@ function collectFirestoreImages(raw: Record<string, unknown>): string[] {
   const candidates = [raw.images, raw.mainImageUrl, raw.thumbnailUrl, raw.image];
   return candidates
     .flatMap((value) => (Array.isArray(value) ? value : [value]))
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    .flatMap((value) => {
+      if (typeof value === 'string') {
+        return [value];
+      }
+      if (value && typeof value === 'object') {
+        const image = value as Record<string, unknown>;
+        return [image.url, image.thumb, image.original, image.thumbnailUrl];
+      }
+      return [];
+    })
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .filter((value, index, list) => list.indexOf(value) === index);
+}
+
+function collectFirestoreSpecs(
+  raw: Record<string, unknown>
+): Record<string, string | number | boolean> {
+  const specs: Record<string, string | number | boolean> = {};
+  const source = raw.specs;
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+      const normalizedKey = slugify(key).replace(/-/g, '_');
+      if (!normalizedKey) {
+        continue;
+      }
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        specs[normalizedKey] = value;
+      }
+    }
+  }
+  return specs;
 }
 
 function base64Url(value: string | Buffer): string {

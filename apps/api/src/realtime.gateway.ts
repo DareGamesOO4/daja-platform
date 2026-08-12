@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
+import { Inject } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -8,6 +9,7 @@ import {
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import { createRequestId } from '@daja/shared';
+import { AuthService } from './auth.service.js';
 
 type RealtimeEvent =
   | 'product.updated'
@@ -35,10 +37,44 @@ const allowedEvents: RealtimeEvent[] = [
   cors: { origin: false }
 })
 export class RealtimeGateway {
+  constructor(@Inject(AuthService) private readonly authService: AuthService) {}
+
   @WebSocketServer()
   private readonly server!: Server;
 
-  handleConnection(socket: Socket): void {
+  async handleConnection(socket: Socket): Promise<void> {
+    const token = bearerToken(socket);
+    if (token) {
+      try {
+        const ctx = await this.authService.authenticateAccessToken(token, {
+          locationId:
+            stringValue(socket.handshake.auth.locationId) ??
+            stringValue(socket.handshake.query.locationId)
+        });
+        if (!ctx.permissions.includes('realtime.read')) {
+          deny(socket);
+          return;
+        }
+        socket.data.organizationId = ctx.organizationId;
+        socket.data.userId = ctx.userId;
+        socket.data.permissions = ctx.permissions;
+        socket.data.locationId = ctx.locationId;
+        void socket.join(orgRoom(ctx.organizationId));
+        if (ctx.locationId) {
+          void socket.join(locationRoom(ctx.organizationId, ctx.locationId));
+        }
+        return;
+      } catch {
+        deny(socket);
+        return;
+      }
+    }
+
+    if (process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
+      deny(socket);
+      return;
+    }
+
     const organizationId =
       stringValue(socket.handshake.auth.organizationId) ??
       stringValue(socket.handshake.query.organizationId);
@@ -52,12 +88,7 @@ export class RealtimeGateway {
       stringValue(socket.handshake.auth.locationId) ??
       stringValue(socket.handshake.query.locationId);
     if (!organizationId || !userId || !permissions.includes('realtime.read')) {
-      socket.emit('error', {
-        code: 'REALTIME_AUTH_REQUIRED',
-        message: 'Realtime authentication requires organization, user and realtime.read permission',
-        requestId: createRequestId()
-      });
-      socket.disconnect(true);
+      deny(socket);
       return;
     }
     socket.data.organizationId = organizationId;
@@ -127,6 +158,28 @@ function locationRoom(organizationId: string, locationId: string): string {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function bearerToken(socket: Socket): string | undefined {
+  const authorization =
+    stringValue(socket.handshake.auth.token) ??
+    stringValue(socket.handshake.query.token) ??
+    stringValue(socket.handshake.headers.authorization);
+  if (!authorization) {
+    return undefined;
+  }
+  return authorization.startsWith('Bearer ')
+    ? authorization.slice('Bearer '.length).trim()
+    : authorization;
+}
+
+function deny(socket: Socket): void {
+  socket.emit('error', {
+    code: 'REALTIME_AUTH_REQUIRED',
+    message: 'Realtime authentication requires a valid token with realtime.read permission',
+    requestId: createRequestId()
+  });
+  socket.disconnect(true);
 }
 
 function splitCsv(value: string | undefined): string[] {

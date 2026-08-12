@@ -12,6 +12,11 @@ export function testEnv() {
   process.env.REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
   process.env.API_PUBLIC_BASE_URL = process.env.API_PUBLIC_BASE_URL ?? 'http://localhost:3000';
   process.env.CORS_ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000';
+  process.env.JWT_ACCESS_SECRET =
+    process.env.JWT_ACCESS_SECRET ?? 'test-access-secret-with-at-least-32-chars';
+  process.env.JWT_REFRESH_SECRET =
+    process.env.JWT_REFRESH_SECRET ?? 'test-refresh-secret-with-at-least-32-chars';
+  process.env.TRUSTED_IDENTITY_HEADERS = process.env.TRUSTED_IDENTITY_HEADERS ?? 'true';
   process.env.LOG_LEVEL = process.env.LOG_LEVEL ?? 'silent';
 }
 

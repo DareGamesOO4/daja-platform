@@ -15,6 +15,9 @@ export default defineWorkspace([
         CORS_ALLOWED_ORIGINS: 'http://localhost:3000',
         PUBLIC_ORGANIZATION_ID: '00000000-0000-4000-8000-000000000101',
         R2_ENDPOINT: 'http://localhost:9000',
+        JWT_ACCESS_SECRET: 'test-access-secret-with-at-least-32-chars',
+        JWT_REFRESH_SECRET: 'test-refresh-secret-with-at-least-32-chars',
+        TRUSTED_IDENTITY_HEADERS: 'true',
         LOG_LEVEL: 'silent'
       }
     }
@@ -34,6 +37,9 @@ export default defineWorkspace([
         CORS_ALLOWED_ORIGINS: 'http://localhost:3000',
         PUBLIC_ORGANIZATION_ID: '00000000-0000-4000-8000-000000000101',
         R2_ENDPOINT: 'http://localhost:9000',
+        JWT_ACCESS_SECRET: 'test-access-secret-with-at-least-32-chars',
+        JWT_REFRESH_SECRET: 'test-refresh-secret-with-at-least-32-chars',
+        TRUSTED_IDENTITY_HEADERS: 'true',
         LOG_LEVEL: 'silent'
       },
       testTimeout: 30000,

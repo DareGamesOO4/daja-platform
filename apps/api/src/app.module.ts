@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { loadConfig } from '@daja/config';
 import { createDatabase, createRedisConnection } from '@daja/database';
@@ -16,6 +16,9 @@ import {
 } from './plan2.controllers.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { DeviceController, SyncController } from './sync.controller.js';
+import { AuthController } from './auth.controller.js';
+import { AuthMiddleware } from './auth.middleware.js';
+import { AuthService } from './auth.service.js';
 
 const config = loadConfig();
 const logger = createLogger(config, 'api');
@@ -30,6 +33,7 @@ const logger = createLogger(config, 'api');
     ])
   ],
   controllers: [
+    AuthController,
     HealthController,
     OrganizationsController,
     PublicCatalogController,
@@ -46,7 +50,13 @@ const logger = createLogger(config, 'api');
     { provide: LOGGER, useValue: logger },
     { provide: DATABASE, useFactory: () => createDatabase(config, logger) },
     { provide: REDIS, useFactory: () => createRedisConnection(config, logger) },
+    AuthMiddleware,
+    AuthService,
     RealtimeGateway
   ]
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(AuthMiddleware).forRoutes('*');
+  }
+}

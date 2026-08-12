@@ -1,6 +1,51 @@
 {
   "openapi": "3.0.0",
   "paths": {
+    "/auth/login": {
+      "post": {
+        "operationId": "AuthController_login",
+        "parameters": [
+          {
+            "name": "x-request-id",
+            "required": true,
+            "in": "header",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "x-correlation-id",
+            "required": true,
+            "in": "header",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Auth"]
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "operationId": "AuthController_refresh",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Auth"]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "AuthController_logout",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Auth"]
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "AuthController_me",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Auth"]
+      }
+    },
     "/health/live": {
       "get": {
         "operationId": "HealthController_live",
