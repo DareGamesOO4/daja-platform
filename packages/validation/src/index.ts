@@ -15,6 +15,23 @@ export const currencySchema = z
   .transform((value) => value.toUpperCase());
 export const amountMinorSchema = z.coerce.number().int().min(0).max(2_147_483_647);
 export const paginationLimitSchema = z.coerce.number().int().min(1).max(50).default(20);
+export const syncLimitSchema = z.coerce.number().int().min(1).max(500).default(100);
+
+export const syncPushEventSchema = z.object({
+  eventId: uuidSchema,
+  idempotencyKey: z.string().trim().min(8).max(240),
+  aggregateType: z.enum(['product', 'variant', 'inventory_item', 'rfid_tag', 'inventory_event']),
+  aggregateId: uuidSchema,
+  operation: z.string().trim().min(1).max(120),
+  baseVersion: z.coerce.number().int().positive().nullable().optional(),
+  payloadVersion: z.coerce.number().int().positive().default(1),
+  clientTimestamp: z.string().datetime().optional(),
+  payload: z.record(z.string(), z.unknown()).default({})
+});
+
+export const syncPushSchema = z.object({
+  events: z.array(syncPushEventSchema).min(1).max(100)
+});
 export const attributesSchema = z
   .record(z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/), z.unknown())
   .default({})

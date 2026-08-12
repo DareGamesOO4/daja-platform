@@ -11,3 +11,4 @@ export * from './media.js';
 export * from './rfid.js';
 export * from './inventory.js';
 export * from './imports.js';
+export * from './sync.js';

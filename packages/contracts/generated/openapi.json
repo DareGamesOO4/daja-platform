@@ -1,0 +1,461 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "HealthController_live",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Health"]
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "HealthController_ready",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Health"]
+      }
+    },
+    "/organizations/{id}": {
+      "get": {
+        "operationId": "OrganizationsController_getOrganization",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Organizations"]
+      }
+    },
+    "/organizations/{id}/name": {
+      "patch": {
+        "operationId": "OrganizationsController_updateName",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Organizations"]
+      }
+    },
+    "/public/catalog/products": {
+      "get": {
+        "operationId": "PublicCatalogController_products",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["PublicCatalog"]
+      }
+    },
+    "/public/catalog/products/{slug}": {
+      "get": {
+        "operationId": "PublicCatalogController_productBySlug",
+        "parameters": [
+          {
+            "name": "slug",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["PublicCatalog"]
+      }
+    },
+    "/public/catalog/brands": {
+      "get": {
+        "operationId": "PublicCatalogController_brands",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["PublicCatalog"]
+      }
+    },
+    "/public/catalog/categories": {
+      "get": {
+        "operationId": "PublicCatalogController_categories",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["PublicCatalog"]
+      }
+    },
+    "/products": {
+      "post": {
+        "operationId": "StaffCatalogController_createProduct",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      }
+    },
+    "/products/{id}": {
+      "get": {
+        "operationId": "StaffCatalogController_getProduct",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      },
+      "patch": {
+        "operationId": "StaffCatalogController_patchProduct",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      },
+      "delete": {
+        "operationId": "StaffCatalogController_deleteProduct",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      }
+    },
+    "/products/{id}/variants": {
+      "post": {
+        "operationId": "StaffCatalogController_createVariant",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      }
+    },
+    "/variants/{id}": {
+      "patch": {
+        "operationId": "StaffCatalogController_patchVariant",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["StaffCatalog"]
+      }
+    },
+    "/media/uploads": {
+      "post": {
+        "operationId": "MediaController_createUpload",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Media"]
+      }
+    },
+    "/media/uploads/{mediaId}/complete": {
+      "post": {
+        "operationId": "MediaController_completeUpload",
+        "parameters": [
+          {
+            "name": "mediaId",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Media"]
+      }
+    },
+    "/public/rfid/resolve/{epc}": {
+      "get": {
+        "operationId": "RfidController_resolve",
+        "parameters": [
+          {
+            "name": "epc",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/{id}": {
+      "get": {
+        "operationId": "RfidController_tag",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/by-epc/{epc}": {
+      "get": {
+        "operationId": "RfidController_tagByEpc",
+        "parameters": [
+          {
+            "name": "epc",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags": {
+      "post": {
+        "operationId": "RfidController_createTag",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/{id}/assign": {
+      "post": {
+        "operationId": "RfidController_assign",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/{id}/unassign": {
+      "post": {
+        "operationId": "RfidController_unassign",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/{id}/status": {
+      "patch": {
+        "operationId": "RfidController_status",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/rfid/tags/{id}/events": {
+      "get": {
+        "operationId": "RfidController_events",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Rfid"]
+      }
+    },
+    "/inventory/items": {
+      "post": {
+        "operationId": "InventoryController_createItem",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Inventory"]
+      }
+    },
+    "/inventory/adjustments": {
+      "post": {
+        "operationId": "InventoryController_adjust",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Inventory"]
+      }
+    },
+    "/inventory/items/{id}/move": {
+      "post": {
+        "operationId": "InventoryController_move",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Inventory"]
+      }
+    },
+    "/inventory/variants/{variantId}/balances": {
+      "get": {
+        "operationId": "InventoryController_balances",
+        "parameters": [
+          {
+            "name": "variantId",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Inventory"]
+      }
+    },
+    "/imports/xlsx": {
+      "post": {
+        "operationId": "ImportsController_xlsx",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Imports"]
+      }
+    },
+    "/imports/{jobId}/execute": {
+      "post": {
+        "operationId": "ImportsController_execute",
+        "parameters": [
+          {
+            "name": "jobId",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Imports"]
+      }
+    },
+    "/imports/{jobId}/reconciliation": {
+      "get": {
+        "operationId": "ImportsController_reconciliation",
+        "parameters": [
+          {
+            "name": "jobId",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Imports"]
+      }
+    },
+    "/imports/firestore": {
+      "post": {
+        "operationId": "ImportsController_firestore",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Imports"]
+      }
+    },
+    "/devices": {
+      "post": {
+        "operationId": "DeviceController_register",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Device"]
+      }
+    },
+    "/sync/push": {
+      "post": {
+        "operationId": "SyncController_push",
+        "parameters": [],
+        "responses": { "201": { "description": "" } },
+        "tags": ["Sync"]
+      }
+    },
+    "/sync/pull": {
+      "get": {
+        "operationId": "SyncController_pull",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Sync"]
+      }
+    },
+    "/sync/bootstrap": {
+      "get": {
+        "operationId": "SyncController_bootstrap",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Sync"]
+      }
+    },
+    "/sync/conflicts": {
+      "get": {
+        "operationId": "SyncController_conflicts",
+        "parameters": [],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Sync"]
+      }
+    },
+    "/sync/conflicts/{id}": {
+      "patch": {
+        "operationId": "SyncController_resolveConflict",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "200": { "description": "" } },
+        "tags": ["Sync"]
+      }
+    }
+  },
+  "info": {
+    "title": "DAJA Platform API",
+    "description": "Versioned DAJA Platform HTTP API contract generated from Nest controllers.",
+    "version": "1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": { "schemas": {} }
+}

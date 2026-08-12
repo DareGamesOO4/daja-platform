@@ -56,4 +56,8 @@ jobs:
       - run: npm run test:unit
       - run: npm run test:integration
       - run: npm run build
+      - run: npm run openapi:check
+      - run: npm run check:no-demo
       - run: npm run security:deps
+      - run: docker build -f apps/api/Dockerfile -t daja-api:ci .
+      - run: docker build -f apps/worker/Dockerfile -t daja-worker:ci .

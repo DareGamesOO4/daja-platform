@@ -14,6 +14,8 @@ import {
   RfidController,
   StaffCatalogController
 } from './plan2.controllers.js';
+import { RealtimeGateway } from './realtime.gateway.js';
+import { DeviceController, SyncController } from './sync.controller.js';
 
 const config = loadConfig();
 const logger = createLogger(config, 'api');
@@ -35,13 +37,16 @@ const logger = createLogger(config, 'api');
     MediaController,
     RfidController,
     InventoryController,
-    ImportsController
+    ImportsController,
+    DeviceController,
+    SyncController
   ],
   providers: [
     { provide: CONFIG, useValue: config },
     { provide: LOGGER, useValue: logger },
     { provide: DATABASE, useFactory: () => createDatabase(config, logger) },
-    { provide: REDIS, useFactory: () => createRedisConnection(config, logger) }
+    { provide: REDIS, useFactory: () => createRedisConnection(config, logger) },
+    RealtimeGateway
   ]
 })
 export class AppModule {}

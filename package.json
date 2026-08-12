@@ -28,6 +28,12 @@
     "db:status": "tsx packages/database/src/cli.ts status",
     "db:seed:dev": "tsx scripts/seed-dev.ts",
     "plan2:perf": "tsx scripts/plan2-performance-fixture.ts",
+    "plan3:perf": "tsx scripts/plan3-performance.ts",
+    "openapi:generate": "tsx scripts/generate-openapi.ts",
+    "openapi:check": "npm run openapi:generate && node -e \"JSON.parse(require('fs').readFileSync('packages/contracts/generated/openapi.json','utf8')); console.log('openapi valid')\"",
+    "preflight:production": "tsx scripts/preflight-production.ts",
+    "backup:restore:drill": "tsx scripts/backup-restore-drill.ts",
+    "check:no-demo": "tsx scripts/check-no-demo.ts",
     "security:deps": "npm audit --audit-level=high"
   },
   "dependencies": {
@@ -36,9 +42,11 @@
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "@nestjs/platform-socket.io": "^11.1.6",
     "@nestjs/swagger": "^11.2.0",
     "@nestjs/testing": "^11.1.6",
     "@nestjs/throttler": "^6.4.0",
+    "@nestjs/websockets": "^11.1.6",
     "argon2": "^0.43.1",
     "bullmq": "^5.58.0",
     "class-transformer": "^0.5.1",
@@ -53,6 +61,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "sharp": "0.35.3",
+    "socket.io": "^4.8.1",
     "zod": "^4.0.17"
   },
   "devDependencies": {
@@ -66,6 +75,7 @@
     "globals": "^16.3.0",
     "npm-run-all": "^4.1.5",
     "prettier": "^3.6.2",
+    "socket.io-client": "^4.8.1",
     "supertest": "^7.1.4",
     "tsx": "^4.20.4",
     "typescript": "^5.9.2",
