@@ -30,7 +30,7 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission } from '@daja/security';
+import { requirePermission, TenantAccessDeniedError } from '@daja/security';
 import {
   attributesSchema,
   amountMinorSchema,
@@ -73,6 +73,28 @@ const variantCreateSchema = z.object({
 
 const variantPatchSchema = variantCreateSchema.partial().extend({
   expectedVersion: z.coerce.number().int().positive().optional()
+});
+
+const brandSchema = z.object({
+  name: z.string().trim().min(1).max(240),
+  slug: slugSchema.optional(),
+  active: z.boolean().optional()
+});
+
+const categorySchema = z.object({
+  name: z.string().trim().min(1).max(240),
+  slug: slugSchema.optional(),
+  parentId: uuidSchema.nullable().optional(),
+  sortOrder: z.coerce.number().int().optional(),
+  active: z.boolean().optional()
+});
+
+const specKeySchema = z.object({
+  name: z.string().trim().min(1).max(240),
+  slug: slugSchema.optional(),
+  department: z.string().trim().min(1).max(120).nullable().optional(),
+  dataType: z.string().trim().min(1).max(80).optional(),
+  active: z.boolean().optional()
 });
 
 @Controller('public/catalog')
@@ -312,6 +334,250 @@ export class StaffCatalogController {
     );
     await this.invalidateCatalog(ctx.organizationId, patched.productSlug);
     return patched.after;
+  }
+
+  @Get('brands')
+  async listBrands(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const result = await this.database.pool.query(
+      `SELECT id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM brands
+       WHERE organization_id = $1 AND deleted_at IS NULL
+       ORDER BY normalized_name`,
+      [ctx.organizationId]
+    );
+    return result.rows;
+  }
+
+  @Post('brands')
+  async createBrand(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(brandSchema, body);
+    const result = await this.database.pool.query(
+      `INSERT INTO brands (organization_id, name, slug, active)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [ctx.organizationId, input.name, input.slug ?? slugifyLocal(input.name), input.active ?? true]
+    );
+    return result.rows[0];
+  }
+
+  @Patch('brands/:id')
+  async updateBrand(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const brandId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(brandSchema.partial(), body);
+    const current = await this.database.pool.query(
+      `SELECT name, slug, active FROM brands WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, brandId]
+    );
+    if (current.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    const row = current.rows[0];
+    const result = await this.database.pool.query(
+      `UPDATE brands
+       SET name = $3, slug = $4, active = $5, version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [ctx.organizationId, brandId, input.name ?? row.name, input.slug ?? row.slug, input.active ?? row.active]
+    );
+    return result.rows[0];
+  }
+
+  @Delete('brands/:id')
+  async deleteBrand(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const result = await this.database.pool.query(
+      `UPDATE brands
+       SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    );
+    if (result.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    return { deleted: true };
+  }
+
+  @Get('categories')
+  async listCategories(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const result = await this.database.pool.query(
+      `SELECT id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+              active, version, created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM categories
+       WHERE organization_id = $1 AND deleted_at IS NULL
+       ORDER BY parent_id NULLS FIRST, sort_order, name`,
+      [ctx.organizationId]
+    );
+    return result.rows;
+  }
+
+  @Post('categories')
+  async createCategory(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(categorySchema, body);
+    const result = await this.database.pool.query(
+      `INSERT INTO categories (organization_id, parent_id, name, slug, sort_order, active)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+                 active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        ctx.organizationId,
+        input.parentId ?? null,
+        input.name,
+        input.slug ?? slugifyLocal(input.name),
+        input.sortOrder ?? 0,
+        input.active ?? true
+      ]
+    );
+    return result.rows[0];
+  }
+
+  @Patch('categories/:id')
+  async updateCategory(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const categoryId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(categorySchema.partial(), body);
+    const current = await this.database.pool.query(
+      `SELECT parent_id, name, slug, sort_order, active
+       FROM categories WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, categoryId]
+    );
+    if (current.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    const row = current.rows[0];
+    const result = await this.database.pool.query(
+      `UPDATE categories
+       SET parent_id = $3, name = $4, slug = $5, sort_order = $6, active = $7,
+           version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+                 active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        ctx.organizationId,
+        categoryId,
+        input.parentId === undefined ? row.parent_id : input.parentId,
+        input.name ?? row.name,
+        input.slug ?? row.slug,
+        input.sortOrder ?? row.sort_order,
+        input.active ?? row.active
+      ]
+    );
+    return result.rows[0];
+  }
+
+  @Delete('categories/:id')
+  async deleteCategory(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const result = await this.database.pool.query(
+      `UPDATE categories
+       SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    );
+    if (result.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    return { deleted: true };
+  }
+
+  @Get('spec_keys')
+  async listSpecKeys(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const result = await this.database.pool.query(
+      `SELECT id, name, slug, department, data_type AS "dataType", active, version,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM spec_keys
+       WHERE organization_id = $1 AND deleted_at IS NULL
+       ORDER BY name`,
+      [ctx.organizationId]
+    );
+    return result.rows;
+  }
+
+  @Post('spec_keys')
+  async createSpecKey(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(specKeySchema, body);
+    const result = await this.database.pool.query(
+      `INSERT INTO spec_keys (organization_id, name, slug, department, data_type, active)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, name, slug, department, data_type AS "dataType", active, version,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        ctx.organizationId,
+        input.name,
+        input.slug ?? slugifyLocal(input.name),
+        input.department ?? null,
+        input.dataType ?? 'text',
+        input.active ?? true
+      ]
+    );
+    return result.rows[0];
+  }
+
+  @Patch('spec_keys/:id')
+  async updateSpecKey(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const specKeyId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(specKeySchema.partial(), body);
+    const current = await this.database.pool.query(
+      `SELECT name, slug, department, data_type, active
+       FROM spec_keys WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, specKeyId]
+    );
+    if (current.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    const row = current.rows[0];
+    const result = await this.database.pool.query(
+      `UPDATE spec_keys
+       SET name = $3, slug = $4, department = $5, data_type = $6, active = $7,
+           version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id, name, slug, department, data_type AS "dataType", active, version,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        ctx.organizationId,
+        specKeyId,
+        input.name ?? row.name,
+        input.slug ?? row.slug,
+        input.department === undefined ? row.department : input.department,
+        input.dataType ?? row.data_type,
+        input.active ?? row.active
+      ]
+    );
+    return result.rows[0];
+  }
+
+  @Delete('spec_keys/:id')
+  async deleteSpecKey(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const result = await this.database.pool.query(
+      `UPDATE spec_keys
+       SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    );
+    if (result.rowCount !== 1) {
+      throw new TenantAccessDeniedError();
+    }
+    return { deleted: true };
   }
 
   private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {
@@ -798,4 +1064,15 @@ export class ImportsController {
       projectId: this.config.FIRESTORE_PROJECT_ID || undefined
     });
   }
+}
+
+function slugifyLocal(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+  return slug || `item-${Date.now()}`;
 }

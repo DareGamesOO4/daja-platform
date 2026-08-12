@@ -10,6 +10,10 @@ export class AuthMiddleware implements NestMiddleware {
 
   async use(request: Request, _response: Response, next: NextFunction): Promise<void> {
     try {
+      if (isCustomerRoute(request.path) || isCustomerRoute(request.originalUrl) || isCustomerRoute(request.url)) {
+        next();
+        return;
+      }
       const token = bearerToken(request);
       if (token) {
         const ctx = await this.authService.authenticateAccessToken(token, {
@@ -30,6 +34,17 @@ export class AuthMiddleware implements NestMiddleware {
       next(error);
     }
   }
+}
+
+function isCustomerRoute(path: string): boolean {
+  const normalized = path.replace(/^\/api\/v1/, '');
+  return (
+    normalized.startsWith('/customer-auth') ||
+    normalized.startsWith('/customers/me') ||
+    normalized.startsWith('/orders') ||
+    /^\/products\/[^/]+\/reviews$/.test(normalized) ||
+    normalized.startsWith('/newsletter/subscribe')
+  );
 }
 
 function bearerToken(request: Request): string | undefined {

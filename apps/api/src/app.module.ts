@@ -19,6 +19,14 @@ import { DeviceController, SyncController } from './sync.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
+import { CustomerAuthService } from './customer-auth.service.js';
+import {
+  CustomerAuthController,
+  CustomerController,
+  StorefrontContentController,
+  StorefrontMediaController,
+  StorefrontOrdersController
+} from './storefront.controller.js';
 
 const config = loadConfig();
 const logger = createLogger(config, 'api');
@@ -34,6 +42,11 @@ const logger = createLogger(config, 'api');
   ],
   controllers: [
     AuthController,
+    CustomerAuthController,
+    CustomerController,
+    StorefrontOrdersController,
+    StorefrontContentController,
+    StorefrontMediaController,
     HealthController,
     OrganizationsController,
     PublicCatalogController,
@@ -52,6 +65,7 @@ const logger = createLogger(config, 'api');
     { provide: REDIS, useFactory: () => createRedisConnection(config, logger) },
     AuthMiddleware,
     AuthService,
+    CustomerAuthService,
     RealtimeGateway
   ]
 })
