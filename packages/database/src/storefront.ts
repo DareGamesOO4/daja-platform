@@ -39,6 +39,11 @@ export interface CustomerSessionRecord {
   revokedAt: Date | null;
 }
 
+export interface OAuthCustomerRecord {
+  id: string;
+  organizationId: string;
+}
+
 export interface StorefrontItemSnapshot {
   id?: string;
   productId?: string;
@@ -137,6 +142,94 @@ export class StorefrontRepository {
       passwordHash: row.password_hash,
       active: row.active
     };
+  }
+
+  async findOAuthCustomer(input: {
+    organizationId: string;
+    provider: 'google';
+    providerSubject: string;
+  }): Promise<OAuthCustomerRecord | null> {
+    const result = await this.client.query<{ id: string; organization_id: string }>(
+      `SELECT c.id, c.organization_id
+       FROM customer_identities ci
+       JOIN customers c ON c.id = ci.customer_id
+        AND c.organization_id = ci.organization_id
+        AND c.deleted_at IS NULL
+       WHERE ci.organization_id = $1
+         AND ci.provider = $2
+         AND ci.provider_subject = $3
+         AND ci.active
+       LIMIT 1`,
+      [input.organizationId, input.provider, input.providerSubject]
+    );
+    const row = result.rows[0];
+    return row ? { id: row.id, organizationId: row.organization_id } : null;
+  }
+
+  async findCustomerByEmail(input: {
+    organizationId: string;
+    email: string;
+  }): Promise<OAuthCustomerRecord | null> {
+    const result = await this.client.query<{ id: string; organization_id: string }>(
+      `SELECT id, organization_id
+       FROM customers
+       WHERE organization_id = $1
+         AND normalized_email = lower($2)
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [input.organizationId, input.email]
+    );
+    const row = result.rows[0];
+    return row ? { id: row.id, organizationId: row.organization_id } : null;
+  }
+
+  async createGoogleCustomer(input: {
+    organizationId: string;
+    email: string;
+    displayName: string;
+    photoUrl?: string | null;
+    providerSubject: string;
+  }): Promise<OAuthCustomerRecord> {
+    const result = await this.client.query<{ id: string; organization_id: string }>(
+      `INSERT INTO customers (
+         organization_id, email, display_name, first_name, last_name, photo_url, email_verified
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+       RETURNING id, organization_id`,
+      [
+        input.organizationId,
+        input.email,
+        input.displayName,
+        firstName(input.displayName),
+        lastName(input.displayName),
+        input.photoUrl ?? null
+      ]
+    );
+    const row = requireRow(result);
+    await this.linkOAuthIdentity({
+      organizationId: input.organizationId,
+      customerId: row.id,
+      provider: 'google',
+      providerSubject: input.providerSubject
+    });
+    return { id: row.id, organizationId: row.organization_id };
+  }
+
+  async linkOAuthIdentity(input: {
+    organizationId: string;
+    customerId: string;
+    provider: 'google';
+    providerSubject: string;
+  }): Promise<void> {
+    await this.client.query(
+      `INSERT INTO customer_identities (
+         organization_id, customer_id, provider, provider_subject
+       )
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, provider, provider_subject) DO UPDATE
+       SET active = TRUE, updated_at = now()`,
+      [input.organizationId, input.customerId, input.provider, input.providerSubject]
+    );
   }
 
   async createSession(input: {

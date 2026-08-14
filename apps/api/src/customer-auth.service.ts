@@ -15,6 +15,7 @@ import {
   InvalidTokenError,
   sha256Hex,
   signJwt,
+  ValidationFailedError,
   verifyJwt
 } from '@daja/security';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
@@ -90,6 +91,130 @@ export class CustomerAuthService {
         ...this.issueTokenPair(principal, session.refreshToken)
       };
     });
+  }
+
+  startGoogleOAuth(organizationId: string): string {
+    this.assertGoogleOAuthConfigured();
+    const state = signJwt(
+      {
+        typ: 'access',
+        sub: 'google-oauth-state',
+        org: organizationId,
+        jti: randomUUID(),
+        provider: 'google'
+      },
+      this.config.JWT_ACCESS_SECRET,
+      600
+    );
+    const authorizationUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authorizationUrl.search = new URLSearchParams({
+      client_id: this.config.GOOGLE_OAUTH_CLIENT_ID,
+      redirect_uri: this.googleCallbackUrl(),
+      response_type: 'code',
+      scope: 'openid email profile',
+      state,
+      prompt: 'select_account'
+    }).toString();
+    return authorizationUrl.toString();
+  }
+
+  async loginWithGoogle(input: { organizationId: string; code: string; state: string }) {
+    this.assertGoogleOAuthConfigured();
+    const state = verifyJwt(input.state, this.config.JWT_ACCESS_SECRET, 'access');
+    if (
+      state.sub !== 'google-oauth-state' ||
+      state.org !== input.organizationId ||
+      state.provider !== 'google'
+    ) {
+      throw new InvalidTokenError();
+    }
+
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: input.code,
+        client_id: this.config.GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: this.config.GOOGLE_OAUTH_CLIENT_SECRET,
+        redirect_uri: this.googleCallbackUrl(),
+        grant_type: 'authorization_code'
+      })
+    });
+    const token = (await tokenResponse.json().catch(() => null)) as { access_token?: unknown } | null;
+    if (!tokenResponse.ok || typeof token?.access_token !== 'string') {
+      throw new ValidationFailedError('Google sign-in could not be completed');
+    }
+
+    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { authorization: `Bearer ${token.access_token}` }
+    });
+    const profile = (await profileResponse.json().catch(() => null)) as GoogleProfile | null;
+    if (
+      !profileResponse.ok ||
+      !profile ||
+      typeof profile.sub !== 'string' ||
+      typeof profile.email !== 'string' ||
+      profile.email_verified !== true
+    ) {
+      throw new ValidationFailedError('Google account must have a verified email address');
+    }
+    const googleSubject = profile.sub as string;
+    const googleEmail = profile.email as string;
+
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      let customer = await repo.findOAuthCustomer({
+        organizationId: input.organizationId,
+        provider: 'google',
+        providerSubject: googleSubject
+      });
+      if (!customer) {
+        customer = await repo.findCustomerByEmail({
+          organizationId: input.organizationId,
+          email: googleEmail
+        });
+        if (customer) {
+          await repo.linkOAuthIdentity({
+            organizationId: input.organizationId,
+            customerId: customer.id,
+            provider: 'google',
+            providerSubject: googleSubject
+          });
+        } else {
+          customer = await repo.createGoogleCustomer({
+            organizationId: input.organizationId,
+            email: googleEmail,
+            displayName: googleDisplayName(profile),
+            photoUrl: typeof profile.picture === 'string' ? profile.picture : null,
+            providerSubject: googleSubject
+          });
+        }
+      }
+      const session = await this.createSession(repo, customer.organizationId, customer.id);
+      const principal = await repo.buildCustomerPrincipal({
+        organizationId: customer.organizationId,
+        customerId: customer.id,
+        sessionFamilyId: session.familyId,
+        sessionId: session.id
+      });
+      return { user: serializeCustomerPrincipal(principal), ...this.issueTokenPair(principal, session.refreshToken) };
+    });
+  }
+
+  oauthSuccessRedirect(tokens: CustomerTokenPair): string {
+    const url = new URL(this.oauthFrontendRedirectUrl());
+    url.hash = new URLSearchParams({
+      oauth: 'success',
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken
+    }).toString();
+    return url.toString();
+  }
+
+  oauthErrorRedirect(): string {
+    const url = new URL(this.oauthFrontendRedirectUrl());
+    url.searchParams.set('oauth_error', 'google_sign_in_failed');
+    return url.toString();
   }
 
   async refresh(input: { refreshToken: string }) {
@@ -230,6 +355,40 @@ export class CustomerAuthService {
       refreshExpiresIn: this.config.REFRESH_TOKEN_TTL_SECONDS
     };
   }
+
+  private assertGoogleOAuthConfigured(): void {
+    if (!this.config.GOOGLE_OAUTH_CLIENT_ID || !this.config.GOOGLE_OAUTH_CLIENT_SECRET) {
+      throw new ValidationFailedError('Google OAuth is not configured');
+    }
+  }
+
+  private googleCallbackUrl(): string {
+    return new URL('/api/v1/customer-auth/oauth/google/callback', this.config.API_PUBLIC_BASE_URL).toString();
+  }
+
+  private oauthFrontendRedirectUrl(): string {
+    if (!this.config.OAUTH_FRONTEND_REDIRECT_URL) {
+      throw new ValidationFailedError('OAUTH_FRONTEND_REDIRECT_URL is not configured');
+    }
+    return this.config.OAUTH_FRONTEND_REDIRECT_URL;
+  }
+}
+
+interface GoogleProfile {
+  sub?: unknown;
+  email?: unknown;
+  email_verified?: unknown;
+  name?: unknown;
+  given_name?: unknown;
+  family_name?: unknown;
+  picture?: unknown;
+}
+
+function googleDisplayName(profile: GoogleProfile): string {
+  if (typeof profile.name === 'string' && profile.name.trim()) {
+    return profile.name.trim().slice(0, 240);
+  }
+  return (String(profile.email).split('@')[0] ?? 'Google user').slice(0, 240);
 }
 
 export function serializeCustomerPrincipal(principal: CustomerPrincipal) {

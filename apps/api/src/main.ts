@@ -1,13 +1,16 @@
-import 'dotenv/config';
+import { config as loadEnvironment } from 'dotenv';
 import 'reflect-metadata';
+import { fileURLToPath } from 'node:url';
 import { NestFactory } from '@nestjs/core';
 import { loadConfig } from '@daja/config';
 import { createLogger } from '@daja/observability';
-import { AppModule } from './app.module.js';
-import { configureApiApp } from './runtime/configure-app.js';
+
+loadEnvironment({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
 const config = loadConfig();
 const logger = createLogger(config, 'api-bootstrap');
+const { AppModule } = await import('./app.module.js');
+const { configureApiApp } = await import('./runtime/configure-app.js');
 
 process.on('unhandledRejection', (reason) => {
   logger.fatal({ err: reason }, 'Unhandled rejection');

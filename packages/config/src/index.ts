@@ -40,7 +40,10 @@ const envSchema = z.object({
   MEDIA_PUBLIC_BASE_URL: optionalPreparedSecret,
   PUBLIC_ORGANIZATION_ID: optionalPreparedSecret,
   FIRESTORE_SERVICE_ACCOUNT_JSON: optionalPreparedSecret,
-  FIRESTORE_PROJECT_ID: optionalPreparedSecret
+  FIRESTORE_PROJECT_ID: optionalPreparedSecret,
+  GOOGLE_OAUTH_CLIENT_ID: optionalPreparedSecret,
+  GOOGLE_OAUTH_CLIENT_SECRET: optionalPreparedSecret,
+  OAUTH_FRONTEND_REDIRECT_URL: optionalPreparedSecret
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

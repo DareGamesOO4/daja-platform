@@ -1,8 +1,11 @@
-import 'dotenv/config';
+import { config as loadEnvironment } from 'dotenv';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from '@daja/config';
 import { createDatabase, createRedisConnection } from '@daja/database';
 import { createLogger } from '@daja/observability';
 import { createPlatformWorkers, FOUNDATION_QUEUE_NAME } from './worker.js';
+
+loadEnvironment({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
 const config = loadConfig();
 const logger = createLogger(config, 'worker');

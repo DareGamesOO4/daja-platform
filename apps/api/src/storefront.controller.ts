@@ -8,9 +8,11 @@ import {
   Patch,
   Post,
   Put,
-  Req
+  Query,
+  Req,
+  Res
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 import { z } from 'zod';
@@ -136,22 +138,34 @@ export class CustomerAuthController {
     return { supported: false, reason: 'Phone OTP provider is not configured yet' };
   }
 
-  @Get('oauth/:provider/start')
-  oauthStart(@Param('provider') provider: string) {
-    return {
-      supported: false,
-      provider,
-      reason: 'OAuth provider credentials are not configured yet'
-    };
+  @Get('oauth/google/start')
+  googleOauthStart(@Res() response: Response) {
+    const organizationId = publicOrganizationId(this.config);
+    const url = this.auth.startGoogleOAuth(organizationId);
+    response.redirect(url);
   }
 
-  @Get('oauth/:provider/callback')
-  oauthCallback(@Param('provider') provider: string) {
-    return {
-      supported: false,
-      provider,
-      reason: 'OAuth provider credentials are not configured yet'
-    };
+  @Get('oauth/google/callback')
+  async googleOauthCallback(
+    @Res() response: Response,
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined
+  ) {
+    if (error || !code || !state) {
+      response.redirect(this.auth.oauthErrorRedirect());
+      return;
+    }
+    try {
+      const tokens = await this.auth.loginWithGoogle({
+        organizationId: publicOrganizationId(this.config),
+        code,
+        state
+      });
+      response.redirect(this.auth.oauthSuccessRedirect(tokens));
+    } catch {
+      response.redirect(this.auth.oauthErrorRedirect());
+    }
   }
 
   @Post('passkeys/register-challenge')
