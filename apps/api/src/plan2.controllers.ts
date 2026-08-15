@@ -91,7 +91,7 @@ const categorySchema = z.object({
   name: z.string().trim().min(1).max(240),
   slug: slugSchema.optional(),
   departmentId: uuidSchema,
-  brandId: uuidSchema,
+  brandId: uuidSchema.nullable().optional(),
   parentId: uuidSchema.nullable().optional(),
   sortOrder: z.coerce.number().int().optional(),
   active: z.boolean().optional()
@@ -632,7 +632,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(categorySchema, body);
-    await this.assertBrandInDepartment(ctx.organizationId, input.brandId, input.departmentId);
+    await this.assertBrandInDepartment(ctx.organizationId, input.brandId ?? null, input.departmentId);
     const result = await this.database.pool.query(
       `INSERT INTO categories (organization_id, parent_id, department_id, brand_id, name, slug, sort_order, active)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -641,7 +641,7 @@ export class StaffCatalogController {
       [
         ctx.organizationId,
         input.parentId ?? null,
-        input.departmentId, input.brandId, input.name, input.slug ?? slugifyLocal(input.name), input.sortOrder ?? 0, input.active ?? true
+        input.departmentId, input.brandId ?? null, input.name, input.slug ?? slugifyLocal(input.name), input.sortOrder ?? 0, input.active ?? true
       ]
     );
     return result.rows[0];
@@ -809,7 +809,11 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) throw new Error('Department does not exist or is inactive');
   }
 
-  private async assertBrandInDepartment(organizationId: string, brandId: string, departmentId: string) {
+  private async assertBrandInDepartment(organizationId: string, brandId: string | null, departmentId: string) {
+    if (!brandId) {
+      await this.assertActiveDepartment(organizationId, departmentId);
+      return;
+    }
     const result = await this.database.pool.query(
       `SELECT 1 FROM brands WHERE organization_id = $1 AND id = $2 AND department_id = $3 AND active AND deleted_at IS NULL`,
       [organizationId, brandId, departmentId]
