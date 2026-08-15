@@ -31,7 +31,7 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission, TenantAccessDeniedError } from '@daja/security';
+import { requirePermission, TenantAccessDeniedError, ValidationFailedError } from '@daja/security';
 import {
   attributesSchema,
   amountMinorSchema,
@@ -54,6 +54,7 @@ const productCreateSchema = z.object({
   seo: z.record(z.string(), z.string()).optional(),
   features: z.array(z.object({ title: z.string().trim().min(1).max(160), subtitle: z.string().trim().max(320).optional() })).optional(),
   model3DUrl: z.string().url().nullable().optional(),
+  marketingFlags: z.array(z.enum(['new', 'popular', 'recommended'])).max(3).optional(),
   active: z.boolean().optional(),
   published: z.boolean().optional(),
   legacyFirestoreId: z.string().trim().min(1).max(240).nullable().optional(),
@@ -248,6 +249,41 @@ export class StaffCatalogController {
     );
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return product;
+  }
+
+  @Get('products')
+  async listProducts(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(
+      `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
+              p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.seo, p.features,
+              p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
+              v.id AS "variantId", v.current_price_amount AS "currentPriceAmount", v.currency,
+              v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
+              media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
+       FROM products p
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
+       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
+       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
+       LEFT JOIN LATERAL (
+         SELECT * FROM product_variants WHERE product_id = p.id AND organization_id = p.organization_id AND deleted_at IS NULL
+         ORDER BY created_at LIMIT 1
+       ) v ON true
+       LEFT JOIN LATERAL (
+         SELECT ma.public_url, md.public_url AS thumbnail_url
+         FROM product_media pm
+         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         LEFT JOIN LATERAL (
+           SELECT public_url FROM media_derivatives WHERE media_asset_id = ma.id ORDER BY width ASC LIMIT 1
+         ) md ON true
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
+       ) media ON true
+       WHERE p.organization_id = $1 AND p.deleted_at IS NULL
+       ORDER BY p.updated_at DESC`,
+      [ctx.organizationId]
+    )).rows;
   }
 
   @Get('products/:id')
@@ -599,7 +635,7 @@ export class StaffCatalogController {
       `SELECT 1 FROM products WHERE organization_id = $1 AND brand_id = $2 AND deleted_at IS NULL LIMIT 1`,
       [ctx.organizationId, brandId]
     );
-    if (used.rowCount) throw new Error('Brand cannot be deleted while products still use it');
+    if (used.rowCount) throw new ValidationFailedError('Brand cannot be deleted while products still use it');
     const result = await this.database.pool.query(
       `UPDATE brands
        SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
@@ -691,7 +727,7 @@ export class StaffCatalogController {
       `SELECT 1 FROM products WHERE organization_id = $1 AND primary_category_id = $2 AND deleted_at IS NULL LIMIT 1`,
       [ctx.organizationId, categoryId]
     );
-    if (used.rowCount) throw new Error('Category cannot be deleted while products still use it');
+    if (used.rowCount) throw new ValidationFailedError('Category cannot be deleted while products still use it');
     const result = await this.database.pool.query(
       `UPDATE categories
        SET deleted_at = now(), active = false, version = version + 1, updated_at = now()

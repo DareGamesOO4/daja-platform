@@ -22,6 +22,7 @@ export interface ProductRecord {
   seo: Record<string, string>;
   features: Array<{ title: string; subtitle?: string | undefined }>;
   model3DUrl: string | null;
+  marketingFlags: string[];
   active: boolean;
   published: boolean;
   legacyFirestoreId: string | null;
@@ -112,7 +113,7 @@ export class CatalogRepository {
 
     const result = await this.client.query<PublicProductRow>(
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
-              p.brand_id, p.primary_category_id,
+              p.brand_id, p.primary_category_id, p.marketing_flags, d.slug AS department,
               b.name AS brand, c.name AS category,
               v.current_price_amount AS price, v.currency,
               COALESCE(inv.quantity, 0) AS available_quantity,
@@ -130,6 +131,7 @@ export class CatalogRepository {
        ) v ON true
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN LATERAL (
          SELECT SUM(quantity)::integer AS quantity
          FROM inventory_balances ib
@@ -166,7 +168,7 @@ export class CatalogRepository {
 
   async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
     const result = await this.client.query(
-      `SELECT p.*, b.name AS brand_name, c.name AS category_name,
+      `SELECT p.*, d.slug AS department, b.name AS brand_name, c.name AS category_name,
               COALESCE(variants.items, '[]'::jsonb) AS variants,
               COALESCE(media.items, '[]'::jsonb) AS images,
               media.primary_image_url AS "primaryImageUrl",
@@ -174,6 +176,7 @@ export class CatalogRepository {
        FROM products p
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN LATERAL (
          SELECT jsonb_agg(to_jsonb(v) ORDER BY v.current_price_amount) AS items
          FROM product_variants v
@@ -246,6 +249,7 @@ export class CatalogRepository {
       seo?: Record<string, string> | undefined;
       features?: Array<{ title: string; subtitle?: string | undefined }> | undefined;
       model3DUrl?: string | null | undefined;
+      marketingFlags?: string[] | undefined;
       published?: boolean | undefined;
       active?: boolean | undefined;
       legacyFirestoreId?: string | null | undefined;
@@ -255,8 +259,8 @@ export class CatalogRepository {
     await this.assertCatalogHierarchy(ctx.organizationId, input.departmentId, input.brandId, input.primaryCategoryId);
     try {
       const result = await this.client.query<ProductRow>(
-        `INSERT INTO products (organization_id, name, slug, description, department_id, brand_id, primary_category_id, seo, features, model_3d_url, active, published, legacy_firestore_id, external_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14)
+        `INSERT INTO products (organization_id, name, slug, description, department_id, brand_id, primary_category_id, seo, features, model_3d_url, marketing_flags, active, published, legacy_firestore_id, external_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15)
          RETURNING *`,
         [
           ctx.organizationId,
@@ -269,8 +273,9 @@ export class CatalogRepository {
           JSON.stringify(input.seo ?? {}),
           JSON.stringify(input.features ?? []),
           input.model3DUrl ?? null,
+          JSON.stringify(input.marketingFlags ?? []),
           input.active ?? true,
-          input.published ?? false,
+          input.published ?? true,
           input.legacyFirestoreId ?? null,
           input.externalId ?? null
         ]
@@ -309,6 +314,7 @@ export class CatalogRepository {
       seo: Record<string, string> | undefined;
       features: Array<{ title: string; subtitle?: string | undefined }> | undefined;
       model3DUrl: string | null | undefined;
+      marketingFlags: string[] | undefined;
       active: boolean | undefined;
       published: boolean | undefined;
     }>
@@ -325,7 +331,7 @@ export class CatalogRepository {
       const result = await this.client.query<ProductRow>(
         `UPDATE products
          SET name = $3, slug = $4, description = $5, department_id = $6, brand_id = $7, primary_category_id = $8,
-             seo = $9::jsonb, features = $10::jsonb, model_3d_url = $11, active = $12, published = $13, version = version + 1, updated_at = now()
+             seo = $9::jsonb, features = $10::jsonb, model_3d_url = $11, marketing_flags = $12::jsonb, active = $13, published = $14, version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING *`,
         [
@@ -340,6 +346,7 @@ export class CatalogRepository {
           JSON.stringify(next.seo),
           JSON.stringify(next.features),
           next.model3DUrl,
+          JSON.stringify(next.marketingFlags),
           next.active,
           next.published
         ]
@@ -533,6 +540,8 @@ export interface PublicProductCard {
   slug: string;
   brandId: string | null;
   primaryCategoryId: string | null;
+  department: string | null;
+  marketingFlags: string[];
   brand: string | null;
   category: string | null;
   price: number;
@@ -549,6 +558,8 @@ interface PublicProductRow {
   slug: string;
   brand_id: string | null;
   primary_category_id: string | null;
+  department: string | null;
+  marketing_flags: string[];
   brand: string | null;
   category: string | null;
   price: number;
@@ -571,6 +582,7 @@ interface ProductRow {
   seo: Record<string, string>;
   features: Array<{ title: string; subtitle?: string | undefined }>;
   model_3d_url: string | null;
+  marketing_flags: string[];
   active: boolean;
   published: boolean;
   legacy_firestore_id: string | null;
@@ -618,6 +630,7 @@ function mapProduct(row: ProductRow): ProductRecord {
     seo: row.seo ?? {},
     features: row.features ?? [],
     model3DUrl: row.model_3d_url,
+    marketingFlags: row.marketing_flags ?? [],
     active: row.active,
     published: row.published,
     legacyFirestoreId: row.legacy_firestore_id,
@@ -656,6 +669,8 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     slug: row.slug,
     brandId: row.brand_id,
     primaryCategoryId: row.primary_category_id,
+    department: row.department,
+    marketingFlags: row.marketing_flags ?? [],
     brand: row.brand,
     category: row.category,
     price: row.price,
