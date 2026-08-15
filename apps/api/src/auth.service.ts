@@ -6,7 +6,8 @@ import {
   AuthRepository,
   TransactionManager,
   type Database,
-  type StaffPrincipal
+  type StaffPrincipal,
+  type CustomerPrincipal
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import {
@@ -107,6 +108,89 @@ export class AuthService {
         requestId: input.requestId ?? createRequestId(),
         correlationId: input.correlationId ?? input.requestId ?? createRequestId(),
         payload: { familyId }
+      });
+      return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
+    });
+  }
+
+  /**
+   * Exchanges an already authenticated storefront customer for a staff session.
+   * The email is checked against a server-side allowlist before a staff user is
+   * provisioned, so a frontend build variable can never grant API permissions.
+   */
+  async loginConfiguredStorefrontAdmin(input: {
+    customer: CustomerPrincipal;
+    deviceId: string;
+    requestId?: string | undefined;
+    correlationId?: string | undefined;
+  }): Promise<AuthenticatedStaff> {
+    const email = input.customer.email?.trim().toLowerCase();
+    if (!email || !this.storefrontAdminEmails().includes(email)) {
+      throw new PermissionDeniedError('admin.access');
+    }
+
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const googleIdentity = await client.query(
+        `SELECT 1 FROM oauth_accounts
+         WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google'
+         LIMIT 1`,
+        [input.customer.organizationId, input.customer.customerId]
+      );
+      if (googleIdentity.rowCount !== 1) {
+        throw new PermissionDeniedError('admin.google_identity');
+      }
+      const user = await this.provisionStorefrontAdmin(client, {
+        organizationId: input.customer.organizationId,
+        email,
+        displayName: input.customer.displayName
+      });
+      const repo = new AuthRepository(client);
+      const familyId = randomUUID();
+      const refreshJti = randomUUID();
+      const refreshExpiresAt = expiresAt(this.config.REFRESH_TOKEN_TTL_SECONDS);
+      await repo.ensureLoginDevice({
+        organizationId: user.organizationId,
+        userId: user.id,
+        deviceId: input.deviceId,
+        offlineAuthorizationExpiresAt: refreshExpiresAt
+      });
+      const refreshToken = signJwt(
+        {
+          typ: 'refresh' as const,
+          sub: user.id,
+          org: user.organizationId,
+          fam: familyId,
+          jti: refreshJti,
+          dev: input.deviceId
+        },
+        this.config.JWT_REFRESH_SECRET,
+        this.config.REFRESH_TOKEN_TTL_SECONDS
+      );
+      const session = await repo.createSession({
+        organizationId: user.organizationId,
+        userId: user.id,
+        deviceId: input.deviceId,
+        familyId,
+        refreshJti,
+        refreshTokenHash: sha256Hex(refreshToken),
+        expiresAt: refreshExpiresAt
+      });
+      const principal = await repo.buildPrincipal({
+        organizationId: user.organizationId,
+        userId: user.id,
+        deviceId: input.deviceId,
+        sessionFamilyId: familyId,
+        sessionId: session.id
+      });
+      await repo.auditAuthEvent({
+        organizationId: principal.organizationId,
+        userId: principal.userId,
+        deviceId: principal.deviceId,
+        sessionId: session.id,
+        operation: 'auth.storefront_admin_login',
+        requestId: input.requestId ?? createRequestId(),
+        correlationId: input.correlationId ?? input.requestId ?? createRequestId(),
+        payload: { customerId: input.customer.customerId }
       });
       return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
     });
@@ -240,6 +324,69 @@ export class AuthService {
       expiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS,
       refreshExpiresIn: this.config.REFRESH_TOKEN_TTL_SECONDS
     };
+  }
+
+  private storefrontAdminEmails(): string[] {
+    return this.config.STOREFRONT_ADMIN_EMAILS.split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  private async provisionStorefrontAdmin(
+    client: Pick<Database['pool'], 'query'>,
+    input: { organizationId: string; email: string; displayName: string }
+  ): Promise<{ id: string; organizationId: string }> {
+    const existingUser = await client.query<{ id: string; organization_id: string }>(
+      `SELECT id, organization_id FROM users
+       WHERE organization_id = $1 AND normalized_email = lower($2)
+       FOR UPDATE`,
+      [input.organizationId, input.email]
+    );
+    let user = existingUser.rows[0];
+    if (!user) {
+      const created = await client.query<{ id: string; organization_id: string }>(
+        `INSERT INTO users (organization_id, email, display_name, active)
+         VALUES ($1, $2, $3, true)
+         RETURNING id, organization_id`,
+        [input.organizationId, input.email, input.displayName || input.email]
+      );
+      user = created.rows[0];
+    } else {
+      await client.query(
+        `UPDATE users SET active = true, display_name = $3, updated_at = now()
+         WHERE id = $1 AND organization_id = $2`,
+        [user.id, input.organizationId, input.displayName || input.email]
+      );
+    }
+
+    const existingRole = await client.query<{ id: string }>(
+      `SELECT id FROM roles WHERE organization_id = $1 AND lower(name) = 'storefront_admin' FOR UPDATE`,
+      [input.organizationId]
+    );
+    let roleId = existingRole.rows[0]?.id;
+    if (!roleId) {
+      const created = await client.query<{ id: string }>(
+        `INSERT INTO roles (organization_id, name, description, system_role)
+         VALUES ($1, 'storefront_admin', 'Full administrator provisioned from the storefront allowlist', true)
+         RETURNING id`,
+        [input.organizationId]
+      );
+      roleId = created.rows[0]?.id;
+    }
+    if (!user || !roleId) {
+      throw new InvalidCredentialsError();
+    }
+    await client.query(
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT $1, id FROM permissions
+       ON CONFLICT DO NOTHING`,
+      [roleId]
+    );
+    await client.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [user.id, roleId]
+    );
+    return { id: user.id, organizationId: user.organization_id };
   }
 }
 

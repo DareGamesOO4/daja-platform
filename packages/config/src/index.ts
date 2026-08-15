@@ -43,7 +43,10 @@ const envSchema = z.object({
   FIRESTORE_PROJECT_ID: optionalPreparedSecret,
   GOOGLE_OAUTH_CLIENT_ID: optionalPreparedSecret,
   GOOGLE_OAUTH_CLIENT_SECRET: optionalPreparedSecret,
-  OAUTH_FRONTEND_REDIRECT_URL: optionalPreparedSecret
+  OAUTH_FRONTEND_REDIRECT_URL: optionalPreparedSecret,
+  // Comma-separated email allowlist. These storefront customers may exchange a
+  // verified customer session for a real staff/admin session.
+  STOREFRONT_ADMIN_EMAILS: optionalPreparedSecret
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

@@ -30,6 +30,8 @@ services:
         sync: false
       - key: OAUTH_FRONTEND_REDIRECT_URL
         value: https://dajashop.rs
+      - key: STOREFRONT_ADMIN_EMAILS
+        sync: false
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_BUCKET

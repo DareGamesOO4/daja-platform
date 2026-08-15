@@ -22,6 +22,7 @@ import { requirePermission, ValidationFailedError } from '@daja/security';
 import { createRequestId } from '@daja/shared';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
+import { AuthService } from './auth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
@@ -37,6 +38,7 @@ const loginSchema = z.object({
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
 
 const addressSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
@@ -95,7 +97,8 @@ const remoteImageSchema = z.object({
 export class CustomerAuthController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
-    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService
+    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    @Inject(AuthService) private readonly staffAuth: AuthService
   ) {}
 
   @Post('register')
@@ -125,6 +128,27 @@ export class CustomerAuthController {
   async me(@Req() request: Request) {
     return {
       user: serializeCustomerPrincipal(await this.auth.requireCustomer(bearerToken(request)))
+    };
+  }
+
+  @Post('admin/session')
+  async adminSession(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(adminSessionSchema, body);
+    const result = await this.staffAuth.loginConfiguredStorefrontAdmin({
+      customer,
+      deviceId: input.deviceId,
+      requestId: request.headers['x-request-id'] as string | undefined,
+      correlationId: request.headers['x-correlation-id'] as string | undefined
+    });
+    return {
+      ...result.tokens,
+      user: {
+        userId: result.principal.userId,
+        email: result.principal.email,
+        roles: result.principal.roles,
+        permissions: result.principal.permissions
+      }
     };
   }
 
