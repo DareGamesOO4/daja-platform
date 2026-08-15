@@ -131,7 +131,7 @@ export class AuthService {
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const googleIdentity = await client.query(
-        `SELECT 1 FROM oauth_accounts
+        `SELECT 1 FROM customer_identities
          WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google'
          LIMIT 1`,
         [input.customer.organizationId, input.customer.customerId]
