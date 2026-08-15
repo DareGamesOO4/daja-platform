@@ -43,6 +43,7 @@ import {
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
+import { RealtimeGateway } from './realtime.gateway.js';
 
 const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -178,7 +179,8 @@ export class StaffCatalogController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(REDIS) private readonly redis: RedisConnection
+    @Inject(REDIS) private readonly redis: RedisConnection,
+    private readonly realtime: RealtimeGateway
   ) {}
 
   @Get('departments')
@@ -829,11 +831,20 @@ export class StaffCatalogController {
   }
 
   private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {
-    const keys = slugs
-      .filter((slug): slug is string => Boolean(slug))
+    const validSlugs = slugs.filter((slug): slug is string => Boolean(slug));
+    const keys = validSlugs
       .map((slug) => `catalog:slug:${organizationId}:${slug}`);
     if (keys.length > 0) {
       await this.redis.client.del(...keys);
+    }
+    // Only the changed product slug is broadcast. Storefront clients fetch
+    // that one public record and never reload the complete catalog.
+    for (const slug of validSlugs) {
+      this.realtime.publish({
+        organizationId,
+        event: 'product.updated',
+        payload: { slug }
+      });
     }
   }
 

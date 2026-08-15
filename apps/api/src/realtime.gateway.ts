@@ -9,7 +9,9 @@ import {
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import { createRequestId } from '@daja/shared';
+import type { AppConfig } from '@daja/config';
 import { AuthService } from './auth.service.js';
+import { CONFIG } from './tokens.js';
 
 type RealtimeEvent =
   | 'product.updated'
@@ -41,7 +43,10 @@ const allowedEvents: RealtimeEvent[] = [
   cors: { origin: false }
 })
 export class RealtimeGateway {
-  constructor(@Inject(AuthService) private readonly authService: AuthService) {}
+  constructor(
+    @Inject(AuthService) private readonly authService: AuthService,
+    @Inject(CONFIG) private readonly config: AppConfig
+  ) {}
 
   @WebSocketServer()
   private readonly server!: Server;
@@ -72,6 +77,15 @@ export class RealtimeGateway {
         deny(socket);
         return;
       }
+    }
+
+    // The storefront catalog is public, so visitors without an account may
+    // subscribe only to its safe product-change channel. They are deliberately
+    // put in a separate room and can never receive staff/order events.
+    if (socket.handshake.auth.publicCatalog === true && this.config.PUBLIC_ORGANIZATION_ID) {
+      socket.data.publicCatalog = true;
+      void socket.join(publicCatalogRoom(this.config.PUBLIC_ORGANIZATION_ID));
+      return;
     }
 
     if (process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
@@ -138,6 +152,9 @@ export class RealtimeGateway {
       ? this.server.to(locationRoom(input.organizationId, input.locationId))
       : this.server.to(orgRoom(input.organizationId));
     target.emit(input.event, envelope);
+    if (input.event === 'product.updated' && !input.locationId) {
+      this.server.to(publicCatalogRoom(input.organizationId)).emit(input.event, envelope);
+    }
   }
 }
 
@@ -158,6 +175,10 @@ function orgRoom(organizationId: string): string {
 
 function locationRoom(organizationId: string, locationId: string): string {
   return `org:${organizationId}:location:${locationId}`;
+}
+
+function publicCatalogRoom(organizationId: string): string {
+  return `public-catalog:${organizationId}`;
 }
 
 function stringValue(value: unknown): string | undefined {
