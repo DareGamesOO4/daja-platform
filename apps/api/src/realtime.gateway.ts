@@ -19,7 +19,9 @@ type RealtimeEvent =
   | 'rfid.tag.assigned'
   | 'rfid.tag.status_changed'
   | 'reader.status'
-  | 'sync.conflict';
+  | 'sync.conflict'
+  | 'orders.created'
+  | 'orders.updated';
 
 const allowedEvents: RealtimeEvent[] = [
   'product.updated',
@@ -29,7 +31,9 @@ const allowedEvents: RealtimeEvent[] = [
   'rfid.tag.assigned',
   'rfid.tag.status_changed',
   'reader.status',
-  'sync.conflict'
+  'sync.conflict',
+  'orders.created',
+  'orders.updated'
 ];
 
 @WebSocketGateway({

@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Req
 } from '@nestjs/common';
@@ -49,6 +50,10 @@ const productCreateSchema = z.object({
   description: z.string().max(20_000).nullable().optional(),
   brandId: uuidSchema.nullable().optional(),
   primaryCategoryId: uuidSchema.nullable().optional(),
+  departmentId: uuidSchema.nullable().optional(),
+  seo: z.record(z.string(), z.string()).optional(),
+  features: z.array(z.object({ title: z.string().trim().min(1).max(160), subtitle: z.string().trim().max(320).optional() })).optional(),
+  model3DUrl: z.string().url().nullable().optional(),
   active: z.boolean().optional(),
   published: z.boolean().optional(),
   legacyFirestoreId: z.string().trim().min(1).max(240).nullable().optional(),
@@ -78,12 +83,15 @@ const variantPatchSchema = variantCreateSchema.partial().extend({
 const brandSchema = z.object({
   name: z.string().trim().min(1).max(240),
   slug: slugSchema.optional(),
+  departmentId: uuidSchema,
   active: z.boolean().optional()
 });
 
 const categorySchema = z.object({
   name: z.string().trim().min(1).max(240),
   slug: slugSchema.optional(),
+  departmentId: uuidSchema,
+  brandId: uuidSchema,
   parentId: uuidSchema.nullable().optional(),
   sortOrder: z.coerce.number().int().optional(),
   active: z.boolean().optional()
@@ -92,8 +100,16 @@ const categorySchema = z.object({
 const specKeySchema = z.object({
   name: z.string().trim().min(1).max(240),
   slug: slugSchema.optional(),
-  department: z.string().trim().min(1).max(120).nullable().optional(),
+  departmentId: uuidSchema,
+  unit: z.string().trim().max(80).nullable().optional(),
   dataType: z.string().trim().min(1).max(80).optional(),
+  active: z.boolean().optional()
+});
+
+const departmentSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  slug: slugSchema.optional(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
   active: z.boolean().optional()
 });
 
@@ -163,6 +179,47 @@ export class StaffCatalogController {
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
+
+  @Get('departments')
+  async listDepartments(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(
+      `SELECT id, name, slug, sort_order AS "sortOrder", active
+       FROM departments WHERE organization_id = $1 AND deleted_at IS NULL ORDER BY sort_order, name`,
+      [ctx.organizationId]
+    )).rows;
+  }
+
+  @Post('departments')
+  async createDepartment(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(departmentSchema, body);
+    return (await this.database.pool.query(
+      `INSERT INTO departments (organization_id, name, slug, sort_order, active)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, slug, sort_order AS "sortOrder", active`,
+      [ctx.organizationId, input.name, input.slug ?? slugifyLocal(input.name), input.sortOrder ?? 0, input.active ?? true]
+    )).rows[0];
+  }
+
+  @Patch('departments/:id')
+  async updateDepartment(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const departmentId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(departmentSchema.partial(), body);
+    const result = await this.database.pool.query(
+      `UPDATE departments SET name = COALESCE($3, name), slug = COALESCE($4, slug),
+       sort_order = COALESCE($5, sort_order), active = COALESCE($6, active), updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id, name, slug, sort_order AS "sortOrder", active`,
+      [ctx.organizationId, departmentId, input.name ?? null, input.slug ?? null, input.sortOrder ?? null, input.active ?? null]
+    );
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    return result.rows[0];
+  }
 
   @Post('products')
   async createProduct(@Req() request: Request, @Body() body: unknown) {
@@ -336,12 +393,155 @@ export class StaffCatalogController {
     return patched.after;
   }
 
+  @Get('products/:id/variants')
+  async listVariants(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(
+      `SELECT id, product_id AS "productId", sku, barcode, name, gender,
+              current_price_amount AS "currentPriceAmount", currency, attributes,
+              active, published, version
+       FROM product_variants
+       WHERE organization_id = $1 AND product_id = $2 AND deleted_at IS NULL
+       ORDER BY created_at`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    )).rows;
+  }
+
+  @Delete('variants/:id')
+  async deleteVariant(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const result = await this.database.pool.query(
+      `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
+       version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    );
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    return { deleted: true };
+  }
+
+  @Get('variants/:id/specifications')
+  async listVariantSpecifications(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(
+      `SELECT vsv.spec_key_id AS "specKeyId", sk.name AS "specName", sk.slug AS "specSlug", sk.unit,
+              sk.data_type AS "dataType", vsv.value
+       FROM variant_specification_values vsv
+       JOIN spec_keys sk ON sk.id = vsv.spec_key_id
+       WHERE vsv.organization_id = $1 AND vsv.variant_id = $2
+       ORDER BY sk.name`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    )).rows;
+  }
+
+  @Put('variants/:id/specifications')
+  async replaceVariantSpecifications(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const variantId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(z.object({ values: z.array(z.object({ specKeyId: uuidSchema, value: z.string().trim().min(1).max(1000) })).max(100) }), body);
+    const variant = await this.database.pool.query(
+      `SELECT v.product_id, p.department_id FROM product_variants v JOIN products p ON p.id = v.product_id
+       WHERE v.organization_id = $1 AND v.id = $2 AND v.deleted_at IS NULL AND p.deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    if (variant.rowCount !== 1) throw new TenantAccessDeniedError();
+    const departmentId = variant.rows[0].department_id;
+    for (const item of input.values) {
+      const valid = await this.database.pool.query(
+        `SELECT 1 FROM spec_keys WHERE organization_id = $1 AND id = $2 AND active AND deleted_at IS NULL
+         AND ($3::uuid IS NULL OR department_id = $3::uuid)`,
+        [ctx.organizationId, item.specKeyId, departmentId]
+      );
+      if (valid.rowCount !== 1) throw new Error('Specification does not belong to this product department');
+    }
+    await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await client.query(`DELETE FROM variant_specification_values WHERE organization_id = $1 AND variant_id = $2`, [ctx.organizationId, variantId]);
+      for (const item of input.values) {
+        await client.query(`INSERT INTO variant_specification_values (organization_id, variant_id, spec_key_id, value) VALUES ($1, $2, $3, $4)`, [ctx.organizationId, variantId, item.specKeyId, item.value]);
+      }
+    });
+    return this.listVariantSpecifications(request, id);
+  }
+
+  @Get('products/:id/media')
+  async listProductMedia(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(
+      `SELECT pm.id, pm.media_asset_id AS "mediaId", pm.role, pm.position, pm.is_primary AS "isPrimary",
+              ma.public_url AS url, ma.status
+       FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
+       WHERE pm.organization_id = $1 AND pm.product_id = $2
+       ORDER BY pm.is_primary DESC, pm.position, pm.id`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    )).rows;
+  }
+
+  @Post('products/:id/media')
+  async attachProductMedia(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const productId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(z.object({ mediaId: uuidSchema, role: z.string().trim().min(1).max(40).optional(), position: z.coerce.number().int().min(0).optional(), isPrimary: z.boolean().optional() }), body);
+    const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
+    const asset = await this.database.pool.query(
+      `SELECT 1 FROM media_assets WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, input.mediaId]
+    );
+    if (asset.rowCount !== 1) throw new TenantAccessDeniedError();
+    if (input.isPrimary) await this.database.pool.query(`UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`, [ctx.organizationId, productId]);
+    const result = await this.database.pool.query(
+      `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
+      [ctx.organizationId, productId, input.mediaId, input.role ?? 'gallery', input.position ?? 0, input.isPrimary ?? false]
+    );
+    await this.invalidateCatalog(ctx.organizationId, product.slug);
+    return result.rows[0];
+  }
+
+  @Patch('products/:productId/media/:mediaLinkId')
+  async patchProductMedia(@Req() request: Request, @Param('productId') productIdParam: string, @Param('mediaLinkId') mediaLinkIdParam: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const productId = parseWithSchema(uuidSchema, productIdParam);
+    const linkId = parseWithSchema(uuidSchema, mediaLinkIdParam);
+    const input = parseWithSchema(z.object({ position: z.coerce.number().int().min(0).optional(), isPrimary: z.boolean().optional(), role: z.string().trim().min(1).max(40).optional() }), body);
+    const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
+    if (input.isPrimary) await this.database.pool.query(`UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`, [ctx.organizationId, productId]);
+    const result = await this.database.pool.query(
+      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary)
+       WHERE organization_id = $1 AND product_id = $2 AND id = $3
+       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
+      [ctx.organizationId, productId, linkId, input.position ?? null, input.role ?? null, input.isPrimary ?? null]
+    );
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    await this.invalidateCatalog(ctx.organizationId, product.slug);
+    return result.rows[0];
+  }
+
+  @Delete('products/:productId/media/:mediaLinkId')
+  async detachProductMedia(@Req() request: Request, @Param('productId') productIdParam: string, @Param('mediaLinkId') mediaLinkIdParam: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const productId = parseWithSchema(uuidSchema, productIdParam);
+    const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
+    const result = await this.database.pool.query(`DELETE FROM product_media WHERE organization_id = $1 AND product_id = $2 AND id = $3`, [ctx.organizationId, productId, parseWithSchema(uuidSchema, mediaLinkIdParam)]);
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    await this.invalidateCatalog(ctx.organizationId, product.slug);
+    return { deleted: true };
+  }
+
   @Get('brands')
   async listBrands(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     const result = await this.database.pool.query(
-      `SELECT id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"
+      `SELECT id, name, slug, department_id AS "departmentId", active, version, created_at AS "createdAt", updated_at AS "updatedAt"
        FROM brands
        WHERE organization_id = $1 AND deleted_at IS NULL
        ORDER BY normalized_name`,
@@ -355,11 +555,12 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(brandSchema, body);
+    await this.assertActiveDepartment(ctx.organizationId, input.departmentId);
     const result = await this.database.pool.query(
-      `INSERT INTO brands (organization_id, name, slug, active)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
-      [ctx.organizationId, input.name, input.slug ?? slugifyLocal(input.name), input.active ?? true]
+      `INSERT INTO brands (organization_id, name, slug, department_id, active)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, slug, department_id AS "departmentId", active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [ctx.organizationId, input.name, input.slug ?? slugifyLocal(input.name), input.departmentId, input.active ?? true]
     );
     return result.rows[0];
   }
@@ -371,19 +572,20 @@ export class StaffCatalogController {
     const brandId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(brandSchema.partial(), body);
     const current = await this.database.pool.query(
-      `SELECT name, slug, active FROM brands WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      `SELECT name, slug, department_id, active FROM brands WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [ctx.organizationId, brandId]
     );
     if (current.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
     const row = current.rows[0];
+    await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
     const result = await this.database.pool.query(
       `UPDATE brands
-       SET name = $3, slug = $4, active = $5, version = version + 1, updated_at = now()
+       SET name = $3, slug = $4, department_id = $5, active = $6, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, name, slug, active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
-      [ctx.organizationId, brandId, input.name ?? row.name, input.slug ?? row.slug, input.active ?? row.active]
+       RETURNING id, name, slug, department_id AS "departmentId", active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [ctx.organizationId, brandId, input.name ?? row.name, input.slug ?? row.slug, input.departmentId ?? row.department_id, input.active ?? row.active]
     );
     return result.rows[0];
   }
@@ -392,11 +594,17 @@ export class StaffCatalogController {
   async deleteBrand(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
+    const brandId = parseWithSchema(uuidSchema, id);
+    const used = await this.database.pool.query(
+      `SELECT 1 FROM products WHERE organization_id = $1 AND brand_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [ctx.organizationId, brandId]
+    );
+    if (used.rowCount) throw new Error('Brand cannot be deleted while products still use it');
     const result = await this.database.pool.query(
       `UPDATE brands
        SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+      [ctx.organizationId, brandId]
     );
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
@@ -409,7 +617,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     const result = await this.database.pool.query(
-      `SELECT id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+      `SELECT id, parent_id AS "parentId", department_id AS "departmentId", brand_id AS "brandId", name, slug, sort_order AS "sortOrder",
               active, version, created_at AS "createdAt", updated_at AS "updatedAt"
        FROM categories
        WHERE organization_id = $1 AND deleted_at IS NULL
@@ -424,18 +632,16 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(categorySchema, body);
+    await this.assertBrandInDepartment(ctx.organizationId, input.brandId, input.departmentId);
     const result = await this.database.pool.query(
-      `INSERT INTO categories (organization_id, parent_id, name, slug, sort_order, active)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+      `INSERT INTO categories (organization_id, parent_id, department_id, brand_id, name, slug, sort_order, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, parent_id AS "parentId", department_id AS "departmentId", brand_id AS "brandId", name, slug, sort_order AS "sortOrder",
                  active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
         input.parentId ?? null,
-        input.name,
-        input.slug ?? slugifyLocal(input.name),
-        input.sortOrder ?? 0,
-        input.active ?? true
+        input.departmentId, input.brandId, input.name, input.slug ?? slugifyLocal(input.name), input.sortOrder ?? 0, input.active ?? true
       ]
     );
     return result.rows[0];
@@ -448,7 +654,7 @@ export class StaffCatalogController {
     const categoryId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(categorySchema.partial(), body);
     const current = await this.database.pool.query(
-      `SELECT parent_id, name, slug, sort_order, active
+      `SELECT parent_id, department_id, brand_id, name, slug, sort_order, active
        FROM categories WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [ctx.organizationId, categoryId]
     );
@@ -456,21 +662,21 @@ export class StaffCatalogController {
       throw new TenantAccessDeniedError();
     }
     const row = current.rows[0];
+    await this.assertBrandInDepartment(ctx.organizationId, input.brandId ?? row.brand_id, input.departmentId ?? row.department_id);
     const result = await this.database.pool.query(
       `UPDATE categories
-       SET parent_id = $3, name = $4, slug = $5, sort_order = $6, active = $7,
+       SET parent_id = $3, department_id = $4, brand_id = $5, name = $6, slug = $7, sort_order = $8, active = $9,
            version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, parent_id AS "parentId", name, slug, sort_order AS "sortOrder",
+       RETURNING id, parent_id AS "parentId", department_id AS "departmentId", brand_id AS "brandId", name, slug, sort_order AS "sortOrder",
                  active, version, created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
         categoryId,
         input.parentId === undefined ? row.parent_id : input.parentId,
-        input.name ?? row.name,
-        input.slug ?? row.slug,
-        input.sortOrder ?? row.sort_order,
-        input.active ?? row.active
+        input.departmentId ?? row.department_id,
+        input.brandId ?? row.brand_id,
+        input.name ?? row.name, input.slug ?? row.slug, input.sortOrder ?? row.sort_order, input.active ?? row.active
       ]
     );
     return result.rows[0];
@@ -480,11 +686,17 @@ export class StaffCatalogController {
   async deleteCategory(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
+    const categoryId = parseWithSchema(uuidSchema, id);
+    const used = await this.database.pool.query(
+      `SELECT 1 FROM products WHERE organization_id = $1 AND primary_category_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [ctx.organizationId, categoryId]
+    );
+    if (used.rowCount) throw new Error('Category cannot be deleted while products still use it');
     const result = await this.database.pool.query(
       `UPDATE categories
        SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+      [ctx.organizationId, categoryId]
     );
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
@@ -497,7 +709,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     const result = await this.database.pool.query(
-      `SELECT id, name, slug, department, data_type AS "dataType", active, version,
+      `SELECT id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
               created_at AS "createdAt", updated_at AS "updatedAt"
        FROM spec_keys
        WHERE organization_id = $1 AND deleted_at IS NULL
@@ -512,18 +724,17 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(specKeySchema, body);
+    await this.assertActiveDepartment(ctx.organizationId, input.departmentId);
     const result = await this.database.pool.query(
-      `INSERT INTO spec_keys (organization_id, name, slug, department, data_type, active)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, name, slug, department, data_type AS "dataType", active, version,
+      `INSERT INTO spec_keys (organization_id, name, slug, department_id, unit, data_type, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
                  created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
         input.name,
         input.slug ?? slugifyLocal(input.name),
-        input.department ?? null,
-        input.dataType ?? 'text',
-        input.active ?? true
+        input.departmentId, input.unit ?? null, input.dataType ?? 'text', input.active ?? true
       ]
     );
     return result.rows[0];
@@ -536,7 +747,7 @@ export class StaffCatalogController {
     const specKeyId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(specKeySchema.partial(), body);
     const current = await this.database.pool.query(
-      `SELECT name, slug, department, data_type, active
+      `SELECT name, slug, department_id, unit, data_type, active
        FROM spec_keys WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [ctx.organizationId, specKeyId]
     );
@@ -544,21 +755,22 @@ export class StaffCatalogController {
       throw new TenantAccessDeniedError();
     }
     const row = current.rows[0];
+    await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
     const result = await this.database.pool.query(
       `UPDATE spec_keys
-       SET name = $3, slug = $4, department = $5, data_type = $6, active = $7,
+       SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, active = $8,
            version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, name, slug, department, data_type AS "dataType", active, version,
+       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
                  created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
         specKeyId,
         input.name ?? row.name,
         input.slug ?? row.slug,
-        input.department === undefined ? row.department : input.department,
-        input.dataType ?? row.data_type,
-        input.active ?? row.active
+        input.departmentId ?? row.department_id,
+        input.unit === undefined ? row.unit : input.unit,
+        input.dataType ?? row.data_type, input.active ?? row.active
       ]
     );
     return result.rows[0];
@@ -587,6 +799,22 @@ export class StaffCatalogController {
     if (keys.length > 0) {
       await this.redis.client.del(...keys);
     }
+  }
+
+  private async assertActiveDepartment(organizationId: string, departmentId: string) {
+    const result = await this.database.pool.query(
+      `SELECT 1 FROM departments WHERE organization_id = $1 AND id = $2 AND active AND deleted_at IS NULL`,
+      [organizationId, departmentId]
+    );
+    if (result.rowCount !== 1) throw new Error('Department does not exist or is inactive');
+  }
+
+  private async assertBrandInDepartment(organizationId: string, brandId: string, departmentId: string) {
+    const result = await this.database.pool.query(
+      `SELECT 1 FROM brands WHERE organization_id = $1 AND id = $2 AND department_id = $3 AND active AND deleted_at IS NULL`,
+      [organizationId, brandId, departmentId]
+    );
+    if (result.rowCount !== 1) throw new Error('Brand does not belong to the selected department');
   }
 }
 

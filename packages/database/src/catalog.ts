@@ -16,8 +16,12 @@ export interface ProductRecord {
   name: string;
   slug: string;
   description: string | null;
+  departmentId: string | null;
   brandId: string | null;
   primaryCategoryId: string | null;
+  seo: Record<string, string>;
+  features: Array<{ title: string; subtitle?: string | undefined }>;
+  model3DUrl: string | null;
   active: boolean;
   published: boolean;
   legacyFirestoreId: string | null;
@@ -108,6 +112,7 @@ export class CatalogRepository {
 
     const result = await this.client.query<PublicProductRow>(
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
+              p.brand_id, p.primary_category_id,
               b.name AS brand, c.name AS category,
               v.current_price_amount AS price, v.currency,
               COALESCE(inv.quantity, 0) AS available_quantity,
@@ -235,27 +240,35 @@ export class CatalogRepository {
       name: string;
       slug: string;
       description?: string | null | undefined;
+      departmentId?: string | null | undefined;
       brandId?: string | null | undefined;
       primaryCategoryId?: string | null | undefined;
+      seo?: Record<string, string> | undefined;
+      features?: Array<{ title: string; subtitle?: string | undefined }> | undefined;
+      model3DUrl?: string | null | undefined;
       published?: boolean | undefined;
       active?: boolean | undefined;
       legacyFirestoreId?: string | null | undefined;
       externalId?: string | null | undefined;
     }
   ): Promise<ProductRecord> {
-    await this.assertOptionalTenantRefs(ctx.organizationId, input.brandId, input.primaryCategoryId);
+    await this.assertCatalogHierarchy(ctx.organizationId, input.departmentId, input.brandId, input.primaryCategoryId);
     try {
       const result = await this.client.query<ProductRow>(
-        `INSERT INTO products (organization_id, name, slug, description, brand_id, primary_category_id, active, published, legacy_firestore_id, external_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO products (organization_id, name, slug, description, department_id, brand_id, primary_category_id, seo, features, model_3d_url, active, published, legacy_firestore_id, external_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14)
          RETURNING *`,
         [
           ctx.organizationId,
           input.name,
           input.slug,
           input.description ?? null,
+          input.departmentId ?? null,
           input.brandId ?? null,
           input.primaryCategoryId ?? null,
+          JSON.stringify(input.seo ?? {}),
+          JSON.stringify(input.features ?? []),
+          input.model3DUrl ?? null,
           input.active ?? true,
           input.published ?? false,
           input.legacyFirestoreId ?? null,
@@ -290,29 +303,29 @@ export class CatalogRepository {
       name: string | undefined;
       slug: string | undefined;
       description: string | null | undefined;
+      departmentId: string | null | undefined;
       brandId: string | null | undefined;
       primaryCategoryId: string | null | undefined;
+      seo: Record<string, string> | undefined;
+      features: Array<{ title: string; subtitle?: string | undefined }> | undefined;
+      model3DUrl: string | null | undefined;
       active: boolean | undefined;
       published: boolean | undefined;
     }>
   ): Promise<ProductRecord> {
-    if (input.brandId !== undefined || input.primaryCategoryId !== undefined) {
-      await this.assertOptionalTenantRefs(
-        ctx.organizationId,
-        input.brandId,
-        input.primaryCategoryId
-      );
-    }
     const current = await this.getProduct(ctx, id);
     if (input.expectedVersion !== undefined && current.version !== input.expectedVersion) {
       throw new VersionConflictError();
     }
     const next = { ...current, ...input };
+    if (input.departmentId !== undefined || input.brandId !== undefined || input.primaryCategoryId !== undefined) {
+      await this.assertCatalogHierarchy(ctx.organizationId, next.departmentId, next.brandId, next.primaryCategoryId);
+    }
     try {
       const result = await this.client.query<ProductRow>(
         `UPDATE products
-         SET name = $3, slug = $4, description = $5, brand_id = $6, primary_category_id = $7,
-             active = $8, published = $9, version = version + 1, updated_at = now()
+         SET name = $3, slug = $4, description = $5, department_id = $6, brand_id = $7, primary_category_id = $8,
+             seo = $9::jsonb, features = $10::jsonb, model_3d_url = $11, active = $12, published = $13, version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING *`,
         [
@@ -321,8 +334,12 @@ export class CatalogRepository {
           next.name,
           next.slug,
           next.description,
+          next.departmentId,
           next.brandId,
           next.primaryCategoryId,
+          JSON.stringify(next.seo),
+          JSON.stringify(next.features),
+          next.model3DUrl,
           next.active,
           next.published
         ]
@@ -472,15 +489,24 @@ export class CatalogRepository {
     return mapVariant(requireRow(result));
   }
 
-  private async assertOptionalTenantRefs(
+  private async assertCatalogHierarchy(
     organizationId: string,
+    departmentId: string | null | undefined,
     brandId: string | null | undefined,
     categoryId: string | null | undefined
   ): Promise<void> {
+    if (departmentId) {
+      const result = await this.client.query(
+        `SELECT 1 FROM departments WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND active`,
+        [organizationId, departmentId]
+      );
+      if (result.rowCount !== 1) throw new ValidationFailedError('Department does not belong to organization');
+    }
     if (brandId) {
       const result = await this.client.query(
-        `SELECT 1 FROM brands WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-        [organizationId, brandId]
+        `SELECT 1 FROM brands WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         AND ($3::uuid IS NULL OR department_id = $3::uuid)`,
+        [organizationId, brandId, departmentId ?? null]
       );
       if (result.rowCount !== 1) {
         throw new ValidationFailedError('Brand does not belong to organization');
@@ -488,8 +514,10 @@ export class CatalogRepository {
     }
     if (categoryId) {
       const result = await this.client.query(
-        `SELECT 1 FROM categories WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-        [organizationId, categoryId]
+        `SELECT 1 FROM categories WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         AND ($3::uuid IS NULL OR department_id = $3::uuid)
+         AND ($4::uuid IS NULL OR brand_id = $4::uuid)`,
+        [organizationId, categoryId, departmentId ?? null, brandId ?? null]
       );
       if (result.rowCount !== 1) {
         throw new ValidationFailedError('Category does not belong to organization');
@@ -503,6 +531,8 @@ export interface PublicProductCard {
   variantId: string;
   name: string;
   slug: string;
+  brandId: string | null;
+  primaryCategoryId: string | null;
   brand: string | null;
   category: string | null;
   price: number;
@@ -517,6 +547,8 @@ interface PublicProductRow {
   variant_id: string;
   name: string;
   slug: string;
+  brand_id: string | null;
+  primary_category_id: string | null;
   brand: string | null;
   category: string | null;
   price: number;
@@ -533,8 +565,12 @@ interface ProductRow {
   name: string;
   slug: string;
   description: string | null;
+  department_id: string | null;
   brand_id: string | null;
   primary_category_id: string | null;
+  seo: Record<string, string>;
+  features: Array<{ title: string; subtitle?: string | undefined }>;
+  model_3d_url: string | null;
   active: boolean;
   published: boolean;
   legacy_firestore_id: string | null;
@@ -576,8 +612,12 @@ function mapProduct(row: ProductRow): ProductRecord {
     name: row.name,
     slug: row.slug,
     description: row.description,
+    departmentId: row.department_id,
     brandId: row.brand_id,
     primaryCategoryId: row.primary_category_id,
+    seo: row.seo ?? {},
+    features: row.features ?? [],
+    model3DUrl: row.model_3d_url,
     active: row.active,
     published: row.published,
     legacyFirestoreId: row.legacy_firestore_id,
@@ -614,6 +654,8 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     variantId: row.variant_id,
     name: row.name,
     slug: row.slug,
+    brandId: row.brand_id,
+    primaryCategoryId: row.primary_category_id,
     brand: row.brand,
     category: row.category,
     price: row.price,

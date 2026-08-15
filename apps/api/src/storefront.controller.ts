@@ -25,6 +25,7 @@ import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth
 import { AuthService } from './auth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { RealtimeGateway } from './realtime.gateway.js';
 
 const registerSchema = z.object({
   identity: z.string().trim().min(3).max(240),
@@ -344,7 +345,8 @@ export class StorefrontOrdersController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService
+    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    private readonly realtime: RealtimeGateway
   ) {}
 
   @Post('orders')
@@ -354,7 +356,7 @@ export class StorefrontOrdersController {
       ? await this.auth.authenticateAccessToken(token).catch(() => null)
       : null;
     const input = parseWithSchema(orderSchema, body);
-    return new StorefrontRepository(this.database.pool).createOrder(
+    const order = await new StorefrontRepository(this.database.pool).createOrder(
       publicOrganizationId(this.config),
       {
         customerId: customer?.customerId ?? null,
@@ -369,6 +371,8 @@ export class StorefrontOrdersController {
         paymentMethod: input.paymentMethod
       }
     );
+    this.realtime.publish({ organizationId: publicOrganizationId(this.config), event: 'orders.created', payload: { orderId: order.id, displayId: order.displayId } });
+    return order;
   }
 
   @Get('orders/me')
@@ -402,26 +406,30 @@ export class StorefrontOrdersController {
   }
 
   @Patch('admin/orders/:id/status')
-  updateStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+  async updateStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'orders.write');
     const input = parseWithSchema(statusSchema, body);
-    return new StorefrontRepository(this.database.pool).updateOrderStatus({
+    const order = await new StorefrontRepository(this.database.pool).updateOrderStatus({
       organizationId: ctx.organizationId,
       orderIdOrDisplayId: id,
       status: input.status,
       userId: ctx.userId
     });
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'orders.updated', payload: { orderId: order.id, status: order.status } });
+    return order;
   }
 
   @Patch('admin/orders/:id/read')
-  markRead(@Req() request: Request, @Param('id') id: string) {
+  async markRead(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'orders.write');
-    return new StorefrontRepository(this.database.pool).markOrderRead({
+    const order = await new StorefrontRepository(this.database.pool).markOrderRead({
       organizationId: ctx.organizationId,
       orderIdOrDisplayId: id
     });
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'orders.updated', payload: { orderId: order.id, isRead: true } });
+    return order;
   }
 }
 
