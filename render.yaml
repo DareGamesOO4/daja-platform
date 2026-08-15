@@ -1,0 +1,81 @@
+services:
+  - type: web
+    name: daja-platform-api
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: API_PUBLIC_BASE_URL
+        value: https://daja-platform-api.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: http://localhost:5173,http://127.0.0.1:5173,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: PUBLIC_ORGANIZATION_ID
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: OAUTH_FRONTEND_REDIRECT_URL
+        value: https://dajashop.rs
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: MEDIA_PUBLIC_BASE_URL
+        sync: false
+
+  - type: worker
+    name: daja-platform-worker
+    runtime: docker
+    dockerfilePath: ./apps/worker/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: '3000'
+      - key: API_PUBLIC_BASE_URL
+        value: https://daja-platform-api.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: http://localhost:5173,http://127.0.0.1:5173,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: MEDIA_PUBLIC_BASE_URL
+        sync: false
