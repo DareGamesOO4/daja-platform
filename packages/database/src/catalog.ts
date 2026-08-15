@@ -516,7 +516,7 @@ export class CatalogRepository {
       const result = await this.client.query(
         `SELECT 1 FROM categories WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          AND ($3::uuid IS NULL OR department_id = $3::uuid)
-         AND ($4::uuid IS NULL OR brand_id = $4::uuid)`,
+         AND ($4::uuid IS NULL OR brand_id IS NULL OR brand_id = $4::uuid)`,
         [organizationId, categoryId, departmentId ?? null, brandId ?? null]
       );
       if (result.rowCount !== 1) {

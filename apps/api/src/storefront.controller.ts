@@ -88,6 +88,11 @@ const statusSchema = z.object({
   status: z.string().trim().min(1).max(80)
 });
 
+const promotionSchema = z.object({
+  code: z.string().trim().min(1).max(80),
+  subtotal: z.coerce.number().min(0)
+});
+
 const remoteImageSchema = z.object({
   url: z.string().url(),
   productName: z.string().trim().min(1).max(240),
@@ -356,6 +361,12 @@ export class StorefrontOrdersController {
       ? await this.auth.authenticateAccessToken(token).catch(() => null)
       : null;
     const input = parseWithSchema(orderSchema, body);
+    const promotion = await this.resolveNewsletterPromotion(
+      publicOrganizationId(this.config),
+      customer,
+      input.promoCode,
+      input.subtotal
+    );
     const order = await new StorefrontRepository(this.database.pool).createOrder(
       publicOrganizationId(this.config),
       {
@@ -363,16 +374,23 @@ export class StorefrontOrdersController {
         customer: input.customer,
         items: input.items,
         subtotalAmount: amountMinor(input.subtotal),
-        discountAmount: amountMinor(input.discountAmount),
+        discountAmount: amountMinor(promotion.discountAmount),
         shippingAmount: amountMinor(input.shippingCost),
-        totalAmount: amountMinor(input.finalTotal),
-        promoCode: input.promoCode ?? null,
+        totalAmount: amountMinor(Math.max(0, input.subtotal - promotion.discountAmount + input.shippingCost)),
+        promoCode: promotion.code,
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
       }
     );
     this.realtime.publish({ organizationId: publicOrganizationId(this.config), event: 'orders.created', payload: { orderId: order.id, displayId: order.displayId } });
     return order;
+  }
+
+  @Post('promotions/validate')
+  async validatePromotion(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(promotionSchema, body);
+    return this.resolveNewsletterPromotion(customer.organizationId, customer, input.code, input.subtotal);
   }
 
   @Get('orders/me')
@@ -430,6 +448,31 @@ export class StorefrontOrdersController {
     });
     this.realtime.publish({ organizationId: ctx.organizationId, event: 'orders.updated', payload: { orderId: order.id, isRead: true } });
     return order;
+  }
+
+  private async resolveNewsletterPromotion(
+    organizationId: string,
+    customer: { customerId: string; email: string | null } | null,
+    rawCode: string | null | undefined,
+    subtotal: number
+  ): Promise<{ code: string | null; discountAmount: number }> {
+    if (!rawCode) return { code: null, discountAmount: 0 };
+    if (rawCode.trim().toUpperCase() !== 'DOBRODOSLI10') {
+      throw new ValidationFailedError('Promo code is not valid');
+    }
+    if (!customer?.email) throw new ValidationFailedError('Login with a verified email is required for this promo code');
+    const subscribed = await this.database.pool.query(
+      `SELECT 1 FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = lower($2) AND active LIMIT 1`,
+      [organizationId, customer.email]
+    );
+    if (!subscribed.rowCount) throw new ValidationFailedError('Newsletter subscription is required for this promo code');
+    const previous = await this.database.pool.query(
+      `SELECT 1 FROM orders WHERE organization_id = $1 AND deleted_at IS NULL
+       AND (customer_id = $2 OR lower(customer_email) = lower($3)) LIMIT 1`,
+      [organizationId, customer.customerId, customer.email]
+    );
+    if (previous.rowCount) throw new ValidationFailedError('This promo code is valid only for the first order');
+    return { code: 'DOBRODOSLI10', discountAmount: Math.round(subtotal * 0.1 * 100) / 100 };
   }
 }
 
