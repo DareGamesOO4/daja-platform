@@ -6,6 +6,7 @@ import {
   AuditRepository,
   DeviceRepository,
   OutboxRepository,
+  type RedisConnection,
   SyncRepository,
   TransactionManager,
   type Database
@@ -13,9 +14,10 @@ import {
 import type { Logger } from '@daja/observability';
 import { requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
-import { DATABASE, LOGGER } from './tokens.js';
+import { DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
+import { RealtimeGateway } from './realtime.gateway.js';
 
 const deviceRegisterSchema = z.object({
   deviceKey: z.string().trim().min(8).max(240),
@@ -62,7 +64,9 @@ export class DeviceController {
 export class SyncController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(REDIS) private readonly redis: RedisConnection,
+    private readonly realtime: RealtimeGateway
   ) {}
 
   @Post('push')
@@ -70,7 +74,7 @@ export class SyncController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.write');
     const input = parseWithSchema(syncPushSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       if (ctx.deviceId) {
         await new DeviceRepository(client).assertActiveDevice(ctx.organizationId, ctx.deviceId);
       }
@@ -87,6 +91,38 @@ export class SyncController {
       });
       return { results, transactionSemantics: 'ordered-per-event' };
     });
+    // A desktop-originated catalog change bypasses the staff catalog HTTP
+    // controller, so invalidate its public cache and notify open storefronts
+    // only after the transaction has committed.
+    await this.publishCatalogChanges(ctx.organizationId, input.events, result.results);
+    return result;
+  }
+
+  private async publishCatalogChanges(
+    organizationId: string,
+    events: ReadonlyArray<{ eventId: string; aggregateType: string; aggregateId: string }>,
+    results: ReadonlyArray<{ eventId: string; status: string }>
+  ): Promise<void> {
+    const appliedEventIds = new Set(
+      results.filter((result) => result.status === 'applied').map((result) => result.eventId)
+    );
+    const variantIds = events
+      .filter((event) => event.aggregateType === 'product_variant' && appliedEventIds.has(event.eventId))
+      .map((event) => event.aggregateId);
+    if (variantIds.length === 0) return;
+    const products = await this.database.pool.query<{ slug: string }>(
+      `SELECT DISTINCT p.slug
+       FROM products p
+       JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
+       WHERE p.organization_id = $1 AND v.id = ANY($2::uuid[])`,
+      [organizationId, variantIds]
+    );
+    const slugs = products.rows.map((product) => product.slug);
+    if (slugs.length === 0) return;
+    await this.redis.client.del(...slugs.map((slug) => `catalog:slug:${organizationId}:${slug}`));
+    for (const slug of slugs) {
+      this.realtime.publish({ organizationId, event: 'product.updated', payload: { slug } });
+    }
   }
 
   @Get('pull')
