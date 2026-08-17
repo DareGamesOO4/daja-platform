@@ -17,10 +17,35 @@ export const amountMinorSchema = z.coerce.number().int().min(0).max(2_147_483_64
 export const paginationLimitSchema = z.coerce.number().int().min(1).max(50).default(20);
 export const syncLimitSchema = z.coerce.number().int().min(1).max(500).default(100);
 
+// Desktop is an offline-first operational client, so its outbox includes the
+// complete set of domain aggregates it can mutate locally. Keep this in sync
+// with RFIDDaja's BusinessService aggregate types.
+export const syncAggregateTypeSchema = z.enum([
+  'product',
+  'variant',
+  'product_variant',
+  'inventory_item',
+  'rfid_tag',
+  'inventory_event',
+  'inventory_relocation',
+  'cycle_count',
+  'goods_receipt',
+  'sale',
+  'return',
+  'transfer',
+  'user',
+  'location',
+  'category',
+  'supplier',
+  'warehouse_bin',
+  'app_setting',
+  'role'
+]);
+
 export const syncPushEventSchema = z.object({
   eventId: uuidSchema,
   idempotencyKey: z.string().trim().min(8).max(240),
-  aggregateType: z.enum(['product', 'variant', 'inventory_item', 'rfid_tag', 'inventory_event']),
+  aggregateType: syncAggregateTypeSchema,
   aggregateId: uuidSchema,
   operation: z.string().trim().min(1).max(120),
   baseVersion: z.coerce.number().int().positive().nullable().optional(),
