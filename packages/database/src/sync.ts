@@ -19,6 +19,13 @@ export interface SyncPushEvent {
   payloadVersion: number;
   clientTimestamp?: string | undefined;
   payload: Record<string, unknown>;
+  locationId?: string | undefined;
+  deviceSequence?: number | undefined;
+  basePayload?: Record<string, unknown> | undefined;
+  offlinePackageId?: string | undefined;
+  baselineRevision?: number | undefined;
+  correlationId?: string | undefined;
+  businessCommandId?: string | undefined;
 }
 
 export interface SyncEventRecord {
@@ -38,6 +45,12 @@ export interface SyncEventRecord {
   clientTimestamp: Date | null;
   serverTimestamp: Date;
   idempotencyKey: string | null;
+  deviceSequence: number;
+  basePayload: Record<string, unknown> | null;
+  offlinePackageId: string | null;
+  baselineRevision: number | null;
+  correlationId: string | null;
+  businessCommandId: string | null;
 }
 
 export class SyncRepository {
@@ -66,6 +79,13 @@ export class SyncRepository {
       baseVersion?: number | null | undefined;
       clientTimestamp?: Date | null | undefined;
       idempotencyKey?: string | null | undefined;
+      locationId?: string | undefined;
+      deviceSequence?: number | undefined;
+      basePayload?: Record<string, unknown> | undefined;
+      offlinePackageId?: string | undefined;
+      baselineRevision?: number | undefined;
+      correlationId?: string | undefined;
+      businessCommandId?: string | undefined;
     }
   ): Promise<SyncEventRecord> {
     await this.ensureRevisionRow(ctx.organizationId);
@@ -84,12 +104,12 @@ export class SyncRepository {
       `INSERT INTO server_sync_events (
          revision, organization_id, location_id, device_id, user_id, aggregate_type, aggregate_id,
          operation, payload, payload_version, base_version, client_timestamp, idempotency_key,
-         request_id, correlation_id
+         request_id, correlation_id, device_sequence, base_payload, offline_package_id, baseline_revision, business_command_id
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, COALESCE($3, $16::uuid), $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $17, $18::jsonb, $19::uuid, $20, $21::uuid)
        RETURNING id, schema_version, revision, organization_id, location_id, device_id, user_id,
                  aggregate_type, aggregate_id, operation, payload, payload_version, base_version,
-                 client_timestamp, server_timestamp, idempotency_key`,
+                 client_timestamp, server_timestamp, idempotency_key, device_sequence, base_payload, offline_package_id, baseline_revision, correlation_id, business_command_id`,
       [
         revision,
         ctx.organizationId,
@@ -105,7 +125,13 @@ export class SyncRepository {
         input.clientTimestamp ?? null,
         input.idempotencyKey ?? null,
         ctx.requestId,
-        ctx.correlationId
+        input.correlationId ?? ctx.correlationId,
+        input.locationId ?? null,
+        input.deviceSequence ?? 0,
+        input.basePayload === undefined ? null : JSON.stringify(input.basePayload),
+        input.offlinePackageId ?? null,
+        input.baselineRevision ?? null,
+        input.businessCommandId ?? null
       ]
     );
     return mapSyncEvent(requireRow(result));
@@ -165,7 +191,14 @@ export class SyncRepository {
         payloadVersion: event.payloadVersion,
         baseVersion: event.baseVersion ?? null,
         clientTimestamp: event.clientTimestamp ? new Date(event.clientTimestamp) : null,
-        idempotencyKey: event.idempotencyKey
+        idempotencyKey: event.idempotencyKey,
+        locationId: event.locationId,
+        deviceSequence: event.deviceSequence,
+        basePayload: event.basePayload,
+        offlinePackageId: event.offlinePackageId,
+        baselineRevision: event.baselineRevision,
+        correlationId: event.correlationId,
+        businessCommandId: event.businessCommandId
       });
       results.push({ eventId: event.eventId, status: 'applied', revision: appended.revision });
     }
@@ -187,7 +220,7 @@ export class SyncRepository {
     const result = await this.client.query<SyncEventRow>(
       `SELECT id, schema_version, revision, organization_id, location_id, device_id, user_id,
               aggregate_type, aggregate_id, operation, payload, payload_version, base_version,
-              client_timestamp, server_timestamp, idempotency_key
+              client_timestamp, server_timestamp, idempotency_key, device_sequence, base_payload, offline_package_id, baseline_revision, correlation_id, business_command_id
        FROM server_sync_events
        WHERE organization_id = $1 AND revision > $2
          AND ($3::uuid IS NULL OR location_id IS NULL OR location_id = $3)
@@ -435,6 +468,12 @@ interface SyncEventRow {
   client_timestamp: Date | null;
   server_timestamp: Date;
   idempotency_key: string | null;
+  device_sequence: number;
+  base_payload: Record<string, unknown> | null;
+  offline_package_id: string | null;
+  baseline_revision: string | null;
+  correlation_id: string | null;
+  business_command_id: string | null;
 }
 
 function mapSyncEvent(row: SyncEventRow): SyncEventRecord {
@@ -455,6 +494,12 @@ function mapSyncEvent(row: SyncEventRow): SyncEventRecord {
     clientTimestamp: row.client_timestamp,
     serverTimestamp: row.server_timestamp,
     idempotencyKey: row.idempotency_key
+    ,deviceSequence: row.device_sequence
+    ,basePayload: row.base_payload
+    ,offlinePackageId: row.offline_package_id
+    ,baselineRevision: row.baseline_revision === null ? null : Number(row.baseline_revision)
+    ,correlationId: row.correlation_id
+    ,businessCommandId: row.business_command_id
   };
 }
 

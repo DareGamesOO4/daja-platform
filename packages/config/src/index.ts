@@ -47,6 +47,8 @@ const envSchema = z.object({
   // Comma-separated email allowlist. These storefront customers may exchange a
   // verified customer session for a real staff/admin session.
   STOREFRONT_ADMIN_EMAILS: optionalPreparedSecret
+  ,OFFLINE_PACKAGE_SIGNING_PRIVATE_KEY: optionalPreparedSecret
+  ,OFFLINE_LEASE_SIGNING_PRIVATE_KEY: optionalPreparedSecret
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

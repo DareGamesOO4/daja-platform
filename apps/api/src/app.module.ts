@@ -19,6 +19,7 @@ import { DeviceController, SyncController } from './sync.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
+import { OfflineInventoryController } from './offline-inventory.controller.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import {
   CustomerAuthController,
@@ -57,6 +58,7 @@ const logger = createLogger(config, 'api');
     ImportsController,
     DeviceController,
     SyncController
+    ,OfflineInventoryController
   ],
   providers: [
     { provide: CONFIG, useValue: config },

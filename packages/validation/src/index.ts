@@ -26,6 +26,13 @@ export const syncPushEventSchema = z.object({
   baseVersion: z.coerce.number().int().positive().nullable().optional(),
   payloadVersion: z.coerce.number().int().positive().default(1),
   clientTimestamp: z.string().datetime().optional(),
+  locationId: uuidSchema.optional(),
+  deviceSequence: z.coerce.number().int().nonnegative().optional(),
+  basePayload: z.record(z.string(), z.unknown()).optional(),
+  offlinePackageId: uuidSchema.optional(),
+  baselineRevision: z.coerce.number().int().nonnegative().optional(),
+  correlationId: z.string().trim().min(1).max(200).optional(),
+  businessCommandId: uuidSchema.optional(),
   payload: z.record(z.string(), z.unknown()).default({})
 });
 
