@@ -6,6 +6,21 @@ import { fileURLToPath } from 'node:url';
 
 const MIGRATION_LOCK_ID = 74794652901801;
 
+function checksum(contents: string): string {
+  return createHash('sha256').update(contents).digest('hex');
+}
+
+/**
+ * Early Windows runs recorded CRLF bytes in `schema_migrations`, while Render
+ * checks out the same SQL with LF. Accept only that newline variant; every
+ * other migration-content change still fails closed.
+ */
+function checksumMatches(contents: string, expected: string): boolean {
+  if (checksum(contents) === expected) return true;
+  const lf = contents.replace(/\r\n/g, '\n');
+  return checksum(lf) === expected || checksum(lf.replace(/\n/g, '\r\n')) === expected;
+}
+
 export interface MigrationFile {
   version: string;
   name: string;
@@ -48,7 +63,7 @@ export async function readMigrations(dir = defaultMigrationsDir()): Promise<Migr
         version,
         name,
         sql,
-        checksum: createHash('sha256').update(sql).digest('hex')
+        checksum: checksum(sql)
       };
     })
   );
@@ -67,7 +82,7 @@ export async function migrationStatus(pool: pg.Pool): Promise<MigrationStatus[]>
 
   return migrations.map((migration) => {
     const row = appliedByVersion.get(migration.version);
-    if (row && row.checksum !== migration.checksum) {
+    if (row && !checksumMatches(migration.sql, row.checksum)) {
       throw new Error(`Checksum mismatch for migration ${migration.version}`);
     }
     return {
@@ -99,7 +114,7 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
         [migration.version]
       );
       if (existing.rowCount === 1) {
-        if (existing.rows[0]?.checksum !== migration.checksum) {
+        if (!checksumMatches(migration.sql, existing.rows[0]?.checksum ?? '')) {
           throw new Error(`Checksum mismatch for migration ${migration.version}`);
         }
         continue;
