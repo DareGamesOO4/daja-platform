@@ -221,13 +221,14 @@ export class DesktopGoogleOAuthService {
     await this.database.pool.query(
       `INSERT INTO audit_events (
          organization_id, actor_user_id, device_id, aggregate_type, aggregate_id,
-         operation, correlation_id, request_id
-       ) VALUES ($1, NULL, $2, 'desktop_google_oauth_grant', $3, $4, $3::text, $5)`,
+       operation, correlation_id, request_id
+       ) VALUES ($1, NULL, $2, 'desktop_google_oauth_grant', $3, $4, $5, $6)`,
       [
         transaction.organization_id,
         transaction.device_id,
         transaction.id,
         operation,
+        transaction.id,
         `desktop-google:${transaction.id}`
       ]
     );
