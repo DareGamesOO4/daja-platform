@@ -48,7 +48,9 @@ export const syncPushEventSchema = z.object({
   aggregateType: syncAggregateTypeSchema,
   aggregateId: uuidSchema,
   operation: z.string().trim().min(1).max(120),
-  baseVersion: z.coerce.number().int().positive().nullable().optional(),
+  // A newly created local aggregate has no prior server revision. Desktop
+  // represents that explicitly as 0, while updates use a positive version.
+  baseVersion: z.coerce.number().int().nonnegative().nullable().optional(),
   payloadVersion: z.coerce.number().int().positive().default(1),
   clientTimestamp: z.string().datetime().optional(),
   locationId: uuidSchema.optional(),
