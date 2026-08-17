@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { SyncPushEvent } from '@daja/database';
+import { SyncRepository, type SyncPushEvent } from '@daja/database';
 import { ResourceConflictError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import type pg from 'pg';
@@ -116,16 +116,27 @@ export class OperationalSyncProjector {
             [ctx.organizationId, categoryId]
           )
         : undefined;
+      const localCategoryName =
+        entityIds === undefined ? undefined : text(entityIds, 'categoryName');
+      const brand = localCategoryName
+        ? await this.client.query<{ id: string }>(
+            `SELECT id FROM brands
+             WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
+             LIMIT 1`,
+            [ctx.organizationId, localCategoryName]
+          )
+        : undefined;
       const resolvedProductId = productId ?? event.aggregateId;
       await this.client.query(
-        `INSERT INTO products (id, organization_id, name, slug, primary_category_id, active, published, external_id)
-         VALUES ($1, $2, $3, $4, $5, true, true, $6)
+        `INSERT INTO products (id, organization_id, name, slug, brand_id, primary_category_id, active, published, external_id)
+         VALUES ($1, $2, $3, $4, $5, $6, true, true, $7)
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = now(), version = products.version + 1`,
         [
           resolvedProductId,
           ctx.organizationId,
           name,
           slug(name, variantId),
+          brand?.rows[0]?.id ?? null,
           category?.rows[0]?.id ?? null,
           `rfiddaja:${variantId}`
         ]
@@ -188,10 +199,25 @@ export class OperationalSyncProjector {
           [ctx.organizationId, categoryId]
         )
       : undefined;
+    const localCategoryName = entityIds === undefined ? undefined : text(entityIds, 'categoryName');
+    const brand = localCategoryName
+      ? await this.client.query<{ id: string }>(
+          `SELECT id FROM brands
+           WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
+           LIMIT 1`,
+          [ctx.organizationId, localCategoryName]
+        )
+      : undefined;
     await this.client.query(
-      `UPDATE products SET name = $3, primary_category_id = COALESCE($4, primary_category_id), version = version + 1, updated_at = now()
+      `UPDATE products SET name = $3, brand_id = COALESCE($4, brand_id), primary_category_id = COALESCE($5, primary_category_id), version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
-      [ctx.organizationId, row.product_id, name, validCategory?.rows[0]?.id ?? null]
+      [
+        ctx.organizationId,
+        row.product_id,
+        name,
+        brand?.rows[0]?.id ?? null,
+        validCategory?.rows[0]?.id ?? null
+      ]
     );
     await this.client.query(
       `UPDATE product_variants SET sku = $3, barcode = $4, name = $5, current_price_amount = $6, currency = $7,
@@ -269,16 +295,19 @@ export class OperationalSyncProjector {
     );
   }
 
-  private async catalogSnapshot(
+  async catalogSnapshot(
     organizationId: string,
     productId: string,
     variantId: string
   ): Promise<Record<string, unknown>> {
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.name AS "productName", p.primary_category_id AS "categoryId", p.version AS "productVersion",
+      `SELECT p.id AS "productId", p.name AS "productName", p.description, p.primary_category_id AS "categoryId",
+              c.name AS "categoryName", b.name AS "brandName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount",
               v.currency, v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
+       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
+       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN LATERAL (SELECT ma.public_url FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
                           WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id AND ma.status = 'ready'
                           ORDER BY pm.is_primary DESC, pm.position LIMIT 1) media ON true
@@ -286,5 +315,27 @@ export class OperationalSyncProjector {
       [organizationId, productId, variantId]
     );
     return { kind: 'catalog.item', record: result.rows[0] ?? { productId, variantId } };
+  }
+
+  async publishProductChange(
+    ctx: RequestContext,
+    productId: string,
+    variantId: string,
+    operation: 'create' | 'update' | 'delete' = 'update'
+  ): Promise<void> {
+    const snapshot =
+      operation === 'delete'
+        ? { kind: 'catalog.item', deleted: true, productId, variantId }
+        : await this.catalogSnapshot(ctx.organizationId, productId, variantId);
+    const record = (snapshot.record ?? {}) as Record<string, unknown>;
+    const version = typeof record.variantVersion === 'number' ? record.variantVersion : 1;
+    await new SyncRepository(this.client).appendServerEvent(ctx, {
+      aggregateType: 'product_variant',
+      aggregateId: variantId,
+      operation,
+      payload: { operationalSnapshot: snapshot },
+      payloadVersion: 2,
+      idempotencyKey: `catalog:${productId}:${variantId}:${operation}:${version}`
+    });
   }
 }

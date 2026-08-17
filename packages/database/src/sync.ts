@@ -253,13 +253,15 @@ export class SyncRepository {
     );
     const cursor = input.cursor ?? '';
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.primary_category_id AS "categoryId", p.version AS "productVersion",
+      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description, p.primary_category_id AS "categoryId",
+              b.name AS "brandName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount", v.currency,
               v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
               t.id AS "tagId", t.epc
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
         AND v.deleted_at IS NULL AND v.active
+       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN rfid_tags t ON t.organization_id = p.organization_id
         AND (t.variant_id = v.id OR t.inventory_item_id IN (
           SELECT ii.id FROM inventory_items ii WHERE ii.organization_id = p.organization_id AND ii.variant_id = v.id
