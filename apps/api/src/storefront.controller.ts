@@ -23,6 +23,7 @@ import { createRequestId } from '@daja/shared';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { AuthService } from './auth.service.js';
+import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -104,7 +105,8 @@ export class CustomerAuthController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
-    @Inject(AuthService) private readonly staffAuth: AuthService
+    @Inject(AuthService) private readonly staffAuth: AuthService,
+    @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService
   ) {}
 
   @Post('register')
@@ -182,6 +184,16 @@ export class CustomerAuthController {
     @Query('state') state: string | undefined,
     @Query('error') error: string | undefined
   ) {
+    if (await this.desktopGoogle.isDesktopGoogleCallback(state)) {
+      response.redirect(
+        await this.desktopGoogle.complete({
+          state: state!,
+          ...(code === undefined ? {} : { code }),
+          ...(error === undefined ? {} : { error })
+        })
+      );
+      return;
+    }
     if (error || !code || !state) {
       response.redirect(this.auth.oauthErrorRedirect());
       return;
@@ -376,13 +388,19 @@ export class StorefrontOrdersController {
         subtotalAmount: amountMinor(input.subtotal),
         discountAmount: amountMinor(promotion.discountAmount),
         shippingAmount: amountMinor(input.shippingCost),
-        totalAmount: amountMinor(Math.max(0, input.subtotal - promotion.discountAmount + input.shippingCost)),
+        totalAmount: amountMinor(
+          Math.max(0, input.subtotal - promotion.discountAmount + input.shippingCost)
+        ),
         promoCode: promotion.code,
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
       }
     );
-    this.realtime.publish({ organizationId: publicOrganizationId(this.config), event: 'orders.created', payload: { orderId: order.id, displayId: order.displayId } });
+    this.realtime.publish({
+      organizationId: publicOrganizationId(this.config),
+      event: 'orders.created',
+      payload: { orderId: order.id, displayId: order.displayId }
+    });
     return order;
   }
 
@@ -390,7 +408,12 @@ export class StorefrontOrdersController {
   async validatePromotion(@Req() request: Request, @Body() body: unknown) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     const input = parseWithSchema(promotionSchema, body);
-    return this.resolveNewsletterPromotion(customer.organizationId, customer, input.code, input.subtotal);
+    return this.resolveNewsletterPromotion(
+      customer.organizationId,
+      customer,
+      input.code,
+      input.subtotal
+    );
   }
 
   @Get('orders/me')
@@ -434,7 +457,11 @@ export class StorefrontOrdersController {
       status: input.status,
       userId: ctx.userId
     });
-    this.realtime.publish({ organizationId: ctx.organizationId, event: 'orders.updated', payload: { orderId: order.id, status: order.status } });
+    this.realtime.publish({
+      organizationId: ctx.organizationId,
+      event: 'orders.updated',
+      payload: { orderId: order.id, status: order.status }
+    });
     return order;
   }
 
@@ -446,7 +473,11 @@ export class StorefrontOrdersController {
       organizationId: ctx.organizationId,
       orderIdOrDisplayId: id
     });
-    this.realtime.publish({ organizationId: ctx.organizationId, event: 'orders.updated', payload: { orderId: order.id, isRead: true } });
+    this.realtime.publish({
+      organizationId: ctx.organizationId,
+      event: 'orders.updated',
+      payload: { orderId: order.id, isRead: true }
+    });
     return order;
   }
 
@@ -460,18 +491,23 @@ export class StorefrontOrdersController {
     if (rawCode.trim().toUpperCase() !== 'DOBRODOSLI10') {
       throw new ValidationFailedError('Promo code is not valid');
     }
-    if (!customer?.email) throw new ValidationFailedError('Login with a verified email is required for this promo code');
+    if (!customer?.email)
+      throw new ValidationFailedError(
+        'Login with a verified email is required for this promo code'
+      );
     const subscribed = await this.database.pool.query(
       `SELECT 1 FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = lower($2) AND active LIMIT 1`,
       [organizationId, customer.email]
     );
-    if (!subscribed.rowCount) throw new ValidationFailedError('Newsletter subscription is required for this promo code');
+    if (!subscribed.rowCount)
+      throw new ValidationFailedError('Newsletter subscription is required for this promo code');
     const previous = await this.database.pool.query(
       `SELECT 1 FROM orders WHERE organization_id = $1 AND deleted_at IS NULL
        AND (customer_id = $2 OR lower(customer_email) = lower($3)) LIMIT 1`,
       [organizationId, customer.customerId, customer.email]
     );
-    if (previous.rowCount) throw new ValidationFailedError('This promo code is valid only for the first order');
+    if (previous.rowCount)
+      throw new ValidationFailedError('This promo code is valid only for the first order');
     return { code: 'DOBRODOSLI10', discountAmount: Math.round(subtotal * 0.1 * 100) / 100 };
   }
 }

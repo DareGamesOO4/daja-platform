@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS desktop_google_oauth_grants (
   state_hash text NOT NULL,
   provider_state_hash text NOT NULL,
   grant_hash text,
-  user_id uuid REFERENCES users (id) ON DELETE RESTRICT,
+  customer_id uuid REFERENCES customers (id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   completed_at timestamptz,
@@ -21,8 +21,8 @@ CREATE TABLE IF NOT EXISTS desktop_google_oauth_grants (
   ),
   CONSTRAINT desktop_google_oauth_grants_expiry_chk CHECK (expires_at > created_at),
   CONSTRAINT desktop_google_oauth_grants_completion_chk CHECK (
-    (grant_hash IS NULL AND completed_at IS NULL AND user_id IS NULL)
-    OR (grant_hash IS NOT NULL AND completed_at IS NOT NULL AND user_id IS NOT NULL)
+    (grant_hash IS NULL AND completed_at IS NULL AND customer_id IS NULL)
+    OR (grant_hash IS NOT NULL AND completed_at IS NOT NULL AND customer_id IS NOT NULL)
   ),
   CONSTRAINT desktop_google_oauth_grants_consumption_chk CHECK (
     consumed_at IS NULL OR completed_at IS NOT NULL

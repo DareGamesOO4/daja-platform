@@ -21,6 +21,7 @@ import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
 import { OfflineInventoryController } from './offline-inventory.controller.js';
 import { CustomerAuthService } from './customer-auth.service.js';
+import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import {
   CustomerAuthController,
   CustomerController,
@@ -57,8 +58,8 @@ const logger = createLogger(config, 'api');
     InventoryController,
     ImportsController,
     DeviceController,
-    SyncController
-    ,OfflineInventoryController
+    SyncController,
+    OfflineInventoryController
   ],
   providers: [
     { provide: CONFIG, useValue: config },
@@ -68,6 +69,7 @@ const logger = createLogger(config, 'api');
     AuthMiddleware,
     AuthService,
     CustomerAuthService,
+    DesktopGoogleOAuthService,
     RealtimeGateway
   ]
 })

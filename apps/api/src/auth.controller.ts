@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { AuthService } from './auth.service.js';
+import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
 const loginSchema = z.object({
@@ -17,9 +18,35 @@ const refreshSchema = z.object({
   refreshToken: z.string().min(1)
 });
 
+const desktopGoogleStartSchema = z.object({
+  organizationId: z.string().uuid(),
+  deviceId: z.string().uuid(),
+  callbackUrl: z.string().url().max(500),
+  state: z.string().min(32).max(200)
+});
+
+const desktopGoogleExchangeSchema = z.object({
+  organizationId: z.string().uuid(),
+  deviceId: z.string().uuid(),
+  grant: z.string().min(32).max(200)
+});
+
 @Controller('auth')
 export class AuthController {
-  constructor(@Inject(AuthService) private readonly authService: AuthService) {}
+  constructor(
+    @Inject(AuthService) private readonly authService: AuthService,
+    @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService
+  ) {}
+
+  @Post('desktop/google/start')
+  desktopGoogleStart(@Body() body: unknown) {
+    return this.desktopGoogle.start(parseBody(desktopGoogleStartSchema, body));
+  }
+
+  @Post('desktop/google/exchange')
+  desktopGoogleExchange(@Body() body: unknown) {
+    return this.desktopGoogle.exchange(parseBody(desktopGoogleExchangeSchema, body));
+  }
 
   @Post('login')
   async login(

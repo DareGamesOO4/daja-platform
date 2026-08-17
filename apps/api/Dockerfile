@@ -26,7 +26,8 @@ COPY --from=build --chown=daja:daja /app/package.json ./package.json
 COPY --from=build --chown=daja:daja /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build --chown=daja:daja /app/apps/api/dist ./apps/api/dist
 COPY --from=build --chown=daja:daja /app/packages ./packages
+COPY --from=build --chown=daja:daja /app/migrations ./migrations
 USER daja
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
-CMD ["node", "apps/api/dist/main.js"]
+CMD ["sh", "-c", "node packages/database/dist/cli.js migrate && exec node apps/api/dist/main.js"]

@@ -106,6 +106,12 @@ export class CustomerAuthService {
       this.config.JWT_ACCESS_SECRET,
       600
     );
+    return this.googleAuthorizationUrl(state);
+  }
+
+  /** Reuses the configured Google client and its existing callback URI. */
+  googleAuthorizationUrl(state: string): string {
+    this.assertGoogleOAuthConfigured();
     const authorizationUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authorizationUrl.search = new URLSearchParams({
       client_id: this.config.GOOGLE_OAUTH_CLIENT_ID,
@@ -129,37 +135,9 @@ export class CustomerAuthService {
       throw new InvalidTokenError();
     }
 
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code: input.code,
-        client_id: this.config.GOOGLE_OAUTH_CLIENT_ID,
-        client_secret: this.config.GOOGLE_OAUTH_CLIENT_SECRET,
-        redirect_uri: this.googleCallbackUrl(),
-        grant_type: 'authorization_code'
-      })
-    });
-    const token = (await tokenResponse.json().catch(() => null)) as { access_token?: unknown } | null;
-    if (!tokenResponse.ok || typeof token?.access_token !== 'string') {
-      throw new ValidationFailedError('Google sign-in could not be completed');
-    }
-
-    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { authorization: `Bearer ${token.access_token}` }
-    });
-    const profile = (await profileResponse.json().catch(() => null)) as GoogleProfile | null;
-    if (
-      !profileResponse.ok ||
-      !profile ||
-      typeof profile.sub !== 'string' ||
-      typeof profile.email !== 'string' ||
-      profile.email_verified !== true
-    ) {
-      throw new ValidationFailedError('Google account must have a verified email address');
-    }
-    const googleSubject = profile.sub as string;
-    const googleEmail = profile.email as string;
+    const identity = await this.verifyGoogleIdentity(input.code);
+    const googleSubject = identity.subject;
+    const googleEmail = identity.email;
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
@@ -184,8 +162,8 @@ export class CustomerAuthService {
           customer = await repo.createGoogleCustomer({
             organizationId: input.organizationId,
             email: googleEmail,
-            displayName: googleDisplayName(profile),
-            photoUrl: typeof profile.picture === 'string' ? profile.picture : null,
+            displayName: identity.displayName,
+            photoUrl: identity.photoUrl,
             providerSubject: googleSubject
           });
         }
@@ -197,8 +175,99 @@ export class CustomerAuthService {
         sessionFamilyId: session.familyId,
         sessionId: session.id
       });
-      return { user: serializeCustomerPrincipal(principal), ...this.issueTokenPair(principal, session.refreshToken) };
+      return {
+        user: serializeCustomerPrincipal(principal),
+        ...this.issueTokenPair(principal, session.refreshToken)
+      };
     });
+  }
+
+  /**
+   * Establishes the same verified Google customer identity without exposing a
+   * customer token. The desktop flow later exchanges it for a staff session.
+   */
+  async resolveDesktopGoogleCustomer(input: {
+    organizationId: string;
+    code: string;
+  }): Promise<CustomerPrincipal> {
+    const identity = await this.verifyGoogleIdentity(input.code);
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      let customer = await repo.findOAuthCustomer({
+        organizationId: input.organizationId,
+        provider: 'google',
+        providerSubject: identity.subject
+      });
+      if (!customer) {
+        customer = await repo.findCustomerByEmail({
+          organizationId: input.organizationId,
+          email: identity.email
+        });
+        if (customer) {
+          await repo.linkOAuthIdentity({
+            organizationId: input.organizationId,
+            customerId: customer.id,
+            provider: 'google',
+            providerSubject: identity.subject
+          });
+        } else {
+          customer = await repo.createGoogleCustomer({
+            organizationId: input.organizationId,
+            email: identity.email,
+            displayName: identity.displayName,
+            photoUrl: identity.photoUrl,
+            providerSubject: identity.subject
+          });
+        }
+      }
+      return repo.buildCustomerPrincipal({
+        organizationId: customer.organizationId,
+        customerId: customer.id,
+        sessionFamilyId: randomUUID()
+      });
+    });
+  }
+
+  private async verifyGoogleIdentity(
+    code: string
+  ): Promise<{ subject: string; email: string; displayName: string; photoUrl: string | null }> {
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: this.config.GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: this.config.GOOGLE_OAUTH_CLIENT_SECRET,
+        redirect_uri: this.googleCallbackUrl(),
+        grant_type: 'authorization_code'
+      })
+    });
+    const token = (await tokenResponse.json().catch(() => null)) as {
+      access_token?: unknown;
+    } | null;
+    if (!tokenResponse.ok || typeof token?.access_token !== 'string') {
+      throw new ValidationFailedError('Google sign-in could not be completed');
+    }
+
+    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { authorization: `Bearer ${token.access_token}` }
+    });
+    const profile = (await profileResponse.json().catch(() => null)) as GoogleProfile | null;
+    if (
+      !profileResponse.ok ||
+      !profile ||
+      typeof profile.sub !== 'string' ||
+      typeof profile.email !== 'string' ||
+      profile.email_verified !== true
+    ) {
+      throw new ValidationFailedError('Google account must have a verified email address');
+    }
+    return {
+      subject: profile.sub,
+      email: profile.email.trim().toLowerCase(),
+      displayName: googleDisplayName(profile),
+      photoUrl: typeof profile.picture === 'string' ? profile.picture : null
+    };
   }
 
   oauthSuccessRedirect(tokens: CustomerTokenPair): string {
@@ -363,7 +432,10 @@ export class CustomerAuthService {
   }
 
   private googleCallbackUrl(): string {
-    return new URL('/api/v1/customer-auth/oauth/google/callback', this.config.API_PUBLIC_BASE_URL).toString();
+    return new URL(
+      '/api/v1/customer-auth/oauth/google/callback',
+      this.config.API_PUBLIC_BASE_URL
+    ).toString();
   }
 
   private oauthFrontendRedirectUrl(): string {
