@@ -139,7 +139,8 @@ export class SyncRepository {
 
   async pushBatch(
     ctx: RequestContext,
-    events: SyncPushEvent[]
+    events: SyncPushEvent[],
+    materialize?: (event: SyncPushEvent) => Promise<SyncPushEvent>
   ): Promise<
     Array<{
       eventId: string;
@@ -176,29 +177,33 @@ export class SyncRepository {
         continue;
       }
 
+      // Check the stable aggregate identity before the projector mutates a
+      // canonical table. This turns an offline stale write into a durable
+      // sync_conflict instead of a transaction error.
       const conflict = await this.detectConflict(ctx.organizationId, event);
       if (conflict) {
         const conflictId = await this.createConflict(ctx, event, conflict);
         results.push({ eventId: event.eventId, status: 'conflict', conflictId });
         continue;
       }
+      const projected = materialize === undefined ? event : await materialize(event);
 
       const appended = await this.appendServerEvent(ctx, {
-        aggregateType: event.aggregateType,
-        aggregateId: event.aggregateId,
-        operation: event.operation,
-        payload: event.payload,
-        payloadVersion: event.payloadVersion,
-        baseVersion: event.baseVersion ?? null,
-        clientTimestamp: event.clientTimestamp ? new Date(event.clientTimestamp) : null,
-        idempotencyKey: event.idempotencyKey,
-        locationId: event.locationId,
-        deviceSequence: event.deviceSequence,
-        basePayload: event.basePayload,
-        offlinePackageId: event.offlinePackageId,
-        baselineRevision: event.baselineRevision,
-        correlationId: event.correlationId,
-        businessCommandId: event.businessCommandId
+        aggregateType: projected.aggregateType,
+        aggregateId: projected.aggregateId,
+        operation: projected.operation,
+        payload: projected.payload,
+        payloadVersion: projected.payloadVersion,
+        baseVersion: projected.baseVersion ?? null,
+        clientTimestamp: projected.clientTimestamp ? new Date(projected.clientTimestamp) : null,
+        idempotencyKey: projected.idempotencyKey,
+        locationId: projected.locationId,
+        deviceSequence: projected.deviceSequence,
+        basePayload: projected.basePayload,
+        offlinePackageId: projected.offlinePackageId,
+        baselineRevision: projected.baselineRevision,
+        correlationId: projected.correlationId,
+        businessCommandId: projected.businessCommandId
       });
       results.push({ eventId: event.eventId, status: 'applied', revision: appended.revision });
     }
@@ -248,8 +253,9 @@ export class SyncRepository {
     );
     const cursor = input.cursor ?? '';
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.slug, p.name,
-              v.id AS "variantId", v.sku, v.current_price_amount AS "price", v.currency,
+      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.primary_category_id AS "categoryId", p.version AS "productVersion",
+              v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount", v.currency,
+              v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
               t.id AS "tagId", t.epc
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
@@ -259,6 +265,12 @@ export class SyncRepository {
           SELECT ii.id FROM inventory_items ii WHERE ii.organization_id = p.organization_id AND ii.variant_id = v.id
         ))
         AND t.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT ma.public_url FROM product_media pm
+         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
+       ) media ON true
        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
        ORDER BY p.id
        LIMIT $3`,
@@ -326,7 +338,7 @@ export class SyncRepository {
        FROM (
          SELECT id, version FROM products WHERE organization_id = $1 AND id = $2 AND $3 = 'product'
          UNION ALL
-         SELECT id, version FROM product_variants WHERE organization_id = $1 AND id = $2 AND $3 = 'variant'
+         SELECT id, version FROM product_variants WHERE organization_id = $1 AND id = $2 AND $3 IN ('variant', 'product_variant')
          UNION ALL
          SELECT id, version FROM rfid_tags WHERE organization_id = $1 AND id = $2 AND $3 = 'rfid_tag'
          UNION ALL
@@ -493,13 +505,13 @@ function mapSyncEvent(row: SyncEventRow): SyncEventRecord {
     baseVersion: row.base_version === null ? null : Number(row.base_version),
     clientTimestamp: row.client_timestamp,
     serverTimestamp: row.server_timestamp,
-    idempotencyKey: row.idempotency_key
-    ,deviceSequence: row.device_sequence
-    ,basePayload: row.base_payload
-    ,offlinePackageId: row.offline_package_id
-    ,baselineRevision: row.baseline_revision === null ? null : Number(row.baseline_revision)
-    ,correlationId: row.correlation_id
-    ,businessCommandId: row.business_command_id
+    idempotencyKey: row.idempotency_key,
+    deviceSequence: row.device_sequence,
+    basePayload: row.base_payload,
+    offlinePackageId: row.offline_package_id,
+    baselineRevision: row.baseline_revision === null ? null : Number(row.baseline_revision),
+    correlationId: row.correlation_id,
+    businessCommandId: row.business_command_id
   };
 }
 

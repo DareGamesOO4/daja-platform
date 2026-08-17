@@ -15,6 +15,7 @@ import { requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
 import { DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { OperationalSyncProjector } from './operational-sync-projector.js';
 
 const deviceRegisterSchema = z.object({
   deviceKey: z.string().trim().min(8).max(240),
@@ -73,7 +74,10 @@ export class SyncController {
       if (ctx.deviceId) {
         await new DeviceRepository(client).assertActiveDevice(ctx.organizationId, ctx.deviceId);
       }
-      const results = await new SyncRepository(client).pushBatch(ctx, input.events);
+      const projector = new OperationalSyncProjector(client);
+      const results = await new SyncRepository(client).pushBatch(ctx, input.events, (event) =>
+        projector.materialize(ctx, event)
+      );
       await new OutboxRepository(client).append({
         ctx,
         eventType: 'SyncBatchPushed',
