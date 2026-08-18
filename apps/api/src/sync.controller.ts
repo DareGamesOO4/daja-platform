@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+import { randomUUID } from 'node:crypto';
 import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { z } from 'zod';
@@ -29,9 +30,8 @@ const deviceRegisterSchema = z.object({
 });
 
 const conflictResolveSchema = z.object({
-  status: z.enum(['resolved', 'rejected']),
+  strategy: z.enum(['local', 'remote']),
   reason: z.string().trim().min(1).max(2000),
-  resolution: z.record(z.string(), z.unknown()).default({})
 });
 
 @Controller('devices')
@@ -165,17 +165,64 @@ export class SyncController {
     requirePermission(ctx, 'sync.conflicts');
     const conflictId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(conflictResolveSchema, body);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const resolved = await new SyncRepository(client).resolveConflict(ctx, conflictId, input);
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const sync = new SyncRepository(client);
+      const conflicts = await sync.listConflicts(ctx, { status: 'unresolved', limit: 500 });
+      const conflict = conflicts.find((candidate) => candidate.id === conflictId);
+      if (!conflict) throw new Error('Konflikt nije pronađen ili je već razrešen.');
+
+      let appliedEvent: { eventId: string; status: string } | undefined;
+      if (input.strategy === 'local') {
+        const eventId = randomUUID();
+        const results = await sync.pushBatch(
+          ctx,
+          [{
+            eventId,
+            idempotencyKey: `conflict-resolution:${conflictId}:${eventId}`,
+            aggregateType: conflict.aggregateType,
+            aggregateId: conflict.aggregateId,
+            operation: conflict.operation,
+            baseVersion: conflict.serverVersion,
+            payloadVersion: 1,
+            clientTimestamp: new Date().toISOString(),
+            payload: conflict.clientPayload
+          }],
+          (event) => new OperationalSyncProjector(client).materialize(ctx, event)
+        );
+        appliedEvent = results[0];
+        if (!appliedEvent || appliedEvent.status !== 'applied') {
+          throw new Error('Platform verzija se promenila. Osvežite konflikt pa pokušajte ponovo.');
+        }
+      }
+
+      const resolved = await sync.resolveConflict(ctx, conflictId, {
+        status: 'resolved',
+        reason: input.reason,
+        resolution: { strategy: input.strategy, ...(appliedEvent ? { appliedEventId: appliedEvent.eventId } : {}) }
+      });
       await new AuditRepository(client).append({
         ctx,
         aggregateType: 'sync_conflict',
         aggregateId: conflictId,
-        operation: input.status,
+        operation: `resolve.${input.strategy}`,
         afterPayload: resolved,
         reason: input.reason
       });
-      return resolved;
+      return {
+        ...resolved,
+        strategy: input.strategy,
+        appliedEventId: appliedEvent?.eventId,
+        aggregateType: conflict.aggregateType,
+        aggregateId: conflict.aggregateId
+      };
     });
+    if (input.strategy === 'local' && result.aggregateType === 'product_variant' && result.appliedEventId) {
+      await this.publishCatalogChanges(ctx.organizationId, [{
+        eventId: result.appliedEventId,
+        aggregateType: result.aggregateType,
+        aggregateId: result.aggregateId
+      }], [{ eventId: result.appliedEventId, status: 'applied' }]);
+    }
+    return result;
   }
 }
