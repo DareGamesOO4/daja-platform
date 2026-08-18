@@ -93,11 +93,10 @@ export class OperationalSyncProjector {
     const currency = text(input, 'currency') ?? 'RSD';
     const variantId =
       command.kind === 'item.create' ? event.aggregateId : (text(input, 'id') ?? event.aggregateId);
-    if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
-      throw new ValidationFailedError('Desktop item command is incomplete');
-    }
-
     if (command.kind === 'item.create') {
+      if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
+        throw new ValidationFailedError('Desktop item create command is incomplete');
+      }
       const productId =
         text(input, 'productId') ??
         (entityIds === undefined ? undefined : text(entityIds, 'productId'));
@@ -191,6 +190,9 @@ export class OperationalSyncProjector {
         [ctx.organizationId, variantId]
       );
       return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
+    }
+    if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
+      throw new ValidationFailedError('Desktop item update command is incomplete');
     }
     const categoryId = text(input, 'categoryId');
     const validCategory = categoryId
