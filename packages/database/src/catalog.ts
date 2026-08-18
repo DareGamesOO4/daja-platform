@@ -367,6 +367,16 @@ export class CatalogRepository {
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
+    // A catalog variant cannot remain sellable or syncable after its parent
+    // product was removed. Keeping it active created orphan rows that were
+    // invisible to the canonical catalog but could leak through integrations.
+    await this.client.query(
+      `UPDATE product_variants
+       SET deleted_at = now(), active = false, published = false,
+           version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND product_id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, id]
+    );
   }
 
   async createVariant(
