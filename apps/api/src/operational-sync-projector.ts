@@ -115,14 +115,19 @@ export class OperationalSyncProjector {
             [ctx.organizationId, categoryId]
           )
         : undefined;
-      const localCategoryName =
-        entityIds === undefined ? undefined : text(entityIds, 'categoryName');
-      const brand = localCategoryName
+      // RFID stores a storefront category as a child of its local brand.
+      // Sync sends that parent name explicitly; older clients fall back to
+      // categoryName so their existing events remain compatible.
+      const localBrandName =
+        entityIds === undefined
+          ? undefined
+          : (text(entityIds, 'brandName') ?? text(entityIds, 'categoryName'));
+      const brand = localBrandName
         ? await this.client.query<{ id: string }>(
             `SELECT id FROM brands
              WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
              LIMIT 1`,
-            [ctx.organizationId, localCategoryName]
+            [ctx.organizationId, localBrandName]
           )
         : undefined;
       const resolvedProductId = productId ?? event.aggregateId;
@@ -217,13 +222,16 @@ export class OperationalSyncProjector {
           [ctx.organizationId, categoryId]
         )
       : undefined;
-    const localCategoryName = entityIds === undefined ? undefined : text(entityIds, 'categoryName');
-    const brand = localCategoryName
+    const localBrandName =
+      entityIds === undefined
+        ? undefined
+        : (text(entityIds, 'brandName') ?? text(entityIds, 'categoryName'));
+    const brand = localBrandName
       ? await this.client.query<{ id: string }>(
           `SELECT id FROM brands
            WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
            LIMIT 1`,
-          [ctx.organizationId, localCategoryName]
+          [ctx.organizationId, localBrandName]
         )
       : undefined;
     await this.client.query(
