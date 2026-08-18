@@ -181,6 +181,22 @@ export class OperationalSyncProjector {
          WHERE organization_id = $1 AND id = $2`,
         [ctx.organizationId, variantId]
       );
+      // RFID desktop deletes a variant. When it was the product's last
+      // variant, hide the now-empty parent product as well. Otherwise staff
+      // catalog queries retain a ghost product although the public catalog
+      // and RFID snapshot correctly have no item to show.
+      await this.client.query(
+        `UPDATE products p
+         SET deleted_at = now(), active = false, published = false,
+             version = version + 1, updated_at = now()
+         WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM product_variants v
+             WHERE v.organization_id = p.organization_id
+               AND v.product_id = p.id AND v.deleted_at IS NULL
+           )`,
+        [ctx.organizationId, row.product_id]
+      );
       return { kind: 'catalog.item', deleted: true, productId: row.product_id, variantId };
     }
     if (command.kind === 'item.archive') {
