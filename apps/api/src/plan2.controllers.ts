@@ -798,6 +798,13 @@ export class StaffCatalogController {
   async addVariantPrice(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request); requirePermission(ctx, 'catalog.write');
     const variantId = parseWithSchema(uuidSchema,id); const input = parseWithSchema(scheduledPriceSchema, body);
+    if (input.priceType === 'sale') {
+      const validFrom = input.validFrom ? new Date(input.validFrom) : new Date();
+      const validUntil = input.validUntil ? new Date(input.validUntil) : null;
+      if (!validUntil || validUntil <= validFrom || validUntil <= new Date()) {
+        throw new ValidationFailedError('Sale end must be after its start and in the future');
+      }
+    }
     const variant = await new CatalogRepository(this.database.pool).getVariant(ctx, variantId);
     const result = await this.database.pool.query(`INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`, [ctx.organizationId,variantId,input.amountMinor,input.currency,input.priceType,input.validFrom ?? null,input.validUntil ?? null,ctx.userId]);
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, variant.productId);
