@@ -13,7 +13,9 @@ type TagCommand = { kind: 'tag.assign'; payload: Record<string, unknown> };
 
 type LocationCommand = { kind: 'location.upsert'; payload: Record<string, unknown> };
 
-type DesktopCommand = ItemCommand | TagCommand | LocationCommand;
+type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
+
+type DesktopCommand = ItemCommand | TagCommand | LocationCommand | SettingsCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -83,6 +85,10 @@ export class OperationalSyncProjector {
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
+    if (kind === 'settings.update') {
+      const snapshot = await this.settings(ctx, { kind: 'settings.update', payload: commandPayload });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
 
     // Existing generic events remain compatible. They deliberately stay event
     // log entries until their server domain model has a matching projector.
@@ -132,6 +138,40 @@ export class OperationalSyncProjector {
       [id, ctx.organizationId, code, name, type, boolean(input, 'active', true)]
     );
     return { kind: 'location', location: result.rows[0] };
+  }
+
+  private async settings(
+    ctx: RequestContext,
+    command: SettingsCommand
+  ): Promise<Record<string, unknown>> {
+    const values = record(command.payload.values);
+    if (!values || text(command.payload, 'scope') !== 'organization') {
+      throw new ValidationFailedError('Desktop organization settings command is incomplete');
+    }
+    const result = await this.client.query<{
+      id: string;
+      name: string;
+      legalName: string | null;
+      taxNumber: string | null;
+      version: string;
+    }>(
+      `UPDATE organizations
+       SET name = COALESCE($2, name),
+           legal_name = COALESCE($3, legal_name),
+           tax_number = COALESCE($4, tax_number),
+           version = version + 1,
+           updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, name, legal_name AS "legalName", tax_number AS "taxNumber", version::text AS version`,
+      [
+        ctx.organizationId,
+        text(values, 'company.name'),
+        text(values, 'company.legalName'),
+        text(values, 'company.taxNumber')
+      ]
+    );
+    if (!result.rows[0]) throw new ValidationFailedError('Desktop organization does not exist on Platform');
+    return { kind: 'organization.settings', organization: result.rows[0] };
   }
 
   private async item(
