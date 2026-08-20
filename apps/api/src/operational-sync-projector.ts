@@ -11,7 +11,9 @@ type ItemCommand = {
 
 type TagCommand = { kind: 'tag.assign'; payload: Record<string, unknown> };
 
-type DesktopCommand = ItemCommand | TagCommand;
+type LocationCommand = { kind: 'location.upsert'; payload: Record<string, unknown> };
+
+type DesktopCommand = ItemCommand | TagCommand | LocationCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -74,10 +76,62 @@ export class OperationalSyncProjector {
       const snapshot = await this.tag(ctx, event, { kind: 'tag.assign', payload: commandPayload });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
+    if (kind === 'location.upsert') {
+      const snapshot = await this.location(ctx, event, {
+        kind: 'location.upsert',
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
 
     // Existing generic events remain compatible. They deliberately stay event
     // log entries until their server domain model has a matching projector.
     return event;
+  }
+
+  /**
+   * A location is the shared key between the RFID desktop inventory and the
+   * web product modal. Persist the desktop UUID itself: inventing a second
+   * Platform UUID makes later inventory and EPC events point at a location
+   * that does not exist on the other side.
+   */
+  private async location(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: LocationCommand
+  ): Promise<Record<string, unknown>> {
+    const input = command.payload;
+    const id = text(input, 'id') ?? event.aggregateId;
+    const code = text(input, 'code');
+    const name = text(input, 'name');
+    const type = text(input, 'type') ?? 'store';
+    if (!code || !name || !['warehouse', 'store', 'office', 'virtual'].includes(type)) {
+      throw new ValidationFailedError('Desktop location upsert command is incomplete');
+    }
+
+    const result = await this.client.query<{
+      id: string;
+      code: string;
+      name: string;
+      type: string;
+      active: boolean;
+      version: string;
+    }>(
+      `INSERT INTO locations (id, organization_id, code, name, type, timezone, active)
+       VALUES ($1, $2, upper($3), $4, $5, 'Europe/Belgrade', $6)
+       ON CONFLICT (id) DO UPDATE
+       SET code = EXCLUDED.code,
+           name = EXCLUDED.name,
+           type = EXCLUDED.type,
+           timezone = EXCLUDED.timezone,
+           active = EXCLUDED.active,
+           deleted_at = NULL,
+           version = locations.version + 1,
+           updated_at = now()
+       RETURNING id, code, name, type, active, version::text AS version`,
+      [id, ctx.organizationId, code, name, type, boolean(input, 'active', true)]
+    );
+    return { kind: 'location', location: result.rows[0] };
   }
 
   private async item(
