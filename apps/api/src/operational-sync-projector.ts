@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { SyncRepository, type SyncPushEvent } from '@daja/database';
-import { ResourceConflictError, ValidationFailedError } from '@daja/security';
+import { ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import type pg from 'pg';
 
@@ -270,10 +270,6 @@ export class OperationalSyncProjector {
     );
     const row = current.rows[0];
     if (!row) throw new ValidationFailedError('Desktop item does not exist on Platform');
-    const expected = integer(input, 'baseVersion') ?? event.baseVersion ?? undefined;
-    if (expected !== undefined && Number(row.version) !== expected) {
-      throw new ResourceConflictError('Base version does not match server version');
-    }
     if (command.kind === 'item.delete') {
       await this.client.query(
         `UPDATE product_variants SET deleted_at = now(), active = false, published = false,

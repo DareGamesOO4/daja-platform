@@ -358,14 +358,14 @@ export class SyncRepository {
   }
 
   private async detectConflict(organizationId: string, event: SyncPushEvent) {
-    // Deleting an RFID article is an explicit terminal action. A stale local
-    // version must not turn that request into a conflict merely because the
-    // product was edited on the web before deletion was synchronized.
+    // RFID edits and deletion operate only on RFID-owned fields. A web edit
+    // may independently change catalog content, so a stale row version must
+    // not reject an otherwise valid local create/update/delete operation.
     const command = event.payload.command;
     if (
       typeof command === 'object' &&
       command !== null &&
-      (command as Record<string, unknown>).kind === 'item.delete'
+      ['item.update', 'item.delete'].includes(String((command as Record<string, unknown>).kind))
     ) {
       return null;
     }
