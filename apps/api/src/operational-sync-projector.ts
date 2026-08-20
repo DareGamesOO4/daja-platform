@@ -480,13 +480,18 @@ export class OperationalSyncProjector {
     // default. Treating them as non-numeric made every update use version 1
     // and collide with the unique sync idempotency key after the first save.
     const version = Number(record.variantVersion) || 1;
+    // Prices, inventory, media and RFID tags can change without incrementing
+    // the variant row version. Include the canonical snapshot fingerprint so
+    // those updates produce a new pull event instead of colliding with an
+    // older `catalog:...:version` idempotency key.
+    const fingerprint = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex').slice(0, 16);
     await new SyncRepository(this.client).appendServerEvent(ctx, {
       aggregateType: 'product_variant',
       aggregateId: variantId,
       operation,
       payload: { operationalSnapshot: snapshot },
       payloadVersion: 2,
-      idempotencyKey: `catalog:${productId}:${variantId}:${operation}:${version}`
+      idempotencyKey: `catalog:${productId}:${variantId}:${operation}:${version}:${fingerprint}`
     });
   }
 }
