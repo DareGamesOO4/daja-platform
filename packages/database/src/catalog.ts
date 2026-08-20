@@ -115,7 +115,9 @@ export class CatalogRepository {
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
               p.brand_id, p.primary_category_id, p.marketing_flags, d.slug AS department,
               b.name AS brand, c.name AS category,
-              v.current_price_amount AS price, v.currency,
+              v.current_price_amount AS regular_price,
+              COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,
+              active_sale.amount_minor AS sale_price, v.currency,
               COALESCE(inv.quantity, 0) AS available_quantity,
               primary_asset.public_url AS primary_image_url,
               thumb.public_url AS thumbnail_url,
@@ -129,6 +131,15 @@ export class CatalogRepository {
          ORDER BY pv.current_price_amount ${orderDirection}, pv.id
          LIMIT 1
        ) v ON true
+       LEFT JOIN LATERAL (
+         SELECT vp.amount_minor
+         FROM variant_prices vp
+         WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+           AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND (vp.valid_until IS NULL OR vp.valid_until > now())
+         ORDER BY vp.valid_from DESC, vp.created_at DESC
+         LIMIT 1
+       ) active_sale ON true
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
@@ -169,6 +180,23 @@ export class CatalogRepository {
   async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
     const result = await this.client.query(
       `SELECT p.*, d.slug AS department, b.name AS brand_name, c.name AS category_name,
+              (
+                SELECT vp.amount_minor
+                FROM product_variants pv
+                JOIN LATERAL (
+                  SELECT amount_minor
+                  FROM variant_prices
+                  WHERE organization_id = p.organization_id AND variant_id = pv.id
+                    AND price_type = 'sale' AND valid_from <= now()
+                    AND (valid_until IS NULL OR valid_until > now())
+                  ORDER BY valid_from DESC, created_at DESC
+                  LIMIT 1
+                ) vp ON true
+                WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
+                  AND pv.deleted_at IS NULL AND pv.active AND pv.published
+                ORDER BY pv.current_price_amount, pv.id
+                LIMIT 1
+              ) AS "salePrice",
               COALESCE(variants.items, '[]'::jsonb) AS variants,
               COALESCE(media.items, '[]'::jsonb) AS images,
               media.primary_image_url AS "primaryImageUrl",
@@ -561,6 +589,7 @@ export interface PublicProductCard {
   brand: string | null;
   category: string | null;
   price: number;
+  salePrice: number | null;
   currency: string;
   availability: { inStock: boolean; availableQuantity: number };
   primaryImageUrl: string | null;
@@ -579,6 +608,8 @@ interface PublicProductRow {
   brand: string | null;
   category: string | null;
   price: number;
+  regular_price: number;
+  sale_price: number | null;
   currency: string;
   available_quantity: number | null;
   primary_image_url: string | null;
@@ -689,7 +720,8 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     marketingFlags: row.marketing_flags ?? [],
     brand: row.brand,
     category: row.category,
-    price: row.price,
+    price: row.regular_price,
+    salePrice: row.sale_price === null ? null : row.price,
     currency: row.currency,
     availability: { inStock: availableQuantity > 0, availableQuantity },
     primaryImageUrl: row.primary_image_url,
