@@ -801,6 +801,7 @@ export class StaffCatalogController {
     const variant = await new CatalogRepository(this.database.pool).getVariant(ctx, variantId);
     const result = await this.database.pool.query(`INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`, [ctx.organizationId,variantId,input.amountMinor,input.currency,input.priceType,input.validFrom ?? null,input.validUntil ?? null,ctx.userId]);
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, variant.productId);
+    await new OperationalSyncProjector(this.database.pool).publishProductChange(ctx, product.id, variantId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return result.rows[0];
   }

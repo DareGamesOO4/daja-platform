@@ -425,7 +425,10 @@ export class OperationalSyncProjector {
               c.name AS "categoryName", b.name AS "brandName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount",
               v.currency, v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
-              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId", tag.epc
+              sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
+              cost.amount_minor AS "costAmount",
+              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
@@ -438,7 +441,17 @@ export class OperationalSyncProjector {
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inventory ON true
        LEFT JOIN LATERAL (
-         SELECT t.epc
+         SELECT amount_minor, valid_from, valid_until FROM variant_prices
+         WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
+         ORDER BY created_at DESC LIMIT 1
+       ) sale ON true
+       LEFT JOIN LATERAL (
+         SELECT amount_minor FROM variant_prices
+         WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'cost'
+         ORDER BY created_at DESC LIMIT 1
+       ) cost ON true
+       LEFT JOIN LATERAL (
+         SELECT t.id, t.epc, t.status
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
