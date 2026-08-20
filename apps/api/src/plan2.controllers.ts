@@ -96,7 +96,7 @@ const variantPatchSchema = variantCreateSchema.partial().extend({
 const scheduledPriceSchema = z.object({
   amountMinor: amountMinorSchema,
   currency: currencySchema,
-  priceType: z.enum(['sell', 'sale']),
+  priceType: z.enum(['sell', 'sale', 'cost']),
   validFrom: z.string().datetime().optional(),
   validUntil: z.string().datetime().nullable().optional()
 });

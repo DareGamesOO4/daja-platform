@@ -330,13 +330,28 @@ export class OperationalSyncProjector {
       `SELECT p.id AS "productId", p.name AS "productName", p.description, p.primary_category_id AS "categoryId",
               c.name AS "categoryName", b.name AS "brandName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount",
-              v.currency, v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri"
+              v.currency, v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
+              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId", tag.epc
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN LATERAL (SELECT ma.public_url FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
                           WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id AND ma.status = 'ready'
                           ORDER BY pm.is_primary DESC, pm.position LIMIT 1) media ON true
+       LEFT JOIN LATERAL (
+         SELECT SUM(ib.quantity)::integer AS quantity, (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id
+         FROM inventory_balances ib
+         WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
+       ) inventory ON true
+       LEFT JOIN LATERAL (
+         SELECT t.epc
+         FROM rfid_tags t
+         LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
+         WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
+           AND (t.variant_id = v.id OR ii.variant_id = v.id)
+         ORDER BY t.updated_at DESC
+         LIMIT 1
+       ) tag ON true
        WHERE p.organization_id = $1 AND p.id = $2 AND v.id = $3`,
       [organizationId, productId, variantId]
     );
