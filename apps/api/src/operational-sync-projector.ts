@@ -354,7 +354,10 @@ export class OperationalSyncProjector {
         ? { kind: 'catalog.item', deleted: true, productId, variantId }
         : await this.catalogSnapshot(ctx.organizationId, productId, variantId);
     const record = (snapshot.record ?? {}) as Record<string, unknown>;
-    const version = typeof record.variantVersion === 'number' ? record.variantVersion : 1;
+    // PostgreSQL bigint values are returned as strings by node-postgres by
+    // default. Treating them as non-numeric made every update use version 1
+    // and collide with the unique sync idempotency key after the first save.
+    const version = Number(record.variantVersion) || 1;
     await new SyncRepository(this.client).appendServerEvent(ctx, {
       aggregateType: 'product_variant',
       aggregateId: variantId,
