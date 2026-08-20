@@ -340,8 +340,8 @@ export class OperationalSyncProjector {
       ]
     );
     await this.client.query(
-      `UPDATE product_variants SET sku = $3, barcode = $4, name = $5, current_price_amount = $6, currency = $7,
-       attributes = $8::jsonb, version = version + 1, updated_at = now()
+      `UPDATE product_variants SET sku = $3, barcode = COALESCE(NULLIF($4, ''), barcode), name = $5, current_price_amount = $6, currency = $7,
+       attributes = COALESCE(attributes, '{}'::jsonb) || $8::jsonb, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
       [
         ctx.organizationId,
