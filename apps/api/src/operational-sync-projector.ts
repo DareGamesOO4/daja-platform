@@ -421,8 +421,10 @@ export class OperationalSyncProjector {
     variantId: string
   ): Promise<Record<string, unknown>> {
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.name AS "productName", p.description, p.primary_category_id AS "categoryId",
-              c.name AS "categoryName", b.name AS "brandName", p.version AS "productVersion",
+      `SELECT p.id AS "productId", p.name AS "productName", p.description,
+              p.department_id AS "departmentId", d.name AS "departmentName",
+              p.brand_id AS "brandId", b.name AS "brandName",
+              p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount",
               v.currency, v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
               sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
@@ -430,6 +432,7 @@ export class OperationalSyncProjector {
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN LATERAL (SELECT ma.public_url FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
