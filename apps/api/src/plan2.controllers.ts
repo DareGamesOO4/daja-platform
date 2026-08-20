@@ -171,7 +171,16 @@ export class PublicCatalogController {
       ctx,
       normalizedSlug
     );
-    await this.redis.client.set(cacheKey, JSON.stringify(product), 'EX', 120);
+    // Do not cache a sale beyond its expiry. A client refreshes only this
+    // slug at that moment and must receive the regular price immediately.
+    const saleExpiry = product && typeof product === 'object'
+      ? (product as { saleValidUntil?: string | null }).saleValidUntil
+      : null;
+    const expiresIn = saleExpiry ? new Date(saleExpiry).getTime() - Date.now() : Infinity;
+    const cacheSeconds = Number.isFinite(expiresIn)
+      ? Math.max(1, Math.min(120, Math.ceil(expiresIn / 1000)))
+      : 120;
+    await this.redis.client.set(cacheKey, JSON.stringify(product), 'EX', cacheSeconds);
     return product;
   }
 
