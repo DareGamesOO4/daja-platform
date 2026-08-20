@@ -382,6 +382,22 @@ export class StaffCatalogController {
     return patched.after;
   }
 
+  @Patch('products/:id/visibility')
+  async patchVisibility(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const productId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(z.object({ active: z.boolean() }), body);
+    const result = await this.database.pool.query(
+      `UPDATE products SET active = $3, version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id, active, published`,
+      [ctx.organizationId, productId, input.active]
+    );
+    if (!result.rowCount) throw new TenantAccessDeniedError();
+    return result.rows[0];
+  }
+
   @Delete('products/:id')
   async deleteProduct(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
