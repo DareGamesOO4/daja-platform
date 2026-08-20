@@ -34,15 +34,9 @@ ALTER TABLE products ADD COLUMN model_3d_url text;
 ALTER TABLE spec_keys ADD COLUMN department_id uuid REFERENCES departments (id);
 ALTER TABLE spec_keys ADD COLUMN unit text;
 
-UPDATE brands b SET department_id = d.id
-FROM departments d
-WHERE d.organization_id = b.organization_id AND d.slug = 'satovi' AND b.department_id IS NULL;
-UPDATE categories c SET department_id = d.id
-FROM departments d
-WHERE d.organization_id = c.organization_id AND d.slug = 'satovi' AND c.department_id IS NULL;
-UPDATE products p SET department_id = d.id
-FROM departments d
-WHERE d.organization_id = p.organization_id AND d.slug = 'satovi' AND p.department_id IS NULL;
+-- Existing catalogue records deliberately stay unassigned.  Assigning every
+-- legacy record to "satovi" hides incomplete data and makes later clean-up
+-- impossible.  Staff can assign a department before publishing a product.
 UPDATE spec_keys s SET department_id = d.id
 FROM departments d
 WHERE d.organization_id = s.organization_id AND d.slug = COALESCE(s.department, 'satovi') AND s.department_id IS NULL;

@@ -256,6 +256,9 @@ export class CatalogRepository {
       externalId?: string | null | undefined;
     }
   ): Promise<ProductRecord> {
+    if (input.published && !input.departmentId) {
+      throw new ValidationFailedError('A department is required before publishing a product');
+    }
     await this.assertCatalogHierarchy(ctx.organizationId, input.departmentId, input.brandId, input.primaryCategoryId);
     try {
       const result = await this.client.query<ProductRow>(
@@ -324,6 +327,9 @@ export class CatalogRepository {
       throw new VersionConflictError();
     }
     const next = { ...current, ...input };
+    if (next.published && !next.departmentId) {
+      throw new ValidationFailedError('A department is required before publishing a product');
+    }
     if (input.departmentId !== undefined || input.brandId !== undefined || input.primaryCategoryId !== undefined) {
       await this.assertCatalogHierarchy(ctx.organizationId, next.departmentId, next.brandId, next.primaryCategoryId);
     }

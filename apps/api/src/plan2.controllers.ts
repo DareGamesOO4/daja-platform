@@ -93,6 +93,13 @@ const variantCreateSchema = z.object({
 const variantPatchSchema = variantCreateSchema.partial().extend({
   expectedVersion: z.coerce.number().int().positive().optional()
 });
+const scheduledPriceSchema = z.object({
+  amountMinor: amountMinorSchema,
+  currency: currencySchema,
+  priceType: z.enum(['sell', 'sale']),
+  validFrom: z.string().datetime().optional(),
+  validUntil: z.string().datetime().nullable().optional()
+});
 
 const brandSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -615,7 +622,7 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.read');
     return (
       await this.database.pool.query(
-        `SELECT pm.id, pm.media_asset_id AS "mediaId", pm.role, pm.position, pm.is_primary AS "isPrimary",
+        `SELECT pm.id, pm.media_asset_id AS "mediaId", pm.variant_id AS "variantId", pm.role, pm.position, pm.is_primary AS "isPrimary",
               ma.public_url AS url, ma.status
        FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
        WHERE pm.organization_id = $1 AND pm.product_id = $2
@@ -639,7 +646,8 @@ export class StaffCatalogController {
         mediaId: uuidSchema,
         role: z.string().trim().min(1).max(40).optional(),
         position: z.coerce.number().int().min(0).optional(),
-        isPrimary: z.boolean().optional()
+        isPrimary: z.boolean().optional(),
+        variantId: uuidSchema.nullable().optional()
       }),
       body
     );
@@ -655,13 +663,13 @@ export class StaffCatalogController {
         [ctx.organizationId, productId]
       );
     const result = await this.database.pool.query(
-      `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO product_media (organization_id, product_id, variant_id, media_asset_id, role, position, is_primary)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
       [
         ctx.organizationId,
         productId,
-        input.mediaId,
+        input.variantId ?? null, input.mediaId,
         input.role ?? 'gallery',
         input.position ?? 0,
         input.isPrimary ?? false
@@ -687,7 +695,8 @@ export class StaffCatalogController {
       z.object({
         position: z.coerce.number().int().min(0).optional(),
         isPrimary: z.boolean().optional(),
-        role: z.string().trim().min(1).max(40).optional()
+        role: z.string().trim().min(1).max(40).optional(),
+        variantId: uuidSchema.nullable().optional()
       }),
       body
     );
@@ -698,7 +707,7 @@ export class StaffCatalogController {
         [ctx.organizationId, productId]
       );
     const result = await this.database.pool.query(
-      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary)
+      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id)
        WHERE organization_id = $1 AND product_id = $2 AND id = $3
        RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
       [
@@ -707,7 +716,7 @@ export class StaffCatalogController {
         linkId,
         input.position ?? null,
         input.role ?? null,
-        input.isPrimary ?? null
+        input.isPrimary ?? null, input.variantId ?? null
       ]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
@@ -734,6 +743,38 @@ export class StaffCatalogController {
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return { deleted: true };
+  }
+
+  @Get('variants/:id/prices')
+  async listVariantPrices(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request); requirePermission(ctx, 'catalog.read');
+    return (await this.database.pool.query(`SELECT id, amount_minor AS "amountMinor", currency, price_type AS "priceType", valid_from AS "validFrom", valid_until AS "validUntil", created_at AS "createdAt" FROM variant_prices WHERE organization_id=$1 AND variant_id=$2 ORDER BY valid_from DESC`, [ctx.organizationId, parseWithSchema(uuidSchema,id)])).rows;
+  }
+
+  @Post('variants/:id/prices')
+  async addVariantPrice(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request); requirePermission(ctx, 'catalog.write');
+    const variantId = parseWithSchema(uuidSchema,id); const input = parseWithSchema(scheduledPriceSchema, body);
+    await new CatalogRepository(this.database.pool).getVariant(ctx, variantId);
+    const result = await this.database.pool.query(`INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`, [ctx.organizationId,variantId,input.amountMinor,input.currency,input.priceType,input.validFrom ?? null,input.validUntil ?? null,ctx.userId]);
+    return result.rows[0];
+  }
+
+  @Get('admin/products/:id/reviews')
+  async listAdminReviews(@Req() request: Request, @Param('id') id: string) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
+    return (await this.database.pool.query(`SELECT id,customer_id AS "customerId",user_name AS "userName",rating,comment,status,created_at AS "createdAt" FROM product_reviews WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC`,[ctx.organizationId,parseWithSchema(uuidSchema,id)])).rows;
+  }
+
+  @Patch('admin/reviews/:id')
+  async moderateReview(@Req() request: Request,@Param('id') id:string,@Body() body:unknown) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write'); const input=parseWithSchema(z.object({status:z.enum(['pending','published','rejected'])}),body);
+    const result=await this.database.pool.query(`UPDATE product_reviews SET status=$3 WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id,status`,[ctx.organizationId,parseWithSchema(uuidSchema,id),input.status]); if(!result.rowCount) throw new TenantAccessDeniedError(); return result.rows[0];
+  }
+
+  @Delete('admin/reviews/:id')
+  async deleteReview(@Req() request: Request,@Param('id') id:string) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write'); const result=await this.database.pool.query(`UPDATE product_reviews SET deleted_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL`,[ctx.organizationId,parseWithSchema(uuidSchema,id)]); if(!result.rowCount) throw new TenantAccessDeniedError(); return {deleted:true};
   }
 
   @Get('brands')
@@ -1364,6 +1405,12 @@ export class InventoryController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
+
+  @Get('locations')
+  async locations(@Req() request: Request) {
+    const ctx = resolveRequestContext(request); requirePermission(ctx, 'inventory.read');
+    return (await this.database.pool.query(`SELECT id, name, code FROM locations WHERE organization_id=$1 AND deleted_at IS NULL ORDER BY name`, [ctx.organizationId])).rows;
+  }
 
   @Post('items')
   async createItem(@Req() request: Request, @Body() body: unknown) {
