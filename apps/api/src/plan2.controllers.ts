@@ -356,20 +356,27 @@ export class StaffCatalogController {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
         const after = await repository.patchProduct(ctx, productId, input);
+        return { beforeSlug: before.slug, after };
+      }
+    );
+    // Audit/outbox/sync must never prevent a catalog administrator from
+    // saving a product. They run after the committed catalog change and are
+    // retried by their respective workers when infrastructure is available.
+    try {
+      await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'product',
           aggregateId: productId,
           operation: 'update',
-          beforePayload: before,
-          afterPayload: after
+          afterPayload: patched.after
         });
         await new OutboxRepository(client).append({
           ctx,
           eventType: 'ProductUpdated',
           aggregateType: 'product',
           aggregateId: productId,
-          payload: { productId, slug: after.slug, published: after.published }
+          payload: { productId, slug: patched.after.slug, published: patched.after.published }
         });
         const variant = await client.query<{ id: string }>(
           `SELECT id FROM product_variants
@@ -384,9 +391,10 @@ export class StaffCatalogController {
             variant.rows[0].id
           );
         }
-        return { beforeSlug: before.slug, after };
-      }
-    );
+      });
+    } catch (error) {
+      this.logger.warn({ err: error, productId }, 'Product saved but operational sync failed');
+    }
     await this.invalidateCatalog(ctx.organizationId, patched.beforeSlug, patched.after.slug);
     return patched.after;
   }
