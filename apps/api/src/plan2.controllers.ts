@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
+import { createHash } from 'node:crypto';
 import {
   Body,
   Controller,
@@ -63,7 +64,16 @@ const productCreateSchema = z.object({
       })
     )
     .optional(),
-  model3DUrl: z.string().url().nullable().optional(),
+  // Product assets may be stored as an absolute CDN URL or as a Storage path
+  // such as `/models/watch.glb`, which is what the admin modal advertises.
+  model3DUrl: z
+    .string()
+    .trim()
+    .refine((value) => /^https?:\/\//i.test(value) || value.startsWith('/'), {
+      message: '3D model URL must be an http(s) URL or a Storage path'
+    })
+    .nullable()
+    .optional(),
   marketingFlags: z
     .array(z.enum(['new', 'popular', 'recommended']))
     .max(3)
@@ -1166,6 +1176,30 @@ export class MediaController {
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
+
+  /** Registers a direct image URL as a first-class media asset so the
+   * product modal can attach it through product_media just like an upload. */
+  @Post('external')
+  async registerExternal(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'media.upload');
+    const input = parseWithSchema(z.object({ url: z.string().url().max(2_000) }), body);
+    if (!/^https?:\/\//i.test(input.url)) throw new ValidationFailedError('Image URL must use http or https');
+    const storageKey = createHash('sha256').update(input.url).digest('hex');
+    const result = await this.database.pool.query<{
+      id: string;
+      publicUrl: string;
+      thumbnailUrl: string | null;
+    }>(
+      `INSERT INTO media_assets (organization_id, storage_provider, storage_bucket, storage_key, public_url, mime_type, status)
+       VALUES ($1, 'external-url', 'external', $2, $3, 'image/*', 'ready')
+       ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
+       DO UPDATE SET public_url = EXCLUDED.public_url, status = 'ready', updated_at = now()
+       RETURNING id, public_url AS "publicUrl", thumbnail_url AS "thumbnailUrl"`,
+      [ctx.organizationId, storageKey, input.url]
+    );
+    return result.rows[0];
+  }
 
   @Post('uploads')
   async createUpload(@Req() request: Request, @Body() body: unknown) {
