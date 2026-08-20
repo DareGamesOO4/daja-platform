@@ -327,7 +327,7 @@ export class CatalogRepository {
       throw new VersionConflictError();
     }
     const next = { ...current, ...input };
-    if (next.published && !next.departmentId) {
+    if (input.published === true && !next.departmentId) {
       throw new ValidationFailedError('A department is required before publishing a product');
     }
     if (input.departmentId !== undefined || input.brandId !== undefined || input.primaryCategoryId !== undefined) {
