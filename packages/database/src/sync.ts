@@ -253,26 +253,52 @@ export class SyncRepository {
     );
     const cursor = input.cursor ?? '';
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description, p.primary_category_id AS "categoryId",
-              b.name AS "brandName", p.version AS "productVersion",
-              v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.current_price_amount AS "priceAmount", v.currency,
-              v.attributes, v.active, v.published, v.version AS "variantVersion", media.public_url AS "imageUri",
-              t.id AS "tagId", t.epc
+      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description,
+              p.department_id AS "departmentId", d.name AS "departmentName",
+              p.brand_id AS "brandId", b.name AS "brandName",
+              p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
+              v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.gender,
+              v.current_price_amount AS "priceAmount", v.currency, v.attributes, v.active, v.published,
+              v.version AS "variantVersion", media.public_url AS "imageUri",
+              sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
+              cost.amount_minor AS "costAmount",
+              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
         AND v.deleted_at IS NULL AND v.active
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
-       LEFT JOIN rfid_tags t ON t.organization_id = p.organization_id
-        AND (t.variant_id = v.id OR t.inventory_item_id IN (
-          SELECT ii.id FROM inventory_items ii WHERE ii.organization_id = p.organization_id AND ii.variant_id = v.id
-        ))
-        AND t.deleted_at IS NULL
+       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN LATERAL (
          SELECT ma.public_url FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
        ) media ON true
+       LEFT JOIN LATERAL (
+         SELECT SUM(ib.quantity)::integer AS quantity, (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id
+         FROM inventory_balances ib
+         WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
+       ) inventory ON true
+       LEFT JOIN LATERAL (
+         SELECT amount_minor, valid_from, valid_until FROM variant_prices
+         WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
+         ORDER BY created_at DESC LIMIT 1
+       ) sale ON true
+       LEFT JOIN LATERAL (
+         SELECT amount_minor FROM variant_prices
+         WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'cost'
+         ORDER BY created_at DESC LIMIT 1
+       ) cost ON true
+       LEFT JOIN LATERAL (
+         SELECT t.id, t.epc, t.status
+         FROM rfid_tags t
+         LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
+         WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
+           AND (t.variant_id = v.id OR ii.variant_id = v.id)
+         ORDER BY t.updated_at DESC LIMIT 1
+       ) tag ON true
        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
        ORDER BY p.id
        LIMIT $3`,
