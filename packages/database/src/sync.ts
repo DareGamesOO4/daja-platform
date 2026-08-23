@@ -305,9 +305,33 @@ export class SyncRepository {
       [ctx.organizationId, cursor, input.limit + 1]
     );
     const rows = result.rows.slice(0, input.limit);
+    const [departments, brands, categories, specificationKeys] = await Promise.all([
+      this.client.query(
+        `SELECT id, name FROM departments WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY sort_order, name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, name, department_id AS "departmentId" FROM brands WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, name, department_id AS "departmentId", brand_id AS "brandId" FROM categories WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, slug AS key, name, department_id AS "departmentId", unit FROM spec_keys WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
+        [ctx.organizationId]
+      )
+    ]);
     return {
       watermarkRevision: Number(revision.rows[0]?.current_revision ?? 0),
       items: rows,
+      taxonomy: {
+        departments: departments.rows,
+        brands: brands.rows,
+        categories: categories.rows,
+        specificationKeys: specificationKeys.rows
+      },
       nextCursor: result.rows.length > input.limit ? rows.at(-1)?.productId : null,
       hasMore: result.rows.length > input.limit
     };
