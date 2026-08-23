@@ -86,7 +86,10 @@ export class OperationalSyncProjector {
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (kind === 'settings.update') {
-      const snapshot = await this.settings(ctx, { kind: 'settings.update', payload: commandPayload });
+      const snapshot = await this.settings(ctx, {
+        kind: 'settings.update',
+        payload: commandPayload
+      });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
 
@@ -170,7 +173,8 @@ export class OperationalSyncProjector {
         text(values, 'company.taxNumber')
       ]
     );
-    if (!result.rows[0]) throw new ValidationFailedError('Desktop organization does not exist on Platform');
+    if (!result.rows[0])
+      throw new ValidationFailedError('Desktop organization does not exist on Platform');
     return { kind: 'organization.settings', organization: result.rows[0] };
   }
 
@@ -209,6 +213,15 @@ export class OperationalSyncProjector {
             [ctx.organizationId, categoryId]
           )
         : undefined;
+      const departmentName = text(input, 'department');
+      const department = departmentName
+        ? await this.client.query<{ id: string }>(
+            `SELECT id FROM departments
+             WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
+             LIMIT 1`,
+            [ctx.organizationId, departmentName]
+          )
+        : undefined;
       // RFID stores a storefront category as a child of its local brand.
       // Sync sends that parent name explicitly; older clients fall back to
       // categoryName so their existing events remain compatible.
@@ -226,11 +239,12 @@ export class OperationalSyncProjector {
         : undefined;
       const resolvedProductId = productId ?? event.aggregateId;
       await this.client.query(
-        `INSERT INTO products (id, organization_id, name, slug, description, brand_id, primary_category_id, seo, features, model_3d_url, active, published, external_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13)
+        `INSERT INTO products (id, organization_id, name, slug, description, brand_id, primary_category_id, seo, features, model_3d_url, active, published, external_id, department_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14)
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, slug = EXCLUDED.slug,
            description = EXCLUDED.description, seo = EXCLUDED.seo, features = EXCLUDED.features,
-           model_3d_url = EXCLUDED.model_3d_url, active = EXCLUDED.active, published = EXCLUDED.published,
+           model_3d_url = EXCLUDED.model_3d_url, department_id = EXCLUDED.department_id,
+           active = EXCLUDED.active, published = EXCLUDED.published,
            updated_at = now(), version = products.version + 1`,
         [
           resolvedProductId,
@@ -245,7 +259,8 @@ export class OperationalSyncProjector {
           text(input, 'model3dUrl') ?? null,
           boolean(input, 'active', true),
           boolean(input, 'published', true),
-          `rfiddaja:${variantId}`
+          `rfiddaja:${variantId}`,
+          department?.rows[0]?.id ?? null
         ]
       );
       await this.client.query(
@@ -320,6 +335,15 @@ export class OperationalSyncProjector {
           [ctx.organizationId, categoryId]
         )
       : undefined;
+    const departmentName = text(input, 'department');
+    const department = departmentName
+      ? await this.client.query<{ id: string }>(
+          `SELECT id FROM departments
+           WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
+           LIMIT 1`,
+          [ctx.organizationId, departmentName]
+        )
+      : undefined;
     const localBrandName =
       entityIds === undefined
         ? undefined
@@ -336,7 +360,8 @@ export class OperationalSyncProjector {
       `UPDATE products SET name = $3, slug = COALESCE(NULLIF($4, ''), slug), description = COALESCE($5, description),
        brand_id = COALESCE($6, brand_id), primary_category_id = COALESCE($7, primary_category_id),
        seo = COALESCE($8::jsonb, seo), features = COALESCE($9::jsonb, features), model_3d_url = COALESCE($10, model_3d_url),
-       active = $11, published = $12, version = version + 1, updated_at = now()
+       active = $11, published = $12, department_id = COALESCE($13, department_id),
+       version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
       [
         ctx.organizationId,
@@ -347,10 +372,13 @@ export class OperationalSyncProjector {
         brand?.rows[0]?.id ?? null,
         validCategory?.rows[0]?.id ?? null,
         input.seo === undefined ? null : JSON.stringify(record(input.seo) ?? {}),
-        input.features === undefined ? null : JSON.stringify(Array.isArray(input.features) ? input.features : []),
+        input.features === undefined
+          ? null
+          : JSON.stringify(Array.isArray(input.features) ? input.features : []),
         text(input, 'model3dUrl') ?? null,
         boolean(input, 'active', true),
-        boolean(input, 'published', true)
+        boolean(input, 'published', true),
+        department?.rows[0]?.id ?? null
       ]
     );
     await this.client.query(
@@ -416,7 +444,15 @@ export class OperationalSyncProjector {
       await this.client.query(
         `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, valid_from, valid_until, created_by)
          VALUES ($1, $2, $3, $4, 'sale', COALESCE($5::timestamptz, now()), $6::timestamptz, $7)`,
-        [ctx.organizationId, variantId, saleAmount * 100, currency, text(input, 'promotionalValidFrom') ?? null, text(input, 'promotionalValidUntil') ?? null, ctx.userId]
+        [
+          ctx.organizationId,
+          variantId,
+          saleAmount * 100,
+          currency,
+          text(input, 'promotionalValidFrom') ?? null,
+          text(input, 'promotionalValidUntil') ?? null,
+          ctx.userId
+        ]
       );
     }
     if (costAmount !== undefined && costAmount >= 0) {
@@ -436,7 +472,9 @@ export class OperationalSyncProjector {
     const fromPayload = Array.isArray(input.imageUris)
       ? input.imageUris.filter((value): value is string => typeof value === 'string')
       : [];
-    const imageUris = fromPayload.length ? fromPayload : [text(input, 'imageUri')].filter((value): value is string => value !== undefined);
+    const imageUris = fromPayload.length
+      ? fromPayload
+      : [text(input, 'imageUri')].filter((value): value is string => value !== undefined);
     let position = 0;
     for (const imageUri of imageUris) {
       if (!/^https?:\/\//i.test(imageUri)) continue;
@@ -546,7 +584,10 @@ export class OperationalSyncProjector {
     // the variant row version. Include the canonical snapshot fingerprint so
     // those updates produce a new pull event instead of colliding with an
     // older `catalog:...:version` idempotency key.
-    const fingerprint = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex').slice(0, 16);
+    const fingerprint = createHash('sha256')
+      .update(JSON.stringify(snapshot))
+      .digest('hex')
+      .slice(0, 16);
     await new SyncRepository(this.client).appendServerEvent(ctx, {
       aggregateType: 'product_variant',
       aggregateId: variantId,
