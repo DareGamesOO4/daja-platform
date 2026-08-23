@@ -488,16 +488,31 @@ export class OperationalSyncProjector {
     imageUri: string,
     position: number
   ): Promise<void> {
-    const storageKey = createHash('sha256').update(imageUri).digest('hex');
-    const media = await this.client.query<{ id: string }>(
-      `INSERT INTO media_assets (organization_id, storage_provider, storage_bucket, storage_key, public_url, mime_type, status)
-       VALUES ($1, 'external-url', 'external', $2, $3, 'image/*', 'ready')
-       ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
-       DO UPDATE SET public_url = EXCLUDED.public_url, status = 'ready', updated_at = now()
-       RETURNING id`,
-      [organizationId, storageKey, imageUri]
+    // The RFID desktop app first imports a linked image through /media/external.
+    // Reuse that R2 asset (and its 512px derivative) when the later catalog
+    // sync event arrives. Older clients may still send arbitrary external URLs,
+    // which retain the previous external-url fallback.
+    const imported = await this.client.query<{ id: string }>(
+      `SELECT id FROM media_assets
+       WHERE organization_id = $1 AND public_url = $2
+         AND storage_provider = 'r2' AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [organizationId, imageUri]
     );
-    const mediaId = media.rows[0]?.id;
+    let mediaId = imported.rows[0]?.id;
+    if (!mediaId) {
+      const storageKey = createHash('sha256').update(imageUri).digest('hex');
+      const media = await this.client.query<{ id: string }>(
+        `INSERT INTO media_assets (organization_id, storage_provider, storage_bucket, storage_key, public_url, mime_type, status)
+         VALUES ($1, 'external-url', 'external', $2, $3, 'image/*', 'ready')
+         ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
+         DO UPDATE SET public_url = EXCLUDED.public_url, status = 'ready', updated_at = now()
+         RETURNING id`,
+        [organizationId, storageKey, imageUri]
+      );
+      mediaId = media.rows[0]?.id;
+    }
     if (!mediaId) return;
     await this.client.query(
       `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2 AND $3 = 0`,

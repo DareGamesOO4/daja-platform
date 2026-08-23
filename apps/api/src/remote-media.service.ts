@@ -22,12 +22,7 @@ const THUMBNAIL_WIDTH = 512;
 const MAX_REDIRECTS = 3;
 const DOWNLOAD_TIMEOUT_MS = 15_000;
 const CACHE_CONTROL = 'public, max-age=31536000, immutable';
-const ACCEPTED_CONTENT_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/avif'
-]);
+const ACCEPTED_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif']);
 
 export interface RemoteMediaImportResult {
   id: string;
@@ -69,11 +64,24 @@ export async function importRemoteImage(input: {
     extension: '.webp'
   });
   const originalUrl = requiredPublicUrl(storage, originalKey);
-  const storedKeys = [originalKey];
+  const thumbnailKey = productMediaThumbnailStorageKey({
+    originalKey,
+    organizationId: input.organizationId,
+    mediaId,
+    width: processed.thumbnail.width
+  });
+  const thumbnailUrl = requiredPublicUrl(storage, thumbnailKey);
+  const storedKeys = [originalKey, thumbnailKey];
   try {
     await storage.putObject({
       key: originalKey,
-      body: processed.data,
+      body: processed.original.data,
+      contentType: 'image/webp',
+      cacheControl: CACHE_CONTROL
+    });
+    await storage.putObject({
+      key: thumbnailKey,
+      body: processed.thumbnail.data,
       contentType: 'image/webp',
       cacheControl: CACHE_CONTROL
     });
@@ -94,10 +102,10 @@ export async function importRemoteImage(input: {
           storage.bucket(),
           originalKey,
           originalUrl,
-          processed.width,
-          processed.height,
-          processed.data.length,
-          sha256(processed.data),
+          processed.original.width,
+          processed.original.height,
+          processed.original.data.length,
+          sha256(processed.original.data),
           JSON.stringify({
             sourceUrl: input.sourceUrl,
             sourceMimeType: downloaded.contentType,
@@ -106,6 +114,23 @@ export async function importRemoteImage(input: {
             imageIndex: input.imageIndex ?? null,
             importedAt: new Date().toISOString()
           })
+        ]
+      );
+      await client.query(
+        `INSERT INTO media_derivatives (
+           organization_id, media_asset_id, width, height, mime_type,
+           storage_key, public_url, size_bytes, checksum_sha256
+         )
+         VALUES ($1, $2, $3, $4, 'image/webp', $5, $6, $7, $8)`,
+        [
+          input.organizationId,
+          mediaId,
+          processed.thumbnail.width,
+          processed.thumbnail.height,
+          thumbnailKey,
+          thumbnailUrl,
+          processed.thumbnail.data.length,
+          sha256(processed.thumbnail.data)
         ]
       );
       await client.query('COMMIT');
@@ -125,12 +150,10 @@ export async function importRemoteImage(input: {
     mediaId,
     publicUrl: originalUrl,
     mainImageUrl: originalUrl,
-    // A gallery item does not receive a derivative. The client may use the
-    // optimized main image until this asset becomes a product's primary image.
-    thumbnailUrl: originalUrl,
+    thumbnailUrl,
     storageKey: originalKey,
-    width: processed.width,
-    height: processed.height
+    width: processed.original.width,
+    height: processed.original.height
   };
 }
 
@@ -216,9 +239,8 @@ export async function ensurePrimaryMediaThumbnail(input: {
 }
 
 async function createWebpVariants(source: Buffer): Promise<{
-  data: Buffer;
-  width: number;
-  height: number;
+  original: { data: Buffer; width: number; height: number };
+  thumbnail: { data: Buffer; width: number; height: number };
 }> {
   let originalData: Buffer | undefined;
   let width: number | undefined;
@@ -253,10 +275,21 @@ async function createWebpVariants(source: Buffer): Promise<{
     throw new ValidationFailedError('Image dimensions are unsupported');
   }
 
+  const thumbnail = await sharp(originalData, { limitInputPixels: MAX_INPUT_PIXELS })
+    .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 80, effort: 4, smartSubsample: true })
+    .toBuffer({ resolveWithObject: true });
+  if (!thumbnail.info.width || !thumbnail.info.height) {
+    throw new ValidationFailedError('Thumbnail dimensions could not be determined');
+  }
+
   return {
-    data: originalData,
-    width,
-    height
+    original: { data: originalData, width, height },
+    thumbnail: {
+      data: thumbnail.data,
+      width: thumbnail.info.width,
+      height: thumbnail.info.height
+    }
   };
 }
 
@@ -289,11 +322,17 @@ async function downloadRemoteImage(value: string): Promise<DownloadedRemoteImage
     }
     if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
       response.resume();
-      throw new ValidationFailedError(`Remote image could not be downloaded (HTTP ${response.statusCode})`);
+      throw new ValidationFailedError(
+        `Remote image could not be downloaded (HTTP ${response.statusCode})`
+      );
     }
 
     const contentType = contentTypeFrom(response);
-    if (contentType && contentType !== 'application/octet-stream' && !ACCEPTED_CONTENT_TYPES.has(contentType)) {
+    if (
+      contentType &&
+      contentType !== 'application/octet-stream' &&
+      !ACCEPTED_CONTENT_TYPES.has(contentType)
+    ) {
       response.resume();
       throw new ValidationFailedError('Remote URL did not return a supported image');
     }
@@ -401,12 +440,13 @@ async function readLimitedResponse(response: IncomingMessage): Promise<Buffer> {
 function contentTypeFrom(response: IncomingMessage): string | null {
   const value = response.headers['content-type'];
   const contentType = Array.isArray(value) ? value[0] : value;
-  return contentType ? contentType.split(';', 1)[0]?.trim().toLowerCase() ?? null : null;
+  return contentType ? (contentType.split(';', 1)[0]?.trim().toLowerCase() ?? null) : null;
 }
 
 function requiredPublicUrl(storage: R2MediaStorageAdapter, key: string): string {
   const url = storage.publicUrl(key);
-  if (!url) throw new ValidationFailedError('MEDIA_PUBLIC_BASE_URL is required for remote image imports');
+  if (!url)
+    throw new ValidationFailedError('MEDIA_PUBLIC_BASE_URL is required for remote image imports');
   return url;
 }
 
