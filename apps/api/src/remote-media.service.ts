@@ -318,7 +318,12 @@ async function resolvePublicAddress(url: URL): Promise<{ address: string; family
 
 function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
-    const options: RequestOptions = {
+    const options: RequestOptions & { autoSelectFamily?: boolean } = {
+      // We deliberately pin one address after validating it above. Node's
+      // automatic multi-address selection expects a different lookup callback
+      // shape and otherwise raises ERR_INVALID_IP_ADDRESS on Render.
+      family,
+      autoSelectFamily: false,
       headers: {
         Accept: 'image/avif,image/webp,image/png,image/jpeg;q=0.9,*/*;q=0.1',
         'User-Agent': 'DajaShopMediaImporter/1.0'
