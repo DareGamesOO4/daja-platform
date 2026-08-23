@@ -179,7 +179,15 @@ async function processMediaJob(
     }
     const sourceWidth = metadata.width;
     const sourceHeight = metadata.height;
-    const targetWidths = [1024, 512, 256].filter((width) => width <= sourceWidth);
+    // Thumbnails are only useful for the active hero image. Gallery items keep
+    // their original asset and avoid needless R2 objects and image processing.
+    const primary = await database.pool.query(
+      `SELECT 1 FROM product_media
+       WHERE organization_id = $1 AND media_asset_id = $2 AND is_primary
+       LIMIT 1`,
+      [organizationId, mediaId]
+    );
+    const targetWidths = primary.rowCount ? [512] : [];
     const derivatives: Array<{
       width: number;
       height: number;

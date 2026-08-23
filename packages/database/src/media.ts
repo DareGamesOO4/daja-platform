@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Readable } from 'node:stream';
 import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
@@ -16,6 +23,14 @@ export interface MediaStorageAdapter {
   headObject(
     key: string
   ): Promise<{ sizeBytes: number; mimeType?: string; checksumSha256?: string }>;
+  getObject(key: string): Promise<Buffer>;
+  putObject(input: {
+    key: string;
+    body: Buffer;
+    contentType: string;
+    cacheControl?: string;
+  }): Promise<void>;
+  deleteObject(key: string): Promise<void>;
   bucket(): string;
   publicUrl(key: string): string | null;
 }
@@ -87,6 +102,35 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       ...(response.ContentType ? { mimeType: response.ContentType } : {}),
       ...(response.ChecksumSHA256 ? { checksumSha256: response.ChecksumSHA256 } : {})
     };
+  }
+
+  async getObject(key: string): Promise<Buffer> {
+    const response = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucketName, Key: key })
+    );
+    if (!response.Body) throw new ValidationFailedError('Media object body is empty');
+    return readObjectBody(response.Body);
+  }
+
+  async putObject(input: {
+    key: string;
+    body: Buffer;
+    contentType: string;
+    cacheControl?: string;
+  }): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: input.key,
+        Body: input.body,
+        ContentType: input.contentType,
+        ...(input.cacheControl ? { CacheControl: input.cacheControl } : {})
+      })
+    );
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }));
   }
 
   bucket(): string {
@@ -302,4 +346,16 @@ function extensionForMime(mimeType: string): string {
     default:
       return '';
   }
+}
+
+async function readObjectBody(body: unknown): Promise<Buffer> {
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (body instanceof Readable) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    }
+    return Buffer.concat(chunks);
+  }
+  throw new ValidationFailedError('Unsupported media object stream');
 }

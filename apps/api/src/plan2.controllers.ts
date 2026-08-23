@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
-import { createHash } from 'node:crypto';
 import {
   Body,
   Controller,
@@ -47,6 +46,7 @@ import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
+import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
 
 const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -215,6 +215,7 @@ export class PublicCatalogController {
 @Controller()
 export class StaffCatalogController {
   constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection,
@@ -700,6 +701,14 @@ export class StaffCatalogController {
       [ctx.organizationId, input.mediaId]
     );
     if (asset.rowCount !== 1) throw new TenantAccessDeniedError();
+    if (input.isPrimary) {
+      await ensurePrimaryMediaThumbnail({
+        config: this.config,
+        database: this.database,
+        organizationId: ctx.organizationId,
+        mediaId: input.mediaId
+      });
+    }
     if (input.isPrimary)
       await this.database.pool.query(
         `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
@@ -744,11 +753,25 @@ export class StaffCatalogController {
       body
     );
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
-    if (input.isPrimary)
+    if (input.isPrimary) {
+      const media = await this.database.pool.query<{ media_id: string }>(
+        `SELECT media_asset_id AS media_id FROM product_media
+         WHERE organization_id = $1 AND product_id = $2 AND id = $3`,
+        [ctx.organizationId, productId, linkId]
+      );
+      const mediaId = media.rows[0]?.media_id;
+      if (!mediaId) throw new TenantAccessDeniedError();
+      await ensurePrimaryMediaThumbnail({
+        config: this.config,
+        database: this.database,
+        organizationId: ctx.organizationId,
+        mediaId
+      });
       await this.database.pool.query(
         `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
         [ctx.organizationId, productId]
       );
+    }
     const result = await this.database.pool.query(
       `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id)
        WHERE organization_id = $1 AND product_id = $2 AND id = $3
@@ -1185,28 +1208,19 @@ export class MediaController {
     @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
 
-  /** Registers a direct image URL as a first-class media asset so the
-   * product modal can attach it through product_media just like an upload. */
+  /** Downloads, optimizes and stores a direct image URL as a media asset. */
   @Post('external')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async registerExternal(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'media.upload');
     const input = parseWithSchema(z.object({ url: z.string().url().max(2_000) }), body);
-    if (!/^https?:\/\//i.test(input.url)) throw new ValidationFailedError('Image URL must use http or https');
-    const storageKey = createHash('sha256').update(input.url).digest('hex');
-    const result = await this.database.pool.query<{
-      id: string;
-      publicUrl: string;
-      thumbnailUrl: string | null;
-    }>(
-      `INSERT INTO media_assets (organization_id, storage_provider, storage_bucket, storage_key, public_url, mime_type, status)
-       VALUES ($1, 'external-url', 'external', $2, $3, 'image/*', 'ready')
-       ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
-       DO UPDATE SET public_url = EXCLUDED.public_url, status = 'ready', updated_at = now()
-       RETURNING id, public_url AS "publicUrl", thumbnail_url AS "thumbnailUrl"`,
-      [ctx.organizationId, storageKey, input.url]
-    );
-    return result.rows[0];
+    return importRemoteImage({
+      config: this.config,
+      database: this.database,
+      organizationId: ctx.organizationId,
+      sourceUrl: input.url
+    });
   }
 
   @Post('uploads')

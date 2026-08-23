@@ -13,13 +13,10 @@ import {
   Res
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import sharp from 'sharp';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
-import { R2MediaStorageAdapter, StorefrontRepository, type Database } from '@daja/database';
+import { StorefrontRepository, type Database } from '@daja/database';
 import { requirePermission, ValidationFailedError } from '@daja/security';
-import { createRequestId } from '@daja/shared';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { AuthService } from './auth.service.js';
@@ -27,6 +24,7 @@ import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
+import { importRemoteImage } from './remote-media.service.js';
 
 const registerSchema = z.object({
   identity: z.string().trim().min(3).max(240),
@@ -571,64 +569,26 @@ export class StorefrontMediaController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'media.upload');
     const input = parseWithSchema(remoteImageSchema, body);
-    const source = await fetch(input.url, { headers: { Accept: 'image/*' } });
-    if (!source.ok) {
-      throw new ValidationFailedError('Remote image could not be downloaded');
-    }
-    const sourceBuffer = Buffer.from(await source.arrayBuffer());
-    const base = slugify(input.slug ?? input.productName);
-    const image = sharp(sourceBuffer).rotate();
-    const original = await image.webp({ quality: 84 }).toBuffer();
-    const thumb = await sharp(sourceBuffer)
-      .rotate()
-      .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: 82 })
-      .toBuffer();
-    const key = `${base}/${base}-${createRequestId()}.webp`;
-    const thumbKey = key.replace(/\.webp$/, '-thumb.webp');
-    const storage = new R2MediaStorageAdapter(this.config);
-    const client = createR2Client(this.config);
-    await client.send(
-      new PutObjectCommand({
-        Bucket: storage.bucket(),
-        Key: key,
-        Body: original,
-        ContentType: 'image/webp',
-        CacheControl: 'public, max-age=31536000, immutable'
-      })
-    );
-    await client.send(
-      new PutObjectCommand({
-        Bucket: storage.bucket(),
-        Key: thumbKey,
-        Body: thumb,
-        ContentType: 'image/webp',
-        CacheControl: 'public, max-age=31536000, immutable'
-      })
-    );
-    const url = storage.publicUrl(key);
-    const thumbnailUrl = storage.publicUrl(thumbKey);
-    await this.database.pool.query(
-      `INSERT INTO media_assets (
-         organization_id, storage_provider, storage_bucket, storage_key, public_url,
-         mime_type, size_bytes, status, metadata
-       )
-       VALUES ($1, 'r2', $2, $3, $4, 'image/webp', $5, 'ready', $6::jsonb)`,
-      [
-        ctx.organizationId,
-        storage.bucket(),
-        key,
-        url,
-        original.length,
-        JSON.stringify({ sourceUrl: input.url, thumbnailUrl })
-      ]
-    );
+    const imported = await importRemoteImage({
+      config: this.config,
+      database: this.database,
+      organizationId: ctx.organizationId,
+      sourceUrl: input.url
+    });
     return {
-      url,
-      mainImageUrl: url,
-      thumbnailUrl,
-      storagePath: key,
-      results: [{ url, mainImageUrl: url, thumbnailUrl, storagePath: key }]
+      success: true,
+      ...imported,
+      url: imported.publicUrl,
+      storagePath: imported.storageKey,
+      results: [
+        {
+          mediaId: imported.mediaId,
+          url: imported.publicUrl,
+          mainImageUrl: imported.mainImageUrl,
+          thumbnailUrl: imported.thumbnailUrl,
+          storagePath: imported.storageKey
+        }
+      ]
     };
   }
 }
@@ -649,26 +609,4 @@ function bearerToken(request: Request): string | undefined {
 
 function amountMinor(value: number): number {
   return Math.max(0, Math.round(value * 100));
-}
-
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 120);
-}
-
-function createR2Client(config: AppConfig): S3Client {
-  return new S3Client({
-    region: 'auto',
-    endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    forcePathStyle: Boolean(config.R2_ENDPOINT),
-    credentials: {
-      accessKeyId: config.R2_ACCESS_KEY_ID,
-      secretAccessKey: config.R2_SECRET_ACCESS_KEY
-    }
-  });
 }
