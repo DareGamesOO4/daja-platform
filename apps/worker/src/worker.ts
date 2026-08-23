@@ -7,6 +7,7 @@ import type { AppConfig } from '@daja/config';
 import {
   MediaRepository,
   OutboxRepository,
+  productMediaThumbnailStorageKey,
   TransactionManager,
   sha256,
   type Database
@@ -203,7 +204,12 @@ async function processMediaJob(
         .resize({ width, withoutEnlargement: true })
         .webp({ quality: 82 })
         .toBuffer({ resolveWithObject: true });
-      const key = `org/${organizationId}/media/${mediaId}/derivatives/${width}.webp`;
+      const key = productMediaThumbnailStorageKey({
+        originalKey: asset.storage_key,
+        organizationId,
+        mediaId,
+        width
+      });
       await client.send(
         new PutObjectCommand({
           Bucket: config.R2_BUCKET,

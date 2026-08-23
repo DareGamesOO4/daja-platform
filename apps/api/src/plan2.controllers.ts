@@ -1214,12 +1214,21 @@ export class MediaController {
   async registerExternal(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'media.upload');
-    const input = parseWithSchema(z.object({ url: z.string().url().max(2_000) }), body);
+    const input = parseWithSchema(
+      z.object({
+        url: z.string().url().max(2_000),
+        productSlug: slugSchema.optional(),
+        imageIndex: z.coerce.number().int().min(1).max(999).optional()
+      }),
+      body
+    );
     return importRemoteImage({
       config: this.config,
       database: this.database,
       organizationId: ctx.organizationId,
-      sourceUrl: input.url
+      sourceUrl: input.url,
+      ...(input.productSlug ? { productSlug: input.productSlug } : {}),
+      ...(input.imageIndex ? { imageIndex: input.imageIndex } : {})
     });
   }
 
@@ -1235,7 +1244,9 @@ export class MediaController {
           .string()
           .regex(/^[a-fA-F0-9]{64}$/)
           .optional(),
-        originalFilename: z.string().max(240).optional()
+        originalFilename: z.string().max(240).optional(),
+        productSlug: slugSchema.optional(),
+        imageIndex: z.coerce.number().int().min(1).max(999).optional()
       }),
       body
     );

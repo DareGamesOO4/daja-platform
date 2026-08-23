@@ -5,7 +5,13 @@ import { get as getHttps } from 'node:https';
 import { isIP } from 'node:net';
 import sharp from 'sharp';
 import type { AppConfig } from '@daja/config';
-import { R2MediaStorageAdapter, sha256, type Database } from '@daja/database';
+import {
+  R2MediaStorageAdapter,
+  productMediaStorageKey,
+  productMediaThumbnailStorageKey,
+  sha256,
+  type Database
+} from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
@@ -48,12 +54,20 @@ export async function importRemoteImage(input: {
   database: Database;
   organizationId: string;
   sourceUrl: string;
+  productSlug?: string;
+  imageIndex?: number;
 }): Promise<RemoteMediaImportResult> {
   const downloaded = await downloadRemoteImage(input.sourceUrl);
   const processed = await createWebpVariants(downloaded.buffer);
   const mediaId = randomUUID();
   const storage = new R2MediaStorageAdapter(input.config);
-  const originalKey = `org/${input.organizationId}/media/${mediaId}/original.webp`;
+  const originalKey = productMediaStorageKey({
+    organizationId: input.organizationId,
+    mediaId,
+    productSlug: input.productSlug,
+    imageIndex: input.imageIndex,
+    extension: '.webp'
+  });
   const originalUrl = requiredPublicUrl(storage, originalKey);
   const storedKeys = [originalKey];
   try {
@@ -88,6 +102,8 @@ export async function importRemoteImage(input: {
             sourceUrl: input.sourceUrl,
             sourceMimeType: downloaded.contentType,
             sourceSizeBytes: downloaded.buffer.length,
+            productSlug: input.productSlug ?? null,
+            imageIndex: input.imageIndex ?? null,
             importedAt: new Date().toISOString()
           })
         ]
@@ -157,7 +173,12 @@ export async function ensurePrimaryMediaThumbnail(input: {
   if (!output.info.width || !output.info.height) {
     throw new ValidationFailedError('Thumbnail dimensions could not be determined');
   }
-  const key = `org/${input.organizationId}/media/${input.mediaId}/derivatives/${output.info.width}.webp`;
+  const key = productMediaThumbnailStorageKey({
+    originalKey: row.storage_key,
+    organizationId: input.organizationId,
+    mediaId: input.mediaId,
+    width: output.info.width
+  });
   const publicUrl = requiredPublicUrl(storage, key);
   try {
     await storage.putObject({

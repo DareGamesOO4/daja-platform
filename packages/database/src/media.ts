@@ -154,13 +154,28 @@ export class MediaRepository {
       sizeBytes: number;
       checksumSha256?: string | undefined;
       originalFilename?: string | undefined;
+      productSlug?: string | undefined;
+      imageIndex?: number | undefined;
     },
     storage: MediaStorageAdapter
-  ): Promise<{ mediaId: string; storageKey: string; uploadUrl: string; expiresAt: Date }> {
+  ): Promise<{
+    mediaId: string;
+    storageKey: string;
+    publicUrl: string | null;
+    uploadUrl: string;
+    expiresAt: Date;
+  }> {
     validateUploadMetadata(input);
     const mediaId = randomUUID();
     const extension = extensionForMime(input.mimeType);
-    const storageKey = `org/${ctx.organizationId}/media/${mediaId}/original${extension}`;
+    const storageKey = productMediaStorageKey({
+      organizationId: ctx.organizationId,
+      mediaId,
+      productSlug: input.productSlug,
+      imageIndex: input.imageIndex,
+      extension
+    });
+    const publicUrl = storage.publicUrl(storageKey);
     const presign = await storage.createPresignedPut({
       key: storageKey,
       mimeType: input.mimeType,
@@ -175,14 +190,18 @@ export class MediaRepository {
         ctx.organizationId,
         storage.bucket(),
         storageKey,
-        storage.publicUrl(storageKey),
+        publicUrl,
         input.mimeType,
         input.sizeBytes,
         input.checksumSha256 ?? null,
-        JSON.stringify({ originalFilename: input.originalFilename ?? null })
+        JSON.stringify({
+          originalFilename: input.originalFilename ?? null,
+          productSlug: input.productSlug ?? null,
+          imageIndex: input.imageIndex ?? null
+        })
       ]
     );
-    return { mediaId, storageKey, ...presign };
+    return { mediaId, storageKey, publicUrl, ...presign };
   }
 
   async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter) {
@@ -346,6 +365,33 @@ function extensionForMime(mimeType: string): string {
     default:
       return '';
   }
+}
+
+export function productMediaStorageKey(input: {
+  organizationId: string;
+  mediaId: string;
+  productSlug?: string | undefined;
+  imageIndex?: number | undefined;
+  extension: string;
+}): string {
+  if (input.productSlug && input.imageIndex) {
+    return `${input.productSlug}/${input.productSlug}-${input.imageIndex}${input.extension}`;
+  }
+  return `org/${input.organizationId}/media/${input.mediaId}/original${input.extension}`;
+}
+
+export function productMediaThumbnailStorageKey(input: {
+  originalKey: string;
+  organizationId: string;
+  mediaId: string;
+  width: number;
+}): string {
+  // Preserve the layout of existing objects. Newly uploaded product assets use
+  // one flat product-slug folder for both originals and thumbnails.
+  if (input.originalKey.startsWith('org/')) {
+    return `org/${input.organizationId}/media/${input.mediaId}/derivatives/${input.width}.webp`;
+  }
+  return input.originalKey.replace(/\.[^/.]+$/, '-thumb.webp');
 }
 
 async function readObjectBody(body: unknown): Promise<Buffer> {
