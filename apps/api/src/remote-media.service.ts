@@ -307,7 +307,9 @@ async function resolvePublicAddress(url: URL): Promise<{ address: string; family
   if (!addresses.length || addresses.some((entry) => !isPublicIpAddress(entry.address))) {
     throw new ValidationFailedError('Image URL must not target a private network');
   }
-  const first = addresses[0];
+  // Render services normally have IPv4 egress. Prefer it when a CDN publishes
+  // both records; the URL host and TLS SNI remain unchanged by the pinned lookup.
+  const first = addresses.find((entry) => entry.family === 4) ?? addresses[0];
   if (!first || (first.family !== 4 && first.family !== 6)) {
     throw new ValidationFailedError('Image host could not be resolved');
   }
@@ -327,8 +329,19 @@ function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<Inc
     request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
       request.destroy(new Error('Remote image request timed out'));
     });
-    request.once('error', () => reject(new ValidationFailedError('Remote image could not be downloaded')));
+    request.once('error', (error) => reject(remoteDownloadError(error)));
   });
+}
+
+function remoteDownloadError(error: unknown): ValidationFailedError {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : null;
+  const detail = code ? ` (${code})` : '';
+  return new ValidationFailedError(
+    `Remote image could not be downloaded${detail}. The source site may block server downloads.`
+  );
 }
 
 async function readLimitedResponse(response: IncomingMessage): Promise<Buffer> {
