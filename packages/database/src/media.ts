@@ -14,21 +14,27 @@ import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 
 export interface MediaStorageAdapter {
+  createPresignedGet(input: { key: string }): Promise<{ downloadUrl: string; expiresAt: Date }>;
   createPresignedPut(input: {
     key: string;
     mimeType: string;
     sizeBytes: number;
     checksumSha256?: string;
   }): Promise<{ uploadUrl: string; expiresAt: Date }>;
-  headObject(
-    key: string
-  ): Promise<{ sizeBytes: number; mimeType?: string; checksumSha256?: string }>;
+  headObject(key: string): Promise<{
+    sizeBytes: number;
+    mimeType?: string;
+    checksumSha256?: string;
+    metadata?: Record<string, string>;
+  }>;
   getObject(key: string): Promise<Buffer>;
   putObject(input: {
     key: string;
-    body: Buffer;
+    body: Buffer | Readable;
     contentType: string;
     cacheControl?: string;
+    sizeBytes?: number;
+    metadata?: Record<string, string>;
   }): Promise<void>;
   deleteObject(key: string): Promise<void>;
   bucket(): string;
@@ -91,16 +97,32 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
     return { uploadUrl, expiresAt: new Date(Date.now() + expiresIn * 1000) };
   }
 
-  async headObject(
-    key: string
-  ): Promise<{ sizeBytes: number; mimeType?: string; checksumSha256?: string }> {
+  async createPresignedGet(input: {
+    key: string;
+  }): Promise<{ downloadUrl: string; expiresAt: Date }> {
+    const expiresIn = 900;
+    const downloadUrl = await getSignedUrl(
+      this.client,
+      new GetObjectCommand({ Bucket: this.bucketName, Key: input.key }),
+      { expiresIn }
+    );
+    return { downloadUrl, expiresAt: new Date(Date.now() + expiresIn * 1000) };
+  }
+
+  async headObject(key: string): Promise<{
+    sizeBytes: number;
+    mimeType?: string;
+    checksumSha256?: string;
+    metadata?: Record<string, string>;
+  }> {
     const response = await this.client.send(
       new HeadObjectCommand({ Bucket: this.bucketName, Key: key })
     );
     return {
       sizeBytes: response.ContentLength ?? 0,
       ...(response.ContentType ? { mimeType: response.ContentType } : {}),
-      ...(response.ChecksumSHA256 ? { checksumSha256: response.ChecksumSHA256 } : {})
+      ...(response.ChecksumSHA256 ? { checksumSha256: response.ChecksumSHA256 } : {}),
+      ...(response.Metadata ? { metadata: response.Metadata } : {})
     };
   }
 
@@ -114,9 +136,11 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
 
   async putObject(input: {
     key: string;
-    body: Buffer;
+    body: Buffer | Readable;
     contentType: string;
     cacheControl?: string;
+    sizeBytes?: number;
+    metadata?: Record<string, string>;
   }): Promise<void> {
     await this.client.send(
       new PutObjectCommand({
@@ -124,7 +148,9 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         Key: input.key,
         Body: input.body,
         ContentType: input.contentType,
-        ...(input.cacheControl ? { CacheControl: input.cacheControl } : {})
+        ...(input.cacheControl ? { CacheControl: input.cacheControl } : {}),
+        ...(input.sizeBytes === undefined ? {} : { ContentLength: input.sizeBytes }),
+        ...(input.metadata === undefined ? {} : { Metadata: input.metadata })
       })
     );
   }

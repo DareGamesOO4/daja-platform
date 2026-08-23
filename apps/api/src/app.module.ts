@@ -20,6 +20,8 @@ import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
 import { OfflineInventoryController } from './offline-inventory.controller.js';
+import { DevicePluginsController } from './device-plugins.controller.js';
+import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import {
@@ -59,7 +61,8 @@ const logger = createLogger(config, 'api');
     ImportsController,
     DeviceController,
     SyncController,
-    OfflineInventoryController
+    OfflineInventoryController,
+    DevicePluginsController
   ],
   providers: [
     { provide: CONFIG, useValue: config },
@@ -70,7 +73,8 @@ const logger = createLogger(config, 'api');
     AuthService,
     CustomerAuthService,
     DesktopGoogleOAuthService,
-    RealtimeGateway
+    RealtimeGateway,
+    DevicePluginsService
   ]
 })
 export class AppModule implements NestModule {
