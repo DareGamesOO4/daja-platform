@@ -226,22 +226,31 @@ export class OperationalSyncProjector {
         : undefined;
       const resolvedProductId = productId ?? event.aggregateId;
       await this.client.query(
-        `INSERT INTO products (id, organization_id, name, slug, brand_id, primary_category_id, active, published, external_id)
-         VALUES ($1, $2, $3, $4, $5, $6, true, true, $7)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = now(), version = products.version + 1`,
+        `INSERT INTO products (id, organization_id, name, slug, description, brand_id, primary_category_id, seo, features, model_3d_url, active, published, external_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, slug = EXCLUDED.slug,
+           description = EXCLUDED.description, seo = EXCLUDED.seo, features = EXCLUDED.features,
+           model_3d_url = EXCLUDED.model_3d_url, active = EXCLUDED.active, published = EXCLUDED.published,
+           updated_at = now(), version = products.version + 1`,
         [
           resolvedProductId,
           ctx.organizationId,
           name,
-          slug(name, variantId),
+          text(input, 'slug') ?? slug(name, variantId),
+          text(input, 'description') ?? null,
           brand?.rows[0]?.id ?? null,
           category?.rows[0]?.id ?? null,
+          JSON.stringify(record(input.seo) ?? {}),
+          JSON.stringify(Array.isArray(input.features) ? input.features : []),
+          text(input, 'model3dUrl') ?? null,
+          boolean(input, 'active', true),
+          boolean(input, 'published', true),
           `rfiddaja:${variantId}`
         ]
       );
       await this.client.query(
-        `INSERT INTO product_variants (id, organization_id, product_id, sku, barcode, name, current_price_amount, currency, attributes, active, published)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, true, true)`,
+        `INSERT INTO product_variants (id, organization_id, product_id, sku, barcode, name, gender, current_price_amount, currency, attributes, active, published)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
         [
           variantId,
           ctx.organizationId,
@@ -249,9 +258,12 @@ export class OperationalSyncProjector {
           sku,
           text(input, 'barcode') ?? null,
           name,
+          text(input, 'gender') ?? null,
           priceRsd * 100,
           currency,
-          JSON.stringify(record(input.attributes) ?? {})
+          JSON.stringify(record(input.attributes) ?? {}),
+          boolean(input, 'active', true),
+          boolean(input, 'published', true)
         ]
       );
       await this.client.query(
@@ -259,7 +271,8 @@ export class OperationalSyncProjector {
          VALUES ($1, $2, $3, $4, 'sell', $5)`,
         [ctx.organizationId, variantId, priceRsd * 100, currency, ctx.userId]
       );
-      await this.setImage(ctx.organizationId, resolvedProductId, text(input, 'imageUri'));
+      await this.addCatalogPrices(ctx, variantId, input, currency);
+      await this.setImages(ctx.organizationId, resolvedProductId, input);
       return this.catalogSnapshot(ctx.organizationId, resolvedProductId, variantId);
     }
 
@@ -320,19 +333,29 @@ export class OperationalSyncProjector {
         )
       : undefined;
     await this.client.query(
-      `UPDATE products SET name = $3, brand_id = COALESCE($4, brand_id), primary_category_id = COALESCE($5, primary_category_id), version = version + 1, updated_at = now()
+      `UPDATE products SET name = $3, slug = COALESCE(NULLIF($4, ''), slug), description = COALESCE($5, description),
+       brand_id = COALESCE($6, brand_id), primary_category_id = COALESCE($7, primary_category_id),
+       seo = COALESCE($8::jsonb, seo), features = COALESCE($9::jsonb, features), model_3d_url = COALESCE($10, model_3d_url),
+       active = $11, published = $12, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
       [
         ctx.organizationId,
         row.product_id,
         name,
+        text(input, 'slug') ?? null,
+        text(input, 'description') ?? null,
         brand?.rows[0]?.id ?? null,
-        validCategory?.rows[0]?.id ?? null
+        validCategory?.rows[0]?.id ?? null,
+        input.seo === undefined ? null : JSON.stringify(record(input.seo) ?? {}),
+        input.features === undefined ? null : JSON.stringify(Array.isArray(input.features) ? input.features : []),
+        text(input, 'model3dUrl') ?? null,
+        boolean(input, 'active', true),
+        boolean(input, 'published', true)
       ]
     );
     await this.client.query(
-      `UPDATE product_variants SET sku = $3, barcode = COALESCE(NULLIF($4, ''), barcode), name = $5, current_price_amount = $6, currency = $7,
-       version = version + 1, updated_at = now()
+      `UPDATE product_variants SET sku = $3, barcode = COALESCE(NULLIF($4, ''), barcode), name = $5, gender = COALESCE($6, gender), current_price_amount = $7, currency = $8,
+       attributes = COALESCE($9::jsonb, attributes), active = $10, published = $11, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
       [
         ctx.organizationId,
@@ -340,8 +363,12 @@ export class OperationalSyncProjector {
         sku,
         text(input, 'barcode') ?? null,
         name,
+        text(input, 'gender') ?? null,
         priceRsd * 100,
-        currency
+        currency,
+        input.attributes === undefined ? null : JSON.stringify(record(input.attributes) ?? {}),
+        boolean(input, 'active', true),
+        boolean(input, 'published', true)
       ]
     );
     await this.client.query(
@@ -353,7 +380,8 @@ export class OperationalSyncProjector {
        VALUES ($1, $2, $3, $4, 'sell', $5)`,
       [ctx.organizationId, variantId, priceRsd * 100, currency, ctx.userId]
     );
-    await this.setImage(ctx.organizationId, row.product_id, text(input, 'imageUri'));
+    await this.addCatalogPrices(ctx, variantId, input, currency);
+    await this.setImages(ctx.organizationId, row.product_id, input);
     return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
   }
 
@@ -376,12 +404,52 @@ export class OperationalSyncProjector {
     return { kind: 'rfid.tag', tag: result.rows[0] };
   }
 
+  private async addCatalogPrices(
+    ctx: RequestContext,
+    variantId: string,
+    input: Record<string, unknown>,
+    currency: string
+  ): Promise<void> {
+    const saleAmount = integer(input, 'promotionalPriceMinor');
+    const costAmount = integer(input, 'costPriceMinor');
+    if (saleAmount !== undefined && saleAmount >= 0) {
+      await this.client.query(
+        `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, valid_from, valid_until, created_by)
+         VALUES ($1, $2, $3, $4, 'sale', COALESCE($5::timestamptz, now()), $6::timestamptz, $7)`,
+        [ctx.organizationId, variantId, saleAmount * 100, currency, text(input, 'promotionalValidFrom') ?? null, text(input, 'promotionalValidUntil') ?? null, ctx.userId]
+      );
+    }
+    if (costAmount !== undefined && costAmount >= 0) {
+      await this.client.query(
+        `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
+         VALUES ($1, $2, $3, $4, 'cost', $5)`,
+        [ctx.organizationId, variantId, costAmount * 100, currency, ctx.userId]
+      );
+    }
+  }
+
+  private async setImages(
+    organizationId: string,
+    productId: string,
+    input: Record<string, unknown>
+  ): Promise<void> {
+    const fromPayload = Array.isArray(input.imageUris)
+      ? input.imageUris.filter((value): value is string => typeof value === 'string')
+      : [];
+    const imageUris = fromPayload.length ? fromPayload : [text(input, 'imageUri')].filter((value): value is string => value !== undefined);
+    let position = 0;
+    for (const imageUri of imageUris) {
+      if (!/^https?:\/\//i.test(imageUri)) continue;
+      await this.setImage(organizationId, productId, imageUri, position++);
+    }
+  }
+
   private async setImage(
     organizationId: string,
     productId: string,
-    imageUri: string | undefined
+    imageUri: string,
+    position: number
   ): Promise<void> {
-    if (!imageUri || !/^https?:\/\//i.test(imageUri)) return;
     const storageKey = createHash('sha256').update(imageUri).digest('hex');
     const media = await this.client.query<{ id: string }>(
       `INSERT INTO media_assets (organization_id, storage_provider, storage_bucket, storage_key, public_url, mime_type, status)
@@ -394,14 +462,14 @@ export class OperationalSyncProjector {
     const mediaId = media.rows[0]?.id;
     if (!mediaId) return;
     await this.client.query(
-      `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
-      [organizationId, productId]
+      `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2 AND $3 = 0`,
+      [organizationId, productId, position]
     );
     await this.client.query(
       `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
-       SELECT $1, $2, $3, 'gallery', 0, true
+       SELECT $1, $2, $3, 'gallery', $4, $5
        WHERE NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id = $1 AND product_id = $2 AND media_asset_id = $3)`,
-      [organizationId, productId, mediaId]
+      [organizationId, productId, mediaId, position, position === 0]
     );
   }
 
@@ -411,7 +479,7 @@ export class OperationalSyncProjector {
     variantId: string
   ): Promise<Record<string, unknown>> {
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.name AS "productName", p.description,
+      `SELECT p.id AS "productId", p.name AS "productName", p.slug, p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
               p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",

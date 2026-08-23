@@ -253,7 +253,7 @@ export class SyncRepository {
     );
     const cursor = input.cursor ?? '';
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description,
+      `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
               p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
