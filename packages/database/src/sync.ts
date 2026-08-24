@@ -423,6 +423,19 @@ export class SyncRepository {
   }
 
   private async detectConflict(organizationId: string, event: SyncPushEvent) {
+    // The product editor submits one complete catalog form. A normal desktop
+    // item save is therefore a deliberate last-save-wins edit, including its
+    // selected gender, and must not become a false conflict merely because a
+    // website create/update completed moments before it. Destructive deletes
+    // remain version-protected below.
+    const command = event.payload.command;
+    if (
+      typeof command === 'object' &&
+      command !== null &&
+      String((command as Record<string, unknown>).kind) === 'item.update'
+    ) {
+      return null;
+    }
     if (event.baseVersion === undefined || event.baseVersion === null) {
       return null;
     }
