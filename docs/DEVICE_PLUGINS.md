@@ -42,17 +42,19 @@ The first published YRM100 release uses this metadata:
   "name": "YRM100 RFID Reader",
   "vendor": "YRM",
   "kind": "rfid_reader",
-  "version": "2024.5.25",
+  "version": "2024.5.26",
   "summary": "YRM100 RFID reader SDK and Windows driver package.",
   "description": "Verified YRM100 SDK bundle with Windows CP210x driver, desktop demo files, Android examples, and reference material.",
   "models": ["YRM100"],
   "platforms": ["win32", "android"],
   "capabilities": ["serial", "usb", "esp32_wifi"],
-  "packageSizeBytes": 77031726,
-  "packageChecksumSha256": "9c042a76cc5bb16b52f8dc33d345891b1779649e144dce02a00a931428a72a62"
+  "packageSizeBytes": 76440095,
+  "packageChecksumSha256": "b052ff9bbc4ffa69384382c8e50e5c44f19670f57d6c95d69be3a591f1988654"
 }
 ```
 
 The licensed YRM100 ZIP is stored in R2 rather than source control. The Devices >
 Plugins panel in RFIDDaja shows this release and retains the verified unpacked copy
-locally after installation.
+locally after installation. The `2024.5.26` release keeps every vendor SDK file but
+normalizes their paths and supplies `index.json`, because the original archive uses
+long paths and characters that the desktop installer rightly rejects.
