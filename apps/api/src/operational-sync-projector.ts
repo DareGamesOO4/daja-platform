@@ -729,15 +729,11 @@ export class OperationalSyncProjector {
             [ctx.organizationId, categoryId]
           )
         : undefined;
-      const departmentName = text(input, 'department');
-      const department = departmentName
-        ? await this.client.query<{ id: string }>(
-            `SELECT id FROM departments
-             WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
-             LIMIT 1`,
-            [ctx.organizationId, departmentName]
-          )
-        : undefined;
+      const departmentId = await this.resolveDepartmentId(
+        ctx.organizationId,
+        entityIds,
+        text(input, 'department')
+      );
       // RFID stores a storefront category as a child of its local brand.
       // Sync sends that parent name explicitly; older clients fall back to
       // categoryName so their existing events remain compatible.
@@ -776,7 +772,7 @@ export class OperationalSyncProjector {
           boolean(input, 'active', true),
           boolean(input, 'published', true),
           `rfiddaja:${variantId}`,
-          department?.rows[0]?.id ?? null
+          departmentId
         ]
       );
       await this.client.query(
@@ -851,15 +847,11 @@ export class OperationalSyncProjector {
           [ctx.organizationId, categoryId]
         )
       : undefined;
-    const departmentName = text(input, 'department');
-    const department = departmentName
-      ? await this.client.query<{ id: string }>(
-          `SELECT id FROM departments
-           WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
-           LIMIT 1`,
-          [ctx.organizationId, departmentName]
-        )
-      : undefined;
+    // An RFID local category is not an ecommerce department.  Only the
+    // department identifier/name received in the canonical catalog snapshot
+    // may change an existing Platform department.  This prevents a local
+    // category such as "Satovi" from replacing "Daljinski" on save.
+    const departmentId = await this.resolveDepartmentId(ctx.organizationId, entityIds);
     const localBrandName =
       entityIds === undefined
         ? undefined
@@ -894,7 +886,7 @@ export class OperationalSyncProjector {
         text(input, 'model3dUrl') ?? null,
         boolean(input, 'active', true),
         boolean(input, 'published', true),
-        department?.rows[0]?.id ?? null
+        departmentId
       ]
     );
     await this.client.query(
@@ -937,7 +929,9 @@ export class OperationalSyncProjector {
     const epc = text(command.payload, 'epc');
     const variantId = text(command.payload, 'productVariantId');
     if (!epc || !variantId) throw new ValidationFailedError('Desktop RFID command is incomplete');
-    const result = await this.client.query(
+    const locationId = text(command.payload, 'locationId');
+    const binId = text(command.payload, 'binId');
+    await this.client.query(
       `INSERT INTO rfid_tags (id, organization_id, epc, tid, variant_id, status)
        VALUES ($1, $2, upper($3), $4, $5, 'assigned')
        ON CONFLICT (id) DO UPDATE SET epc = EXCLUDED.epc, tid = EXCLUDED.tid, variant_id = EXCLUDED.variant_id,
@@ -945,7 +939,73 @@ export class OperationalSyncProjector {
        RETURNING id, epc, tid, variant_id AS "variantId", status, version`,
       [event.aggregateId, ctx.organizationId, epc, text(command.payload, 'tid') ?? null, variantId]
     );
-    return { kind: 'rfid.tag', tag: result.rows[0] };
+    // The desktop records a tag assignment separately from the inventory
+    // quantity.  Preserve the selected shelf even when the initial quantity
+    // is exactly one (there is then no follow-up inventory adjustment).
+    if (locationId && binId) {
+      const placement = await this.client.query<{ zoneId: string }>(
+        `SELECT zone.id AS "zoneId"
+         FROM warehouse_bins bin
+         JOIN warehouse_zones zone
+           ON zone.organization_id = bin.organization_id AND zone.id = bin.zone_id
+         JOIN warehouses warehouse
+           ON warehouse.organization_id = zone.organization_id AND warehouse.id = zone.warehouse_id
+         WHERE bin.organization_id = $1 AND bin.id = $2 AND warehouse.location_id = $3
+           AND bin.deleted_at IS NULL AND bin.active
+           AND zone.deleted_at IS NULL AND zone.active
+           AND warehouse.deleted_at IS NULL AND warehouse.active`,
+        [ctx.organizationId, binId, locationId]
+      );
+      const zoneId = placement.rows[0]?.zoneId;
+      if (!zoneId) {
+        throw new ValidationFailedError('Desktop RFID shelf does not belong to location');
+      }
+      await new InventoryRepository(this.client).adjust(ctx, {
+        variantId,
+        locationId,
+        zoneId,
+        binId,
+        quantityDelta: 0,
+        sourceType: 'rfiddaja_tag_placement',
+        sourceId: event.aggregateId,
+        metadata: { command: command.kind }
+      });
+    }
+    const variant = await this.client.query<{ productId: string }>(
+      `SELECT product_id AS "productId"
+       FROM product_variants
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    const productId = variant.rows[0]?.productId;
+    if (!productId) throw new ValidationFailedError('Desktop RFID variant does not exist on Platform');
+    return this.catalogSnapshot(ctx.organizationId, productId, variantId);
+  }
+
+  private async resolveDepartmentId(
+    organizationId: string,
+    entityIds: Record<string, unknown> | undefined,
+    fallbackName?: string
+  ): Promise<string | null> {
+    const requestedId = entityIds === undefined ? undefined : text(entityIds, 'departmentId');
+    if (requestedId) {
+      const byId = await this.client.query<{ id: string }>(
+        `SELECT id FROM departments
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND active`,
+        [organizationId, requestedId]
+      );
+      if (byId.rows[0]) return byId.rows[0].id;
+    }
+    const requestedName =
+      (entityIds === undefined ? undefined : text(entityIds, 'departmentName')) ?? fallbackName;
+    if (!requestedName) return null;
+    const byName = await this.client.query<{ id: string }>(
+      `SELECT id FROM departments
+       WHERE organization_id = $1 AND lower(name) = lower($2) AND deleted_at IS NULL AND active
+       LIMIT 1`,
+      [organizationId, requestedName]
+    );
+    return byName.rows[0]?.id ?? null;
   }
 
   private async addCatalogPrices(
