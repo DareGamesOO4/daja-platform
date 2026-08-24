@@ -263,6 +263,7 @@ export class SyncRepository {
               sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
               cost.amount_minor AS "costAmount",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
@@ -277,7 +278,10 @@ export class SyncRepository {
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
        ) media ON true
        LEFT JOIN LATERAL (
-         SELECT SUM(ib.quantity)::integer AS quantity, (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id
+         SELECT SUM(ib.quantity)::integer AS quantity,
+                (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id,
+                (array_agg(ib.zone_id ORDER BY ib.updated_at DESC))[1] AS zone_id,
+                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inventory ON true
@@ -305,7 +309,7 @@ export class SyncRepository {
       [ctx.organizationId, cursor, input.limit + 1]
     );
     const rows = result.rows.slice(0, input.limit);
-    const [departments, brands, categories, specificationKeys] = await Promise.all([
+    const [departments, brands, categories, specificationKeys, locations, warehouses, zones, bins] = await Promise.all([
       this.client.query(
         `SELECT id, name FROM departments WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY sort_order, name`,
         [ctx.organizationId]
@@ -321,6 +325,37 @@ export class SyncRepository {
       this.client.query(
         `SELECT id, slug AS key, name, department_id AS "departmentId", unit FROM spec_keys WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
         [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, code, name, type, active, version
+         FROM locations
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY code, name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, location_id AS "locationId", code, name, active, version
+         FROM warehouses
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY code, name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, warehouse_id AS "warehouseId", code, name,
+                display_order AS "displayOrder", active, version
+         FROM warehouse_zones
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY warehouse_id, display_order, code, name`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, zone_id AS "zoneId", code, name, capacity,
+                low_stock_threshold AS "lowStockThreshold", display_order AS "displayOrder",
+                active, status, version
+         FROM warehouse_bins
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY zone_id, display_order, code, name`,
+        [ctx.organizationId]
       )
     ]);
     return {
@@ -331,6 +366,12 @@ export class SyncRepository {
         brands: brands.rows,
         categories: categories.rows,
         specificationKeys: specificationKeys.rows
+      },
+      layout: {
+        locations: locations.rows,
+        warehouses: warehouses.rows,
+        zones: zones.rows,
+        bins: bins.rows
       },
       nextCursor: result.rows.length > input.limit ? rows.at(-1)?.productId : null,
       hasMore: result.rows.length > input.limit

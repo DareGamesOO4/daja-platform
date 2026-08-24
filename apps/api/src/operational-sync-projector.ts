@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { SyncRepository, type SyncPushEvent } from '@daja/database';
+import { InventoryRepository, SyncRepository, type SyncPushEvent } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import type pg from 'pg';
@@ -27,6 +27,10 @@ type WarehouseBinCommand = {
   kind: 'warehouse.bin.upsert' | 'warehouse.bin.delete';
   payload: Record<string, unknown>;
 };
+type InventoryCommand = {
+  kind: 'inventory.event' | 'inventory.relocate';
+  payload: Record<string, unknown>;
+};
 
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
 
@@ -37,6 +41,7 @@ type DesktopCommand =
   | LocationLayoutCommand
   | WarehouseZoneCommand
   | WarehouseBinCommand
+  | InventoryCommand
   | SettingsCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -134,6 +139,13 @@ export class OperationalSyncProjector {
     }
     if (kind === 'warehouse.bin.upsert' || kind === 'warehouse.bin.delete') {
       const snapshot = await this.warehouseBin(ctx, event, {
+        kind,
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'inventory.event' || kind === 'inventory.relocate') {
+      const snapshot = await this.inventory(ctx, {
         kind,
         payload: commandPayload
       });
@@ -542,6 +554,91 @@ export class OperationalSyncProjector {
     if (!bin.rows[0])
       throw new ValidationFailedError('Warehouse shelf belongs to another organization');
     return { kind: 'warehouse.bin', bin: bin.rows[0], locationId: scope.rows[0].locationId };
+  }
+
+  /** Materialize desktop inventory commands into the Platform balance.  The
+   * product snapshot returned below carries the chosen zone and shelf back to
+   * the website and to other RFID desktops. */
+  private async inventory(
+    ctx: RequestContext,
+    command: InventoryCommand
+  ): Promise<Record<string, unknown>> {
+    const variantId = text(command.payload, 'productVariantId');
+    const quantity = integer(command.payload, 'quantity');
+    if (!variantId || quantity === undefined || quantity === 0) {
+      throw new ValidationFailedError('Desktop inventory command is incomplete');
+    }
+    const sourceLocationId = text(command.payload, 'sourceLocationId');
+    const sourceBinId = text(command.payload, 'sourceBinId');
+    const destinationLocationId = text(command.payload, 'destinationLocationId');
+    const destinationBinId = text(command.payload, 'destinationBinId');
+    const inventory = new InventoryRepository(this.client);
+    const eventType = text(command.payload, 'eventType');
+    const placement = async (locationId: string, binId: string | undefined) => {
+      if (!binId) return { zoneId: undefined, binId: undefined };
+      const result = await this.client.query<{ zoneId: string }>(
+        `SELECT zone.id AS "zoneId"
+         FROM warehouse_bins bin
+         JOIN warehouse_zones zone
+           ON zone.organization_id = bin.organization_id AND zone.id = bin.zone_id
+         JOIN warehouses warehouse
+           ON warehouse.organization_id = zone.organization_id AND warehouse.id = zone.warehouse_id
+         WHERE bin.organization_id = $1 AND bin.id = $2 AND warehouse.location_id = $3
+           AND bin.deleted_at IS NULL AND bin.active
+           AND zone.deleted_at IS NULL AND zone.active
+           AND warehouse.deleted_at IS NULL AND warehouse.active`,
+        [ctx.organizationId, binId, locationId]
+      );
+      const zoneId = result.rows[0]?.zoneId;
+      if (!zoneId) throw new ValidationFailedError('Desktop inventory shelf does not belong to location');
+      return { zoneId, binId };
+    };
+    const adjust = async (locationId: string, binId: string | undefined, quantityDelta: number) => {
+      const storage = await placement(locationId, binId);
+      await inventory.adjust(ctx, {
+        variantId,
+        locationId,
+        ...(storage.zoneId ? { zoneId: storage.zoneId } : {}),
+        ...(storage.binId ? { binId: storage.binId } : {}),
+        quantityDelta,
+        sourceType: 'rfiddaja_sync',
+        sourceId: null,
+        metadata: { command: command.kind }
+      });
+    };
+    const amount = Math.abs(quantity);
+    if (eventType === 'tag_assignment') {
+      // Tag assignment only links the EPC to a variant; the desktop ledger
+      // deliberately does not change the quantity for that operation.
+    } else if (command.kind === 'inventory.relocate' || eventType === 'relocation') {
+      if (!sourceLocationId || !destinationLocationId) {
+        throw new ValidationFailedError('Desktop inventory relocation requires source and destination');
+      }
+      await adjust(sourceLocationId, sourceBinId, -amount);
+      await adjust(destinationLocationId, destinationBinId, amount);
+    } else {
+      if (['sale', 'transfer_out', 'count_missing', 'tag_retirement'].includes(eventType ?? '')) {
+        if (!sourceLocationId) throw new ValidationFailedError('Desktop inventory command requires a source location');
+        await adjust(sourceLocationId, sourceBinId, -amount);
+      } else if (eventType === 'adjustment' && quantity < 0) {
+        if (!sourceLocationId) throw new ValidationFailedError('Desktop inventory adjustment requires a source location');
+        await adjust(sourceLocationId, sourceBinId, -amount);
+      } else {
+        if (!destinationLocationId) {
+          throw new ValidationFailedError('Desktop inventory command requires a destination location');
+        }
+        await adjust(destinationLocationId, destinationBinId, amount);
+      }
+    }
+    const variant = await this.client.query<{ productId: string }>(
+      `SELECT product_id AS "productId"
+       FROM product_variants
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    const productId = variant.rows[0]?.productId;
+    if (!productId) throw new ValidationFailedError('Desktop inventory variant does not exist on Platform');
+    return this.catalogSnapshot(ctx.organizationId, productId, variantId);
   }
 
   private async availableWarehouseCode(
@@ -961,6 +1058,7 @@ export class OperationalSyncProjector {
               sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
               cost.amount_minor AS "costAmount",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
@@ -970,7 +1068,10 @@ export class OperationalSyncProjector {
                           WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id AND ma.status = 'ready'
                           ORDER BY pm.is_primary DESC, pm.position LIMIT 1) media ON true
        LEFT JOIN LATERAL (
-         SELECT SUM(ib.quantity)::integer AS quantity, (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id
+         SELECT SUM(ib.quantity)::integer AS quantity,
+                (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id,
+                (array_agg(ib.zone_id ORDER BY ib.updated_at DESC))[1] AS zone_id,
+                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inventory ON true
@@ -1030,5 +1131,20 @@ export class OperationalSyncProjector {
       payloadVersion: 2,
       idempotencyKey: `catalog:${productId}:${variantId}:${operation}:${version}:${fingerprint}`
     });
+  }
+
+  /** Publish a canonical inventory/placement snapshot after a website change.
+   * Website inventory writes do not pass through /sync/push, so without this
+   * bridge a running RFID desktop never receives the selected zone or shelf. */
+  async publishVariantChange(ctx: RequestContext, variantId: string): Promise<void> {
+    const variant = await this.client.query<{ productId: string }>(
+      `SELECT product_id AS "productId"
+       FROM product_variants
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    const productId = variant.rows[0]?.productId;
+    if (!productId) throw new ValidationFailedError('Variant does not belong to organization');
+    await this.publishProductChange(ctx, productId, variantId);
   }
 }

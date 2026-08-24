@@ -321,6 +321,8 @@ export class StaffCatalogController {
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
               v.id AS "variantId", v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
+              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
               media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
        FROM products p
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
@@ -330,6 +332,13 @@ export class StaffCatalogController {
          SELECT * FROM product_variants WHERE product_id = p.id AND organization_id = p.organization_id AND deleted_at IS NULL
          ORDER BY created_at LIMIT 1
        ) v ON true
+       LEFT JOIN LATERAL (
+         SELECT quantity, location_id, zone_id, bin_id
+         FROM inventory_balances
+         WHERE organization_id = p.organization_id AND variant_id = v.id
+         ORDER BY updated_at DESC
+         LIMIT 1
+       ) inventory ON true
        LEFT JOIN LATERAL (
          SELECT ma.public_url, md.public_url AS thumbnail_url
          FROM product_media pm
@@ -1645,6 +1654,7 @@ export class InventoryController {
           ...(item.currentBinId ? { binId: item.currentBinId } : {})
         }
       });
+      await new OperationalSyncProjector(client).publishVariantChange(ctx, item.variantId);
       return item;
     });
   }
@@ -1691,6 +1701,7 @@ export class InventoryController {
           quantity: balance.quantity
         }
       });
+      await new OperationalSyncProjector(client).publishVariantChange(ctx, input.variantId);
       return balance;
     });
   }

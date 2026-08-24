@@ -85,23 +85,44 @@ export class InventoryRepository {
       metadata?: Record<string, unknown> | undefined;
     }
   ) {
-    if (!Number.isInteger(input.quantityDelta) || input.quantityDelta === 0) {
-      throw new ValidationFailedError('Inventory adjustment quantity must be a non-zero integer');
-    }
     await this.assertVariant(ctx.organizationId, input.variantId);
     await this.assertLocation(ctx.organizationId, input.locationId);
-    await this.assertStoragePlacement(ctx.organizationId, {
-      locationId: input.locationId,
-      zoneId: input.zoneId,
-      binId: input.binId
-    });
-    const existing = await this.client.query<{ quantity: number }>(
-      `SELECT quantity FROM inventory_balances
+    const hasPlacementChange = input.zoneId !== undefined || input.binId !== undefined;
+    if (
+      !Number.isInteger(input.quantityDelta) ||
+      (input.quantityDelta === 0 && !hasPlacementChange)
+    ) {
+      throw new ValidationFailedError(
+        'Inventory adjustment must change quantity or warehouse placement'
+      );
+    }
+    const existing = await this.client.query<{
+      quantity: number;
+      zoneId: string | null;
+      binId: string | null;
+    }>(
+      `SELECT quantity, zone_id AS "zoneId", bin_id AS "binId" FROM inventory_balances
        WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3
        FOR UPDATE`,
       [ctx.organizationId, input.locationId, input.variantId]
     );
-    const current = existing.rows[0]?.quantity ?? 0;
+    const currentBalance = existing.rows[0];
+    const current = currentBalance?.quantity ?? 0;
+    const zoneId =
+      input.zoneId !== undefined ? input.zoneId : (currentBalance?.zoneId ?? null);
+    // Selecting another zone without choosing a shelf must not retain a shelf
+    // that belongs to the previous zone.
+    const binId =
+      input.binId !== undefined
+        ? input.binId
+        : input.zoneId !== undefined && input.zoneId !== currentBalance?.zoneId
+          ? null
+          : (currentBalance?.binId ?? null);
+    await this.assertStoragePlacement(ctx.organizationId, {
+      locationId: input.locationId,
+      zoneId,
+      binId
+    });
     const next = current + input.quantityDelta;
     if (next < 0) {
       throw new ResourceConflictError('Inventory balance cannot become negative', {
@@ -124,19 +145,20 @@ export class InventoryRepository {
         ctx.userId,
         JSON.stringify({
           ...(input.metadata ?? {}),
-          ...(input.zoneId ? { zoneId: input.zoneId } : {}),
-          ...(input.binId ? { binId: input.binId } : {})
+          ...(zoneId ? { zoneId } : {}),
+          ...(binId ? { binId } : {})
         })
       ]
     );
     await this.client.query(
-      `INSERT INTO inventory_balances (organization_id, location_id, variant_id, quantity)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO inventory_balances (organization_id, location_id, variant_id, zone_id, bin_id, quantity)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (organization_id, location_id, variant_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, version = inventory_balances.version + 1, updated_at = now()`,
-      [ctx.organizationId, input.locationId, input.variantId, next]
+       SET zone_id = EXCLUDED.zone_id, bin_id = EXCLUDED.bin_id, quantity = EXCLUDED.quantity,
+           version = inventory_balances.version + 1, updated_at = now()`,
+      [ctx.organizationId, input.locationId, input.variantId, zoneId, binId, next]
     );
-    return { variantId: input.variantId, locationId: input.locationId, quantity: next };
+    return { variantId: input.variantId, locationId: input.locationId, zoneId, binId, quantity: next };
   }
 
   async moveItem(
@@ -187,7 +209,8 @@ export class InventoryRepository {
 
   async balances(ctx: Pick<RequestContext, 'organizationId'>, variantId: string) {
     const result = await this.client.query(
-      `SELECT location_id AS "locationId", variant_id AS "variantId", quantity, version, updated_at AS "updatedAt"
+      `SELECT location_id AS "locationId", variant_id AS "variantId", zone_id AS "zoneId",
+              bin_id AS "binId", quantity, version, updated_at AS "updatedAt"
        FROM inventory_balances
        WHERE organization_id = $1 AND variant_id = $2
        ORDER BY updated_at DESC`,
