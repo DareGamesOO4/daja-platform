@@ -55,6 +55,22 @@ function text(input: Record<string, unknown>, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+/** The website stores Serbian gender labels with diacritics. Older desktop
+ * builds emitted ASCII values, so normalize at the API boundary and keep one
+ * catalog value across every client. */
+function catalogGender(input: Record<string, unknown>): string | undefined {
+  const value = text(input, 'gender');
+  if (!value) return undefined;
+  const comparable = value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleUpperCase('sr-Latn-RS');
+  if (comparable === 'MUSKI') return 'MUŠKI';
+  if (comparable === 'ZENSKI') return 'ŽENSKI';
+  if (comparable === 'UNISEX') return 'Unisex';
+  return value;
+}
+
 function integer(input: Record<string, unknown>, key: string): number | undefined {
   const value = input[key];
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
@@ -785,7 +801,7 @@ export class OperationalSyncProjector {
           sku,
           text(input, 'barcode') ?? null,
           name,
-          text(input, 'gender') ?? null,
+          catalogGender(input) ?? null,
           priceRsd * 100,
           currency,
           JSON.stringify(record(input.attributes) ?? {}),
@@ -899,7 +915,7 @@ export class OperationalSyncProjector {
         sku,
         text(input, 'barcode') ?? null,
         name,
-        text(input, 'gender') ?? null,
+        catalogGender(input) ?? null,
         priceRsd * 100,
         currency,
         input.attributes === undefined ? null : JSON.stringify(record(input.attributes) ?? {}),
