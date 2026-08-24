@@ -423,17 +423,6 @@ export class SyncRepository {
   }
 
   private async detectConflict(organizationId: string, event: SyncPushEvent) {
-    // RFID edits and deletion operate only on RFID-owned fields. A web edit
-    // may independently change catalog content, so a stale row version must
-    // not reject an otherwise valid local create/update/delete operation.
-    const command = event.payload.command;
-    if (
-      typeof command === 'object' &&
-      command !== null &&
-      ['item.update', 'item.delete'].includes(String((command as Record<string, unknown>).kind))
-    ) {
-      return null;
-    }
     if (event.baseVersion === undefined || event.baseVersion === null) {
       return null;
     }
