@@ -111,6 +111,30 @@ export class SyncController {
     const appliedEventIds = new Set(
       results.filter((result) => result.status === 'applied').map((result) => result.eventId)
     );
+    const commandKind = (payload: unknown): string | undefined => {
+      if (typeof payload !== 'object' || payload === null || Array.isArray(payload))
+        return undefined;
+      const envelope = payload as Record<string, unknown>;
+      if (
+        typeof envelope.command !== 'object' ||
+        envelope.command === null ||
+        Array.isArray(envelope.command)
+      ) {
+        return undefined;
+      }
+      const kind = (envelope.command as Record<string, unknown>).kind;
+      return typeof kind === 'string' ? kind : undefined;
+    };
+    const deletedVariantIds = new Set(
+      events
+        .filter(
+          (event) =>
+            appliedEventIds.has(event.eventId) &&
+            event.aggregateType === 'product_variant' &&
+            commandKind(event.payload) === 'item.delete'
+        )
+        .map((event) => event.aggregateId)
+    );
     const variantIds = Array.from(
       new Set(
         events.flatMap((event) => {
@@ -140,8 +164,12 @@ export class SyncController {
       )
     );
     if (variantIds.length === 0) return;
-    const products = await this.database.pool.query<{ productId: string; slug: string }>(
-      `SELECT DISTINCT p.id AS "productId", p.slug
+    const products = await this.database.pool.query<{
+      productId: string;
+      slug: string;
+      variantId: string;
+    }>(
+      `SELECT DISTINCT p.id AS "productId", p.slug, v.id AS "variantId"
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        WHERE p.organization_id = $1 AND v.id = ANY($2::uuid[])`,
@@ -154,7 +182,11 @@ export class SyncController {
       this.realtime.publish({
         organizationId,
         event: 'product.updated',
-        payload: { productId: product.productId, slug: product.slug }
+        payload: {
+          productId: product.productId,
+          slug: product.slug,
+          ...(deletedVariantIds.has(product.variantId) ? { deleted: true } : {})
+        }
       });
     }
   }
