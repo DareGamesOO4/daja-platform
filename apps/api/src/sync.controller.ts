@@ -110,8 +110,8 @@ export class SyncController {
       .filter((event) => event.aggregateType === 'product_variant' && appliedEventIds.has(event.eventId))
       .map((event) => event.aggregateId);
     if (variantIds.length === 0) return;
-    const products = await this.database.pool.query<{ slug: string }>(
-      `SELECT DISTINCT p.slug
+    const products = await this.database.pool.query<{ productId: string; slug: string }>(
+      `SELECT DISTINCT p.id AS "productId", p.slug
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        WHERE p.organization_id = $1 AND v.id = ANY($2::uuid[])`,
@@ -120,8 +120,12 @@ export class SyncController {
     const slugs = products.rows.map((product) => product.slug);
     if (slugs.length === 0) return;
     await this.redis.client.del(...slugs.map((slug) => `catalog:slug:${organizationId}:${slug}`));
-    for (const slug of slugs) {
-      this.realtime.publish({ organizationId, event: 'product.updated', payload: { slug } });
+    for (const product of products.rows) {
+      this.realtime.publish({
+        organizationId,
+        event: 'product.updated',
+        payload: { productId: product.productId, slug: product.slug }
+      });
     }
   }
 

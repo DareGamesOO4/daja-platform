@@ -314,56 +314,17 @@ export class StaffCatalogController {
   async listProducts(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
-    return (
-      await this.database.pool.query(
-        `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
-              p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.seo, p.features,
-              p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
-              v.id AS "variantId", v.current_price_amount AS "currentPriceAmount", v.currency,
-              v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
-              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
-              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
-              media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
-       FROM products p
-       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
-       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
-       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
-       LEFT JOIN LATERAL (
-         SELECT * FROM product_variants WHERE product_id = p.id AND organization_id = p.organization_id AND deleted_at IS NULL
-         ORDER BY created_at LIMIT 1
-       ) v ON true
-       LEFT JOIN LATERAL (
-         SELECT quantity, location_id, zone_id, bin_id
-         FROM inventory_balances
-         WHERE organization_id = p.organization_id AND variant_id = v.id
-         ORDER BY updated_at DESC
-         LIMIT 1
-       ) inventory ON true
-       LEFT JOIN LATERAL (
-         SELECT ma.public_url, md.public_url AS thumbnail_url
-         FROM product_media pm
-         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
-         LEFT JOIN LATERAL (
-           SELECT public_url FROM media_derivatives WHERE media_asset_id = ma.id ORDER BY width ASC LIMIT 1
-         ) md ON true
-         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
-         ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
-       ) media ON true
-       WHERE p.organization_id = $1 AND p.deleted_at IS NULL
-       ORDER BY p.updated_at DESC`,
-        [ctx.organizationId]
-      )
-    ).rows;
+    return this.adminProductRows(ctx.organizationId);
   }
 
   @Get('products/:id')
   async getProduct(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
-    return new CatalogRepository(this.database.pool).getProduct(
-      ctx,
-      parseWithSchema(uuidSchema, id)
-    );
+    const productId = parseWithSchema(uuidSchema, id);
+    const product = (await this.adminProductRows(ctx.organizationId, productId))[0];
+    if (!product) throw new TenantAccessDeniedError();
+    return product;
   }
 
   @Patch('products/:id')
@@ -1208,19 +1169,75 @@ export class StaffCatalogController {
     return { deleted: true };
   }
 
+  /** The admin catalog includes internal inventory placement.  Keep it in a
+   * single query so a realtime update can reload one product, rather than
+   * forcing the dashboard to refresh its whole product list. */
+  private async adminProductRows(organizationId: string, productId?: string) {
+    return (
+      await this.database.pool.query(
+        `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
+              p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.seo, p.features,
+              p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
+              v.id AS "variantId", v.current_price_amount AS "currentPriceAmount", v.currency,
+              v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
+              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
+              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
+              media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
+       FROM products p
+       LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
+       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
+       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
+       LEFT JOIN LATERAL (
+         SELECT * FROM product_variants WHERE product_id = p.id AND organization_id = p.organization_id AND deleted_at IS NULL
+         ORDER BY created_at LIMIT 1
+       ) v ON true
+       LEFT JOIN LATERAL (
+         SELECT quantity, location_id, zone_id, bin_id
+         FROM inventory_balances
+         WHERE organization_id = p.organization_id AND variant_id = v.id
+         ORDER BY updated_at DESC
+         LIMIT 1
+       ) inventory ON true
+       LEFT JOIN LATERAL (
+         SELECT ma.public_url, md.public_url AS thumbnail_url
+         FROM product_media pm
+         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         LEFT JOIN LATERAL (
+           SELECT public_url FROM media_derivatives WHERE media_asset_id = ma.id ORDER BY width ASC LIMIT 1
+         ) md ON true
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
+       ) media ON true
+       WHERE p.organization_id = $1 AND p.deleted_at IS NULL
+       ${productId ? 'AND p.id = $2' : ''}
+       ORDER BY p.updated_at DESC`,
+        productId ? [organizationId, productId] : [organizationId]
+      )
+    ).rows;
+  }
+
   private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {
     const validSlugs = slugs.filter((slug): slug is string => Boolean(slug));
     const keys = validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`);
     if (keys.length > 0) {
       await this.redis.client.del(...keys);
     }
-    // Only the changed product slug is broadcast. Storefront clients fetch
-    // that one public record and never reload the complete catalog.
+    const products = await this.database.pool.query<{ id: string; slug: string }>(
+      `SELECT id, slug FROM products
+       WHERE organization_id = $1 AND slug = ANY($2::text[])`,
+      [organizationId, validSlugs]
+    );
+    const productIdBySlug = new Map(products.rows.map((product) => [product.slug, product.id]));
+    // Storefront clients still use only the slug. Admin clients additionally
+    // receive the ID and refresh only that product with its inventory fields.
     for (const slug of validSlugs) {
       this.realtime.publish({
         organizationId,
         event: 'product.updated',
-        payload: { slug }
+        payload: {
+          slug,
+          ...(productIdBySlug.get(slug) ? { productId: productIdBySlug.get(slug) } : {})
+        }
       });
     }
   }
