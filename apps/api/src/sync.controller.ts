@@ -100,15 +100,45 @@ export class SyncController {
 
   private async publishCatalogChanges(
     organizationId: string,
-    events: ReadonlyArray<{ eventId: string; aggregateType: string; aggregateId: string }>,
+    events: ReadonlyArray<{
+      eventId: string;
+      aggregateType: string;
+      aggregateId: string;
+      payload: unknown;
+    }>,
     results: ReadonlyArray<{ eventId: string; status: string }>
   ): Promise<void> {
     const appliedEventIds = new Set(
       results.filter((result) => result.status === 'applied').map((result) => result.eventId)
     );
-    const variantIds = events
-      .filter((event) => event.aggregateType === 'product_variant' && appliedEventIds.has(event.eventId))
-      .map((event) => event.aggregateId);
+    const variantIds = Array.from(
+      new Set(
+        events.flatMap((event) => {
+          if (!appliedEventIds.has(event.eventId)) return [];
+          if (event.aggregateType === 'product_variant') return [event.aggregateId];
+
+          // Inventory relocation, stock adjustment and RFID assignment are
+          // separate desktop commands. They change a product's current
+          // zone/shelf but their aggregate ID is the ledger/tag ID, not the
+          // product variant ID. Read the command envelope so those changes
+          // also notify an already open admin catalog.
+          const envelope =
+            typeof event.payload === 'object' && event.payload !== null && !Array.isArray(event.payload)
+              ? (event.payload as Record<string, unknown>)
+              : undefined;
+          const command =
+            envelope && typeof envelope.command === 'object' && envelope.command !== null
+              ? (envelope.command as Record<string, unknown>)
+              : undefined;
+          const commandPayload =
+            command && typeof command.payload === 'object' && command.payload !== null
+              ? (command.payload as Record<string, unknown>)
+              : undefined;
+          const variantId = commandPayload?.productVariantId;
+          return typeof variantId === 'string' && variantId.length > 0 ? [variantId] : [];
+        })
+      )
+    );
     if (variantIds.length === 0) return;
     const products = await this.database.pool.query<{ productId: string; slug: string }>(
       `SELECT DISTINCT p.id AS "productId", p.slug
@@ -224,7 +254,8 @@ export class SyncController {
       await this.publishCatalogChanges(ctx.organizationId, [{
         eventId: result.appliedEventId,
         aggregateType: result.aggregateType,
-        aggregateId: result.aggregateId
+        aggregateId: result.aggregateId,
+        payload: {}
       }], [{ eventId: result.appliedEventId, status: 'applied' }]);
     }
     return result;
