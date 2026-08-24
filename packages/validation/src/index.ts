@@ -35,6 +35,8 @@ export const syncAggregateTypeSchema = z.enum([
   'transfer',
   'user',
   'location',
+  'warehouse',
+  'warehouse_zone',
   'category',
   'supplier',
   'warehouse_bin',

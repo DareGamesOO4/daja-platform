@@ -16,25 +16,39 @@ export class InventoryRepository {
       variantId: string;
       serialNumber?: string | null | undefined;
       locationId?: string | null | undefined;
+      zoneId?: string | null | undefined;
+      binId?: string | null | undefined;
       status?: string | undefined;
     }
   ) {
     await this.assertVariant(ctx.organizationId, input.variantId);
     if (input.locationId) {
       await this.assertLocation(ctx.organizationId, input.locationId);
+      await this.assertStoragePlacement(ctx.organizationId, {
+        locationId: input.locationId,
+        zoneId: input.zoneId,
+        binId: input.binId
+      });
+    } else if (input.zoneId || input.binId) {
+      throw new ValidationFailedError('Warehouse zone and shelf require a location');
     }
     const status = input.status ?? 'in_stock';
     const result = await this.client.query(
-      `INSERT INTO inventory_items (organization_id, variant_id, serial_number, status, current_location_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO inventory_items (
+         organization_id, variant_id, serial_number, status,
+         current_location_id, current_zone_id, current_bin_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, variant_id AS "variantId", serial_number AS "serialNumber", status,
-                 current_location_id AS "currentLocationId", version`,
+                 current_location_id AS "currentLocationId", current_zone_id AS "currentZoneId",
+                 current_bin_id AS "currentBinId", version`,
       [
         ctx.organizationId,
         input.variantId,
         input.serialNumber ?? null,
         status,
-        input.locationId ?? null
+        input.locationId ?? null,
+        input.zoneId ?? null,
+        input.binId ?? null
       ]
     );
     if (input.locationId && status === 'in_stock') {
@@ -42,10 +56,16 @@ export class InventoryRepository {
         variantId: input.variantId,
         inventoryItemId: result.rows[0].id,
         locationId: input.locationId,
+        zoneId: input.zoneId,
+        binId: input.binId,
         quantityDelta: 1,
         sourceType: 'inventory_item_create',
         sourceId: result.rows[0].id,
-        metadata: { serialNumber: input.serialNumber ?? null }
+        metadata: {
+          serialNumber: input.serialNumber ?? null,
+          ...(input.zoneId ? { zoneId: input.zoneId } : {}),
+          ...(input.binId ? { binId: input.binId } : {})
+        }
       });
     }
     return result.rows[0];
@@ -57,6 +77,8 @@ export class InventoryRepository {
       variantId: string;
       inventoryItemId?: string | null | undefined;
       locationId: string;
+      zoneId?: string | null | undefined;
+      binId?: string | null | undefined;
       quantityDelta: number;
       sourceType: string;
       sourceId?: string | null | undefined;
@@ -68,6 +90,11 @@ export class InventoryRepository {
     }
     await this.assertVariant(ctx.organizationId, input.variantId);
     await this.assertLocation(ctx.organizationId, input.locationId);
+    await this.assertStoragePlacement(ctx.organizationId, {
+      locationId: input.locationId,
+      zoneId: input.zoneId,
+      binId: input.binId
+    });
     const existing = await this.client.query<{ quantity: number }>(
       `SELECT quantity FROM inventory_balances
        WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3
@@ -95,7 +122,11 @@ export class InventoryRepository {
         input.sourceType,
         input.sourceId ?? null,
         ctx.userId,
-        JSON.stringify(input.metadata ?? {})
+        JSON.stringify({
+          ...(input.metadata ?? {}),
+          ...(input.zoneId ? { zoneId: input.zoneId } : {}),
+          ...(input.binId ? { binId: input.binId } : {})
+        })
       ]
     );
     await this.client.query(
@@ -182,6 +213,38 @@ export class InventoryRepository {
     );
     if (result.rowCount !== 1) {
       throw new ValidationFailedError('Location does not belong to organization');
+    }
+  }
+
+  private async assertStoragePlacement(
+    organizationId: string,
+    input: {
+      locationId: string;
+      zoneId?: string | null | undefined;
+      binId?: string | null | undefined;
+    }
+  ): Promise<void> {
+    if (!input.zoneId && !input.binId) return;
+    if (input.binId && !input.zoneId) {
+      throw new ValidationFailedError('Warehouse shelf requires a zone');
+    }
+    const placement = await this.client.query<{ zoneId: string; binId: string | null }>(
+      `SELECT zone.id AS "zoneId", bin.id AS "binId"
+       FROM warehouse_zones zone
+       JOIN warehouses warehouse
+         ON warehouse.organization_id = zone.organization_id AND warehouse.id = zone.warehouse_id
+       LEFT JOIN warehouse_bins bin
+         ON bin.organization_id = zone.organization_id AND bin.id = $4 AND bin.zone_id = zone.id
+         AND bin.deleted_at IS NULL AND bin.active
+       WHERE zone.organization_id = $1 AND zone.id = $2 AND warehouse.location_id = $3
+         AND zone.deleted_at IS NULL AND zone.active AND warehouse.deleted_at IS NULL AND warehouse.active`,
+      [organizationId, input.zoneId ?? null, input.locationId, input.binId ?? null]
+    );
+    const row = placement.rows[0];
+    if (!row || (input.binId !== undefined && input.binId !== null && row.binId !== input.binId)) {
+      throw new ValidationFailedError(
+        'Warehouse zone or shelf does not belong to selected location'
+      );
     }
   }
 }

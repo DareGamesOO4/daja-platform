@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { SyncRepository, type SyncPushEvent } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
@@ -13,9 +13,31 @@ type TagCommand = { kind: 'tag.assign'; payload: Record<string, unknown> };
 
 type LocationCommand = { kind: 'location.upsert'; payload: Record<string, unknown> };
 
+type LocationLayoutCommand = {
+  kind: 'location.layout.initialize';
+  payload: Record<string, unknown>;
+};
+
+type WarehouseZoneCommand = {
+  kind: 'warehouse.zone.upsert' | 'warehouse.zone.delete';
+  payload: Record<string, unknown>;
+};
+
+type WarehouseBinCommand = {
+  kind: 'warehouse.bin.upsert' | 'warehouse.bin.delete';
+  payload: Record<string, unknown>;
+};
+
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
 
-type DesktopCommand = ItemCommand | TagCommand | LocationCommand | SettingsCommand;
+type DesktopCommand =
+  | ItemCommand
+  | TagCommand
+  | LocationCommand
+  | LocationLayoutCommand
+  | WarehouseZoneCommand
+  | WarehouseBinCommand
+  | SettingsCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -31,6 +53,12 @@ function text(input: Record<string, unknown>, key: string): string | undefined {
 function integer(input: Record<string, unknown>, key: string): number | undefined {
   const value = input[key];
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => record(item) !== undefined)
+    : [];
 }
 
 function boolean(input: Record<string, unknown>, key: string, fallback: boolean): boolean {
@@ -81,6 +109,32 @@ export class OperationalSyncProjector {
     if (kind === 'location.upsert') {
       const snapshot = await this.location(ctx, event, {
         kind: 'location.upsert',
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'location.layout.initialize') {
+      const snapshot = await this.locationLayout(
+        ctx,
+        event,
+        {
+          kind: 'location.layout.initialize',
+          payload: commandPayload
+        },
+        entityIds
+      );
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'warehouse.zone.upsert' || kind === 'warehouse.zone.delete') {
+      const snapshot = await this.warehouseZone(ctx, event, {
+        kind,
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'warehouse.bin.upsert' || kind === 'warehouse.bin.delete') {
+      const snapshot = await this.warehouseBin(ctx, event, {
+        kind,
         payload: commandPayload
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
@@ -141,6 +195,371 @@ export class OperationalSyncProjector {
       [id, ctx.organizationId, code, name, type, boolean(input, 'active', true)]
     );
     return { kind: 'location', location: result.rows[0] };
+  }
+
+  /**
+   * A desktop location creates its warehouse, first zone and first shelf in
+   * one local transaction.  Persist that same hierarchy in Platform instead
+   * of treating the command as an opaque sync-log record.
+   *
+   * Older desktop outbox records did not include the generated child UUIDs.
+   * They remain valid: Platform creates a canonical default zone and shelf.
+   * New clients include the IDs in entityIds.layout, so all three levels keep
+   * their exact identity across desktop and web.
+   */
+  private async locationLayout(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: LocationLayoutCommand,
+    entityIds: Record<string, unknown> | undefined
+  ): Promise<Record<string, unknown>> {
+    const locationId = text(command.payload, 'locationId');
+    if (!locationId)
+      throw new ValidationFailedError('Desktop location layout command is incomplete');
+    const location = await this.client.query<{ code: string; name: string }>(
+      `SELECT code, name FROM locations
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, locationId]
+    );
+    const locationRow = location.rows[0];
+    if (!locationRow)
+      throw new ValidationFailedError('Desktop location does not exist on Platform');
+
+    const layout = record(entityIds?.layout);
+    const layoutWarehouse = record(layout?.warehouse);
+    const warehouseId = text(layoutWarehouse ?? {}, 'id') ?? event.aggregateId;
+    if (warehouseId !== event.aggregateId) {
+      throw new ValidationFailedError('Desktop warehouse identity does not match sync aggregate');
+    }
+    const requestedWarehouseCode = text(layoutWarehouse ?? {}, 'code') ?? `SKL-${locationRow.code}`;
+    const warehouseCode = await this.availableWarehouseCode(
+      ctx.organizationId,
+      warehouseId,
+      requestedWarehouseCode
+    );
+    const warehouseName = text(layoutWarehouse ?? {}, 'name') ?? `Skladište ${locationRow.name}`;
+    const warehouse = await this.client.query<{
+      id: string;
+      locationId: string;
+      code: string;
+      name: string;
+      active: boolean;
+      version: string;
+    }>(
+      `INSERT INTO warehouses (id, organization_id, location_id, code, name, active)
+       VALUES ($1, $2, $3, upper($4), $5, true)
+       ON CONFLICT (id) DO UPDATE
+       SET location_id = EXCLUDED.location_id, code = EXCLUDED.code, name = EXCLUDED.name,
+           active = true, deleted_at = NULL, version = warehouses.version + 1, updated_at = now()
+       WHERE warehouses.organization_id = EXCLUDED.organization_id
+       RETURNING id, location_id AS "locationId", code, name, active, version::text AS version`,
+      [warehouseId, ctx.organizationId, locationId, warehouseCode, warehouseName]
+    );
+    if (!warehouse.rows[0])
+      throw new ValidationFailedError('Warehouse belongs to another organization');
+
+    const requestedZones = records(layout?.zones);
+    const zoneInputs = requestedZones.length
+      ? requestedZones
+      : [
+          {
+            id: randomUUID(),
+            code: 'ZONA-1',
+            name: 'Osnovna zona',
+            bins: [{ id: randomUUID(), code: 'POLICA-1', name: 'Osnovna polica' }]
+          }
+        ];
+    const zones: Record<string, unknown>[] = [];
+    for (const [zoneIndex, zoneInput] of zoneInputs.entries()) {
+      const zoneId = text(zoneInput, 'id') ?? randomUUID();
+      const zoneCode = text(zoneInput, 'code');
+      const zoneName = text(zoneInput, 'name');
+      if (!zoneCode || !zoneName)
+        throw new ValidationFailedError('Desktop warehouse zone is incomplete');
+      const zone = await this.client.query<{
+        id: string;
+        warehouseId: string;
+        code: string;
+        name: string;
+        displayOrder: number;
+        active: boolean;
+        version: string;
+      }>(
+        `INSERT INTO warehouse_zones (id, organization_id, warehouse_id, code, name, display_order, active)
+         VALUES ($1, $2, $3, upper($4), $5, $6, $7)
+         ON CONFLICT (id) DO UPDATE
+         SET warehouse_id = EXCLUDED.warehouse_id, code = EXCLUDED.code, name = EXCLUDED.name,
+             display_order = EXCLUDED.display_order, active = EXCLUDED.active, deleted_at = NULL,
+             version = warehouse_zones.version + 1, updated_at = now()
+         WHERE warehouse_zones.organization_id = EXCLUDED.organization_id
+         RETURNING id, warehouse_id AS "warehouseId", code, name,
+                   display_order AS "displayOrder", active, version::text AS version`,
+        [
+          zoneId,
+          ctx.organizationId,
+          warehouseId,
+          zoneCode,
+          zoneName,
+          zoneIndex,
+          boolean(zoneInput, 'active', true)
+        ]
+      );
+      const zoneRow = zone.rows[0];
+      if (!zoneRow)
+        throw new ValidationFailedError('Warehouse zone belongs to another organization');
+      const bins: Record<string, unknown>[] = [];
+      for (const [binIndex, binInput] of records(zoneInput.bins).entries()) {
+        const binId = text(binInput, 'id') ?? randomUUID();
+        const binCode = text(binInput, 'code');
+        const binName = text(binInput, 'name');
+        if (!binCode || !binName)
+          throw new ValidationFailedError('Desktop warehouse shelf is incomplete');
+        const bin = await this.client.query<{
+          id: string;
+          zoneId: string;
+          code: string;
+          name: string;
+          displayOrder: number;
+          active: boolean;
+          status: string;
+          version: string;
+        }>(
+          `INSERT INTO warehouse_bins (id, organization_id, zone_id, code, name, display_order, active, status)
+           VALUES ($1, $2, $3, upper($4), $5, $6, true, 'active')
+           ON CONFLICT (id) DO UPDATE
+           SET zone_id = EXCLUDED.zone_id, code = EXCLUDED.code, name = EXCLUDED.name,
+               display_order = EXCLUDED.display_order, active = EXCLUDED.active, status = EXCLUDED.status,
+               deleted_at = NULL, version = warehouse_bins.version + 1, updated_at = now()
+           WHERE warehouse_bins.organization_id = EXCLUDED.organization_id
+           RETURNING id, zone_id AS "zoneId", code, name, display_order AS "displayOrder",
+                     active, status, version::text AS version`,
+          [binId, ctx.organizationId, zoneId, binCode, binName, binIndex]
+        );
+        if (!bin.rows[0])
+          throw new ValidationFailedError('Warehouse shelf belongs to another organization');
+        bins.push(bin.rows[0]);
+      }
+      if (bins.length === 0) {
+        throw new ValidationFailedError('Every desktop warehouse zone must contain a shelf');
+      }
+      zones.push({ ...zoneRow, bins });
+    }
+    return { kind: 'warehouse.layout', warehouse: warehouse.rows[0], zones };
+  }
+
+  private async warehouseZone(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: WarehouseZoneCommand
+  ): Promise<Record<string, unknown>> {
+    const zoneId =
+      text(command.payload, 'id') ?? text(command.payload, 'zoneId') ?? event.aggregateId;
+    if (zoneId !== event.aggregateId) {
+      throw new ValidationFailedError(
+        'Desktop warehouse zone identity does not match sync aggregate'
+      );
+    }
+    if (command.kind === 'warehouse.zone.delete') {
+      const current = await this.client.query<{ id: string; warehouseId: string }>(
+        `SELECT id, warehouse_id AS "warehouseId" FROM warehouse_zones
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+        [ctx.organizationId, zoneId]
+      );
+      if (!current.rows[0])
+        return { kind: 'warehouse.zone', id: zoneId, deleted: true, missing: true };
+      const bins = await this.client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM warehouse_bins
+         WHERE organization_id = $1 AND zone_id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, zoneId]
+      );
+      if (Number(bins.rows[0]?.count ?? 0) > 0) {
+        throw new ValidationFailedError(
+          'Warehouse zone cannot be deleted while it contains shelves'
+        );
+      }
+      await this.client.query(
+        `UPDATE warehouse_zones
+         SET active = false, deleted_at = now(), version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2`,
+        [ctx.organizationId, zoneId]
+      );
+      return { kind: 'warehouse.zone', id: zoneId, deleted: true };
+    }
+
+    const warehouseId = text(command.payload, 'warehouseId');
+    const code = text(command.payload, 'code');
+    const name = text(command.payload, 'name');
+    if (!warehouseId || !code || !name) {
+      throw new ValidationFailedError('Desktop warehouse zone command is incomplete');
+    }
+    const warehouse = await this.client.query<{ locationId: string }>(
+      `SELECT location_id AS "locationId" FROM warehouses
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, warehouseId]
+    );
+    if (!warehouse.rows[0])
+      throw new ValidationFailedError('Desktop warehouse does not exist on Platform');
+    const zone = await this.client.query<{
+      id: string;
+      warehouseId: string;
+      code: string;
+      name: string;
+      displayOrder: number;
+      active: boolean;
+      version: string;
+    }>(
+      `INSERT INTO warehouse_zones (id, organization_id, warehouse_id, code, name, display_order, active)
+       VALUES ($1, $2, $3, upper($4), $5, $6, $7)
+       ON CONFLICT (id) DO UPDATE
+       SET warehouse_id = EXCLUDED.warehouse_id, code = EXCLUDED.code, name = EXCLUDED.name,
+           display_order = EXCLUDED.display_order, active = EXCLUDED.active, deleted_at = NULL,
+           version = warehouse_zones.version + 1, updated_at = now()
+       WHERE warehouse_zones.organization_id = EXCLUDED.organization_id
+       RETURNING id, warehouse_id AS "warehouseId", code, name,
+                 display_order AS "displayOrder", active, version::text AS version`,
+      [
+        zoneId,
+        ctx.organizationId,
+        warehouseId,
+        code,
+        name,
+        integer(command.payload, 'displayOrder') ?? 0,
+        boolean(command.payload, 'active', true)
+      ]
+    );
+    if (!zone.rows[0])
+      throw new ValidationFailedError('Warehouse zone belongs to another organization');
+    return { kind: 'warehouse.zone', zone: zone.rows[0], locationId: warehouse.rows[0].locationId };
+  }
+
+  private async warehouseBin(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: WarehouseBinCommand
+  ): Promise<Record<string, unknown>> {
+    const binId =
+      text(command.payload, 'id') ?? text(command.payload, 'binId') ?? event.aggregateId;
+    if (binId !== event.aggregateId) {
+      throw new ValidationFailedError(
+        'Desktop warehouse shelf identity does not match sync aggregate'
+      );
+    }
+    if (command.kind === 'warehouse.bin.delete') {
+      const current = await this.client.query<{ id: string }>(
+        `SELECT id FROM warehouse_bins
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+        [ctx.organizationId, binId]
+      );
+      // Old desktop layout events did not carry the default shelf UUID. A
+      // delete of that already-missing remote record is deliberately
+      // idempotent, which clears the local outbox instead of retrying forever.
+      if (!current.rows[0])
+        return { kind: 'warehouse.bin', id: binId, deleted: true, missing: true };
+      const inventory = await this.client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM inventory_items
+         WHERE organization_id = $1 AND current_bin_id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, binId]
+      );
+      if (Number(inventory.rows[0]?.count ?? 0) > 0) {
+        throw new ValidationFailedError(
+          'Warehouse shelf cannot be deleted while it contains inventory'
+        );
+      }
+      await this.client.query(
+        `UPDATE warehouse_bins
+         SET active = false, status = 'inactive', deleted_at = now(),
+             version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2`,
+        [ctx.organizationId, binId]
+      );
+      return { kind: 'warehouse.bin', id: binId, deleted: true };
+    }
+
+    const warehouseId = text(command.payload, 'warehouseId');
+    const zoneId = text(command.payload, 'zoneId');
+    const code = text(command.payload, 'code');
+    const name = text(command.payload, 'name');
+    if (!warehouseId || !zoneId || !code || !name) {
+      throw new ValidationFailedError('Desktop warehouse shelf command is incomplete');
+    }
+    const scope = await this.client.query<{ locationId: string }>(
+      `SELECT warehouse.location_id AS "locationId"
+       FROM warehouse_zones zone
+       JOIN warehouses warehouse ON warehouse.id = zone.warehouse_id
+       WHERE zone.organization_id = $1 AND zone.id = $2 AND zone.warehouse_id = $3
+         AND zone.deleted_at IS NULL AND warehouse.deleted_at IS NULL`,
+      [ctx.organizationId, zoneId, warehouseId]
+    );
+    if (!scope.rows[0])
+      throw new ValidationFailedError('Warehouse zone does not belong to selected warehouse');
+    const status = text(command.payload, 'status') ?? 'active';
+    if (!['active', 'blocked', 'critical', 'inactive'].includes(status)) {
+      throw new ValidationFailedError('Desktop warehouse shelf status is invalid');
+    }
+    const capacity = integer(command.payload, 'capacity');
+    const lowStockThreshold = integer(command.payload, 'lowStockThreshold');
+    if (capacity !== undefined && lowStockThreshold !== undefined && lowStockThreshold > capacity) {
+      throw new ValidationFailedError('Warehouse shelf low stock threshold exceeds capacity');
+    }
+    const bin = await this.client.query<{
+      id: string;
+      zoneId: string;
+      code: string;
+      name: string;
+      capacity: number | null;
+      lowStockThreshold: number | null;
+      displayOrder: number;
+      active: boolean;
+      status: string;
+      version: string;
+    }>(
+      `INSERT INTO warehouse_bins (
+         id, organization_id, zone_id, code, name, capacity, low_stock_threshold,
+         display_order, active, status
+       ) VALUES ($1, $2, $3, upper($4), $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (id) DO UPDATE
+       SET zone_id = EXCLUDED.zone_id, code = EXCLUDED.code, name = EXCLUDED.name,
+           capacity = EXCLUDED.capacity, low_stock_threshold = EXCLUDED.low_stock_threshold,
+           display_order = EXCLUDED.display_order, active = EXCLUDED.active, status = EXCLUDED.status,
+           deleted_at = NULL, version = warehouse_bins.version + 1, updated_at = now()
+       WHERE warehouse_bins.organization_id = EXCLUDED.organization_id
+       RETURNING id, zone_id AS "zoneId", code, name, capacity,
+                 low_stock_threshold AS "lowStockThreshold", display_order AS "displayOrder",
+                 active, status, version::text AS version`,
+      [
+        binId,
+        ctx.organizationId,
+        zoneId,
+        code,
+        name,
+        capacity ?? null,
+        lowStockThreshold ?? null,
+        integer(command.payload, 'displayOrder') ?? 0,
+        status !== 'inactive',
+        status
+      ]
+    );
+    if (!bin.rows[0])
+      throw new ValidationFailedError('Warehouse shelf belongs to another organization');
+    return { kind: 'warehouse.bin', bin: bin.rows[0], locationId: scope.rows[0].locationId };
+  }
+
+  private async availableWarehouseCode(
+    organizationId: string,
+    warehouseId: string,
+    requestedCode: string
+  ): Promise<string> {
+    const normalized = requestedCode.trim().toUpperCase() || `SKL-${warehouseId.slice(0, 8)}`;
+    for (let suffix = 1; suffix < 1000; suffix += 1) {
+      const code = suffix === 1 ? normalized : `${normalized}-${suffix}`;
+      const conflict = await this.client.query<{ id: string }>(
+        `SELECT id FROM warehouses
+         WHERE organization_id = $1 AND code = $2 AND id <> $3 AND deleted_at IS NULL`,
+        [organizationId, code, warehouseId]
+      );
+      if (!conflict.rows[0]) return code;
+    }
+    throw new ValidationFailedError('Unable to assign a unique warehouse code');
   }
 
   private async settings(

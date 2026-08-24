@@ -183,9 +183,10 @@ export class PublicCatalogController {
     );
     // Do not cache a sale beyond its expiry. A client refreshes only this
     // slug at that moment and must receive the regular price immediately.
-    const saleExpiry = product && typeof product === 'object'
-      ? (product as { saleValidUntil?: string | null }).saleValidUntil
-      : null;
+    const saleExpiry =
+      product && typeof product === 'object'
+        ? (product as { saleValidUntil?: string | null }).saleValidUntil
+        : null;
     const expiresIn = saleExpiry ? new Date(saleExpiry).getTime() - Date.now() : Infinity;
     const cacheSeconds = Number.isFinite(expiresIn)
       ? Math.max(1, Math.min(120, Math.ceil(expiresIn / 1000)))
@@ -568,29 +569,31 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const variantId = parseWithSchema(uuidSchema, id);
-    const deleted = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const variant = await client.query<{ product_id: string }>(
-        `SELECT product_id FROM product_variants
+    const deleted = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const variant = await client.query<{ product_id: string }>(
+          `SELECT product_id FROM product_variants
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
-        [ctx.organizationId, variantId]
-      );
-      const productId = variant.rows[0]?.product_id;
-      if (!productId) throw new TenantAccessDeniedError();
-      await client.query(
-        `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
+          [ctx.organizationId, variantId]
+        );
+        const productId = variant.rows[0]?.product_id;
+        if (!productId) throw new TenantAccessDeniedError();
+        await client.query(
+          `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
          version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2`,
-        [ctx.organizationId, variantId]
-      );
-      await new OperationalSyncProjector(client).publishProductChange(
-        ctx,
-        productId,
-        variantId,
-        'delete'
-      );
-      const product = await new CatalogRepository(client).getProduct(ctx, productId);
-      return { slug: product.slug };
-    });
+          [ctx.organizationId, variantId]
+        );
+        await new OperationalSyncProjector(client).publishProductChange(
+          ctx,
+          productId,
+          variantId,
+          'delete'
+        );
+        const product = await new CatalogRepository(client).getProduct(ctx, productId);
+        return { slug: product.slug };
+      }
+    );
     await this.invalidateCatalog(ctx.organizationId, deleted.slug);
     return { deleted: true };
   }
@@ -721,7 +724,8 @@ export class StaffCatalogController {
       [
         ctx.organizationId,
         productId,
-        input.variantId ?? null, input.mediaId,
+        input.variantId ?? null,
+        input.mediaId,
         input.role ?? 'gallery',
         input.position ?? 0,
         input.isPrimary ?? false
@@ -782,7 +786,8 @@ export class StaffCatalogController {
         linkId,
         input.position ?? null,
         input.role ?? null,
-        input.isPrimary ?? null, input.variantId ?? null
+        input.isPrimary ?? null,
+        input.variantId ?? null
       ]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
@@ -813,14 +818,22 @@ export class StaffCatalogController {
 
   @Get('variants/:id/prices')
   async listVariantPrices(@Req() request: Request, @Param('id') id: string) {
-    const ctx = resolveRequestContext(request); requirePermission(ctx, 'catalog.read');
-    return (await this.database.pool.query(`SELECT id, amount_minor AS "amountMinor", currency, price_type AS "priceType", valid_from AS "validFrom", valid_until AS "validUntil", created_at AS "createdAt" FROM variant_prices WHERE organization_id=$1 AND variant_id=$2 ORDER BY valid_from DESC`, [ctx.organizationId, parseWithSchema(uuidSchema,id)])).rows;
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (
+      await this.database.pool.query(
+        `SELECT id, amount_minor AS "amountMinor", currency, price_type AS "priceType", valid_from AS "validFrom", valid_until AS "validUntil", created_at AS "createdAt" FROM variant_prices WHERE organization_id=$1 AND variant_id=$2 ORDER BY valid_from DESC`,
+        [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+      )
+    ).rows;
   }
 
   @Post('variants/:id/prices')
   async addVariantPrice(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
-    const ctx = resolveRequestContext(request); requirePermission(ctx, 'catalog.write');
-    const variantId = parseWithSchema(uuidSchema,id); const input = parseWithSchema(scheduledPriceSchema, body);
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const variantId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(scheduledPriceSchema, body);
     if (input.priceType === 'sale') {
       const validFrom = input.validFrom ? new Date(input.validFrom) : new Date();
       const validUntil = input.validUntil ? new Date(input.validUntil) : null;
@@ -829,28 +842,70 @@ export class StaffCatalogController {
       }
     }
     const variant = await new CatalogRepository(this.database.pool).getVariant(ctx, variantId);
-    const result = await this.database.pool.query(`INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`, [ctx.organizationId,variantId,input.amountMinor,input.currency,input.priceType,input.validFrom ?? null,input.validUntil ?? null,ctx.userId]);
-    const product = await new CatalogRepository(this.database.pool).getProduct(ctx, variant.productId);
-    await new OperationalSyncProjector(this.database.pool).publishProductChange(ctx, product.id, variantId);
+    const result = await this.database.pool.query(
+      `INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`,
+      [
+        ctx.organizationId,
+        variantId,
+        input.amountMinor,
+        input.currency,
+        input.priceType,
+        input.validFrom ?? null,
+        input.validUntil ?? null,
+        ctx.userId
+      ]
+    );
+    const product = await new CatalogRepository(this.database.pool).getProduct(
+      ctx,
+      variant.productId
+    );
+    await new OperationalSyncProjector(this.database.pool).publishProductChange(
+      ctx,
+      product.id,
+      variantId
+    );
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return result.rows[0];
   }
 
   @Get('admin/products/:id/reviews')
   async listAdminReviews(@Req() request: Request, @Param('id') id: string) {
-    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
-    return (await this.database.pool.query(`SELECT id,customer_id AS "customerId",user_name AS "userName",rating,comment,status,created_at AS "createdAt" FROM product_reviews WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC`,[ctx.organizationId,parseWithSchema(uuidSchema,id)])).rows;
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return (
+      await this.database.pool.query(
+        `SELECT id,customer_id AS "customerId",user_name AS "userName",rating,comment,status,created_at AS "createdAt" FROM product_reviews WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL ORDER BY created_at DESC`,
+        [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+      )
+    ).rows;
   }
 
   @Patch('admin/reviews/:id')
-  async moderateReview(@Req() request: Request,@Param('id') id:string,@Body() body:unknown) {
-    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write'); const input=parseWithSchema(z.object({status:z.enum(['pending','published','rejected'])}),body);
-    const result=await this.database.pool.query(`UPDATE product_reviews SET status=$3 WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id,status`,[ctx.organizationId,parseWithSchema(uuidSchema,id),input.status]); if(!result.rowCount) throw new TenantAccessDeniedError(); return result.rows[0];
+  async moderateReview(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(
+      z.object({ status: z.enum(['pending', 'published', 'rejected']) }),
+      body
+    );
+    const result = await this.database.pool.query(
+      `UPDATE product_reviews SET status=$3 WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id,status`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id), input.status]
+    );
+    if (!result.rowCount) throw new TenantAccessDeniedError();
+    return result.rows[0];
   }
 
   @Delete('admin/reviews/:id')
-  async deleteReview(@Req() request: Request,@Param('id') id:string) {
-    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write'); const result=await this.database.pool.query(`UPDATE product_reviews SET deleted_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL`,[ctx.organizationId,parseWithSchema(uuidSchema,id)]); if(!result.rowCount) throw new TenantAccessDeniedError(); return {deleted:true};
+  async deleteReview(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const result = await this.database.pool.query(
+      `UPDATE product_reviews SET deleted_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL`,
+      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
+    );
+    if (!result.rowCount) throw new TenantAccessDeniedError();
+    return { deleted: true };
   }
 
   @Get('brands')
@@ -1510,8 +1565,47 @@ export class InventoryController {
 
   @Get('locations')
   async locations(@Req() request: Request) {
-    const ctx = resolveRequestContext(request); requirePermission(ctx, 'inventory.read');
-    return (await this.database.pool.query(`SELECT id, name, code FROM locations WHERE organization_id=$1 AND deleted_at IS NULL ORDER BY name`, [ctx.organizationId])).rows;
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'inventory.read');
+    return (
+      await this.database.pool.query(
+        `SELECT id, name, code FROM locations WHERE organization_id=$1 AND deleted_at IS NULL ORDER BY name`,
+        [ctx.organizationId]
+      )
+    ).rows;
+  }
+
+  @Get('layout')
+  async layout(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'inventory.read');
+    const [warehouses, zones, bins] = await Promise.all([
+      this.database.pool.query(
+        `SELECT id, location_id AS "locationId", code, name, active, version
+         FROM warehouses
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY code, name`,
+        [ctx.organizationId]
+      ),
+      this.database.pool.query(
+        `SELECT id, warehouse_id AS "warehouseId", code, name,
+                display_order AS "displayOrder", active, version
+         FROM warehouse_zones
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY warehouse_id, display_order, code, name`,
+        [ctx.organizationId]
+      ),
+      this.database.pool.query(
+        `SELECT id, zone_id AS "zoneId", code, name, capacity,
+                low_stock_threshold AS "lowStockThreshold", display_order AS "displayOrder",
+                active, status, version
+         FROM warehouse_bins
+         WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY zone_id, display_order, code, name`,
+        [ctx.organizationId]
+      )
+    ]);
+    return { warehouses: warehouses.rows, zones: zones.rows, bins: bins.rows };
   }
 
   @Post('items')
@@ -1523,6 +1617,8 @@ export class InventoryController {
         variantId: uuidSchema,
         serialNumber: z.string().nullable().optional(),
         locationId: uuidSchema.nullable().optional(),
+        zoneId: uuidSchema.nullable().optional(),
+        binId: uuidSchema.nullable().optional(),
         status: z.string().optional()
       }),
       body
@@ -1544,7 +1640,9 @@ export class InventoryController {
         payload: {
           inventoryItemId: item.id,
           variantId: item.variantId,
-          locationId: item.currentLocationId
+          locationId: item.currentLocationId,
+          ...(item.currentZoneId ? { zoneId: item.currentZoneId } : {}),
+          ...(item.currentBinId ? { binId: item.currentBinId } : {})
         }
       });
       return item;
@@ -1560,6 +1658,8 @@ export class InventoryController {
         variantId: uuidSchema,
         inventoryItemId: uuidSchema.nullable().optional(),
         locationId: uuidSchema,
+        zoneId: uuidSchema.nullable().optional(),
+        binId: uuidSchema.nullable().optional(),
         quantityDelta: z.coerce.number().int(),
         sourceType: z.string().trim().min(1),
         sourceId: uuidSchema.nullable().optional(),
@@ -1585,6 +1685,8 @@ export class InventoryController {
         payload: {
           variantId: input.variantId,
           locationId: input.locationId,
+          ...(input.zoneId ? { zoneId: input.zoneId } : {}),
+          ...(input.binId ? { binId: input.binId } : {}),
           quantityDelta: input.quantityDelta,
           quantity: balance.quantity
         }
