@@ -42,19 +42,23 @@ The first published YRM100 release uses this metadata:
   "name": "YRM100 RFID Reader",
   "vendor": "YRM",
   "kind": "rfid_reader",
-  "version": "2024.5.26",
+  "version": "2024.5.28",
   "summary": "YRM100 RFID reader SDK and Windows driver package.",
   "description": "Verified YRM100 SDK bundle with Windows CP210x driver, desktop demo files, Android examples, and reference material.",
   "models": ["YRM100"],
   "platforms": ["win32", "android"],
   "capabilities": ["serial", "usb", "esp32_wifi"],
-  "packageSizeBytes": 76440095,
-  "packageChecksumSha256": "b052ff9bbc4ffa69384382c8e50e5c44f19670f57d6c95d69be3a591f1988654"
+  "packageSizeBytes": 76531295,
+  "packageChecksumSha256": "8285b35081ed350694706f3a4073069ebda730a4df3927b99982696f9c5f3bf3"
 }
 ```
 
 The licensed YRM100 ZIP is stored in R2 rather than source control. The Devices >
 Plugins panel in RFIDDaja shows this release and retains the verified unpacked copy
-locally after installation. The `2024.5.26` release keeps every vendor SDK file but
+locally after installation. The `2024.5.28` release keeps every vendor SDK file but
 normalizes their paths and supplies `index.json`, because the original archive uses
-long paths and characters that the desktop installer rightly rejects.
+long paths and characters that the desktop installer rightly rejects. It also adds
+`driver-profile.json`: the desktop loads its checksummed `runtime/yrm100-reader.cjs`
+from the installed, enabled plugin for YRM100 serial and ESP32 connections. The
+profile points to the CP210x pre-installer; it is launched only after an explicit
+user action in the app.

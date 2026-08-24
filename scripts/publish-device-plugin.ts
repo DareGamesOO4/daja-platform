@@ -154,7 +154,7 @@ async function main(): Promise<void> {
         JSON.stringify(baseline.platforms),
         JSON.stringify(baseline.capabilities),
         baseline.min_app_version,
-        'Repacked vendor SDK with safe, short archive paths for the desktop installer.',
+        'Repacked vendor SDK with safe paths, validated YRM100 runtime profile, and explicit Windows driver installer.',
         storageKey,
         archive.size,
         checksum,
