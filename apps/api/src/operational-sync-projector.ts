@@ -122,6 +122,10 @@ function slug(value: string, suffix: string): string {
   return `${base || 'artikal'}-${suffix.slice(0, 8)}`;
 }
 
+function generatedSku(variantId: string): string {
+  return `ARTIKAL-${variantId.replace(/-/g, '').toUpperCase()}`;
+}
+
 function catalogSlug(value: string, fallbackId: string): string {
   const normalized = value
     .toLowerCase()
@@ -1105,16 +1109,17 @@ export class OperationalSyncProjector {
     entityIds: Record<string, unknown> | undefined
   ): Promise<Record<string, unknown>> {
     const input = command.payload;
-    const sku = text(input, 'sku');
+    const requestedSku = text(input, 'sku');
     const name = text(input, 'name');
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
     const variantId =
       command.kind === 'item.create' ? event.aggregateId : (text(input, 'id') ?? event.aggregateId);
     if (command.kind === 'item.create') {
-      if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
+      if (!name || priceRsd === undefined || priceRsd < 0) {
         throw new ValidationFailedError('Desktop item create command is incomplete');
       }
+      const sku = requestedSku ?? generatedSku(variantId);
       const productId =
         text(input, 'productId') ??
         (entityIds === undefined ? undefined : text(entityIds, 'productId'));
@@ -1212,8 +1217,10 @@ export class OperationalSyncProjector {
       version: string;
       product_slug: string;
       product_name: string;
+      variant_sku: string;
     }>(
-      `SELECT variant.product_id, variant.version::text, product.slug AS product_slug, product.name AS product_name
+      `SELECT variant.product_id, variant.version::text, product.slug AS product_slug, product.name AS product_name,
+              variant.sku AS variant_sku
        FROM product_variants variant
        JOIN products product
          ON product.organization_id = variant.organization_id AND product.id = variant.product_id
@@ -1251,7 +1258,8 @@ export class OperationalSyncProjector {
       );
       return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
     }
-    if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
+    const sku = requestedSku ?? row.variant_sku;
+    if (!name || priceRsd === undefined || priceRsd < 0) {
       throw new ValidationFailedError('Desktop item update command is incomplete');
     }
     const nextSlug =
