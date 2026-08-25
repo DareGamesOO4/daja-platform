@@ -38,6 +38,8 @@ export const syncAggregateTypeSchema = z.enum([
   'warehouse',
   'warehouse_zone',
   'category',
+  'catalog_brand',
+  'catalog_specification',
   'supplier',
   'warehouse_bin',
   'app_setting',

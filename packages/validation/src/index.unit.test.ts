@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ValidationFailedError } from '@daja/security';
-import { normalizeEpc } from './index.js';
+import { normalizeEpc, syncAggregateTypeSchema } from './index.js';
 
 describe('normalizeEpc', () => {
   it('stores a canonical EPC after removing a prefix, separators and casing', () => {
@@ -11,6 +11,15 @@ describe('normalizeEpc', () => {
     'rejects malformed EPC %j',
     (value) => {
       expect(() => normalizeEpc(value)).toThrow(ValidationFailedError);
+    }
+  );
+});
+
+describe('syncAggregateTypeSchema', () => {
+  it.each(['catalog_brand', 'catalog_specification'])(
+    'accepts desktop catalog aggregate %s',
+    (aggregateType) => {
+      expect(syncAggregateTypeSchema.parse(aggregateType)).toBe(aggregateType);
     }
   );
 });
