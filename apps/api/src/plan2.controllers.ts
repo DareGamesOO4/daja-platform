@@ -1292,7 +1292,7 @@ export class StaffCatalogController {
     }
     const products = await this.database.pool.query<{ id: string; slug: string }>(
       `SELECT id, slug FROM products
-       WHERE organization_id = $1 AND slug = ANY($2::text[])`,
+       WHERE organization_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
       [organizationId, validSlugs]
     );
     const productIdBySlug = new Map(products.rows.map((product) => [product.slug, product.id]));
