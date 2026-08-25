@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { InventoryRepository, SyncRepository, type SyncPushEvent } from '@daja/database';
-import { ValidationFailedError } from '@daja/security';
+import { requirePermission, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
@@ -34,6 +34,11 @@ type InventoryCommand = {
 };
 
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
+type CatalogBrandCommand = { kind: 'catalog.brand.create'; payload: Record<string, unknown> };
+type CatalogSpecificationCommand = {
+  kind: 'catalog.specification.create';
+  payload: Record<string, unknown>;
+};
 
 type DesktopCommand =
   | ItemCommand
@@ -43,7 +48,9 @@ type DesktopCommand =
   | WarehouseZoneCommand
   | WarehouseBinCommand
   | InventoryCommand
-  | SettingsCommand;
+  | SettingsCommand
+  | CatalogBrandCommand
+  | CatalogSpecificationCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -96,6 +103,24 @@ function slug(value: string, suffix: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 140);
   return `${base || 'artikal'}-${suffix.slice(0, 8)}`;
+}
+
+function catalogSlug(value: string, fallbackId: string): string {
+  const normalized = value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+  return normalized || `item-${fallbackId.slice(0, 8)}`;
+}
+
+function uuid(value: string | undefined): value is string {
+  return (
+    value !== undefined &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
 }
 
 /**
@@ -164,6 +189,20 @@ export class OperationalSyncProjector {
     if (kind === 'inventory.event' || kind === 'inventory.relocate') {
       const snapshot = await this.inventory(ctx, {
         kind,
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'catalog.brand.create') {
+      const snapshot = await this.catalogBrand(ctx, event, {
+        kind: 'catalog.brand.create',
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'catalog.specification.create') {
+      const snapshot = await this.catalogSpecification(ctx, event, {
+        kind: 'catalog.specification.create',
         payload: commandPayload
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
@@ -607,7 +646,8 @@ export class OperationalSyncProjector {
         [ctx.organizationId, binId, locationId]
       );
       const zoneId = result.rows[0]?.zoneId;
-      if (!zoneId) throw new ValidationFailedError('Desktop inventory shelf does not belong to location');
+      if (!zoneId)
+        throw new ValidationFailedError('Desktop inventory shelf does not belong to location');
       return { zoneId, binId };
     };
     const adjust = async (locationId: string, binId: string | undefined, quantityDelta: number) => {
@@ -629,20 +669,28 @@ export class OperationalSyncProjector {
       // deliberately does not change the quantity for that operation.
     } else if (command.kind === 'inventory.relocate' || eventType === 'relocation') {
       if (!sourceLocationId || !destinationLocationId) {
-        throw new ValidationFailedError('Desktop inventory relocation requires source and destination');
+        throw new ValidationFailedError(
+          'Desktop inventory relocation requires source and destination'
+        );
       }
       await adjust(sourceLocationId, sourceBinId, -amount);
       await adjust(destinationLocationId, destinationBinId, amount);
     } else {
       if (['sale', 'transfer_out', 'count_missing', 'tag_retirement'].includes(eventType ?? '')) {
-        if (!sourceLocationId) throw new ValidationFailedError('Desktop inventory command requires a source location');
+        if (!sourceLocationId)
+          throw new ValidationFailedError('Desktop inventory command requires a source location');
         await adjust(sourceLocationId, sourceBinId, -amount);
       } else if (eventType === 'adjustment' && quantity < 0) {
-        if (!sourceLocationId) throw new ValidationFailedError('Desktop inventory adjustment requires a source location');
+        if (!sourceLocationId)
+          throw new ValidationFailedError(
+            'Desktop inventory adjustment requires a source location'
+          );
         await adjust(sourceLocationId, sourceBinId, -amount);
       } else {
         if (!destinationLocationId) {
-          throw new ValidationFailedError('Desktop inventory command requires a destination location');
+          throw new ValidationFailedError(
+            'Desktop inventory command requires a destination location'
+          );
         }
         await adjust(destinationLocationId, destinationBinId, amount);
       }
@@ -654,7 +702,8 @@ export class OperationalSyncProjector {
       [ctx.organizationId, variantId]
     );
     const productId = variant.rows[0]?.productId;
-    if (!productId) throw new ValidationFailedError('Desktop inventory variant does not exist on Platform');
+    if (!productId)
+      throw new ValidationFailedError('Desktop inventory variant does not exist on Platform');
     return this.catalogSnapshot(ctx.organizationId, productId, variantId);
   }
 
@@ -674,6 +723,95 @@ export class OperationalSyncProjector {
       if (!conflict.rows[0]) return code;
     }
     throw new ValidationFailedError('Unable to assign a unique warehouse code');
+  }
+
+  private async catalogBrand(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: CatalogBrandCommand
+  ): Promise<Record<string, unknown>> {
+    requirePermission(ctx, 'catalog.write');
+    const name = text(command.payload, 'name');
+    const requestedDepartmentId = text(command.payload, 'departmentId');
+    if (!name || name.length > 240 || !uuid(requestedDepartmentId)) {
+      throw new ValidationFailedError('Desktop brand command is incomplete');
+    }
+    const departmentId = await this.resolveDepartmentId(ctx.organizationId, command.payload);
+    if (!departmentId) {
+      throw new ValidationFailedError('Selected brand department is not active');
+    }
+    const result = await this.client.query<{
+      id: string;
+      name: string;
+      departmentId: string;
+    }>(
+      `INSERT INTO brands (id, organization_id, name, slug, department_id, active)
+       VALUES ($1, $2, $3, $4, $5, true)
+       ON CONFLICT (id) DO UPDATE
+       SET name = EXCLUDED.name, slug = EXCLUDED.slug, department_id = EXCLUDED.department_id,
+           active = true, deleted_at = NULL, version = brands.version + 1, updated_at = now()
+       RETURNING id, name, department_id AS "departmentId"`,
+      [
+        event.aggregateId,
+        ctx.organizationId,
+        name,
+        catalogSlug(name, event.aggregateId),
+        departmentId
+      ]
+    );
+    if (!result.rows[0]) throw new ValidationFailedError('Desktop brand could not be saved');
+    return { kind: 'catalog.brand', brand: result.rows[0] };
+  }
+
+  private async catalogSpecification(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: CatalogSpecificationCommand
+  ): Promise<Record<string, unknown>> {
+    requirePermission(ctx, 'catalog.write');
+    const name = text(command.payload, 'name');
+    const requestedDepartmentId = text(command.payload, 'departmentId');
+    const rawUnit = command.payload.unit;
+    const unit = typeof rawUnit === 'string' ? rawUnit.trim() : undefined;
+    if (
+      !name ||
+      name.length > 240 ||
+      !uuid(requestedDepartmentId) ||
+      (rawUnit !== undefined && typeof rawUnit !== 'string') ||
+      (unit !== undefined && unit.length > 80)
+    ) {
+      throw new ValidationFailedError('Desktop specification command is incomplete');
+    }
+    const departmentId = await this.resolveDepartmentId(ctx.organizationId, command.payload);
+    if (!departmentId) {
+      throw new ValidationFailedError('Selected specification department is not active');
+    }
+    const result = await this.client.query<{
+      id: string;
+      key: string;
+      name: string;
+      departmentId: string;
+      unit: string | null;
+    }>(
+      `INSERT INTO spec_keys (id, organization_id, name, slug, department_id, unit, data_type, active)
+       VALUES ($1, $2, $3, $4, $5, $6, 'text', true)
+       ON CONFLICT (id) DO UPDATE
+       SET name = EXCLUDED.name, slug = EXCLUDED.slug, department_id = EXCLUDED.department_id,
+           unit = EXCLUDED.unit, data_type = 'text', active = true, deleted_at = NULL,
+           version = spec_keys.version + 1, updated_at = now()
+       RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
+      [
+        event.aggregateId,
+        ctx.organizationId,
+        name,
+        catalogSlug(name, event.aggregateId),
+        departmentId,
+        unit || null
+      ]
+    );
+    if (!result.rows[0])
+      throw new ValidationFailedError('Desktop specification could not be saved');
+    return { kind: 'catalog.specification', specification: result.rows[0] };
   }
 
   private async settings(
@@ -945,7 +1083,8 @@ export class OperationalSyncProjector {
   ): Promise<Record<string, unknown>> {
     const rawEpc = text(command.payload, 'epc');
     const variantId = text(command.payload, 'productVariantId');
-    if (!rawEpc || !variantId) throw new ValidationFailedError('Desktop RFID command is incomplete');
+    if (!rawEpc || !variantId)
+      throw new ValidationFailedError('Desktop RFID command is incomplete');
     const epc = normalizeEpc(rawEpc);
     const locationId = text(command.payload, 'locationId');
     const binId = text(command.payload, 'binId');
@@ -996,7 +1135,8 @@ export class OperationalSyncProjector {
       [ctx.organizationId, variantId]
     );
     const productId = variant.rows[0]?.productId;
-    if (!productId) throw new ValidationFailedError('Desktop RFID variant does not exist on Platform');
+    if (!productId)
+      throw new ValidationFailedError('Desktop RFID variant does not exist on Platform');
     return this.catalogSnapshot(ctx.organizationId, productId, variantId);
   }
 
