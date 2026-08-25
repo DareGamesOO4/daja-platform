@@ -223,6 +223,17 @@ export class StaffCatalogController {
     private readonly realtime: RealtimeGateway
   ) {}
 
+  private publishCatalogTaxonomy(
+    organizationId: string,
+    collection: 'departments' | 'brands' | 'categories' | 'spec_keys'
+  ): void {
+    this.realtime.publish({
+      organizationId,
+      event: 'catalog.taxonomy.updated',
+      payload: { collections: [collection] }
+    });
+  }
+
   @Get('departments')
   async listDepartments(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
@@ -241,20 +252,20 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(departmentSchema, body);
-    return (
-      await this.database.pool.query(
-        `INSERT INTO departments (organization_id, name, slug, sort_order, active)
+    const result = await this.database.pool.query(
+      `INSERT INTO departments (organization_id, name, slug, sort_order, active)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, name, slug, sort_order AS "sortOrder", active`,
-        [
-          ctx.organizationId,
-          input.name,
-          input.slug ?? slugifyLocal(input.name),
-          input.sortOrder ?? 0,
-          input.active ?? true
-        ]
-      )
-    ).rows[0];
+      [
+        ctx.organizationId,
+        input.name,
+        input.slug ?? slugifyLocal(input.name),
+        input.sortOrder ?? 0,
+        input.active ?? true
+      ]
+    );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'departments');
+    return result.rows[0];
   }
 
   @Patch('departments/:id')
@@ -278,6 +289,7 @@ export class StaffCatalogController {
       ]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    this.publishCatalogTaxonomy(ctx.organizationId, 'departments');
     return result.rows[0];
   }
 
@@ -910,6 +922,7 @@ export class StaffCatalogController {
         input.active ?? true
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return result.rows[0];
   }
 
@@ -942,6 +955,7 @@ export class StaffCatalogController {
         input.active ?? row.active
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return result.rows[0];
   }
 
@@ -965,6 +979,7 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
+    this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return { deleted: true };
   }
 
@@ -1009,6 +1024,7 @@ export class StaffCatalogController {
         input.active ?? true
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'categories');
     return result.rows[0];
   }
 
@@ -1051,6 +1067,7 @@ export class StaffCatalogController {
         input.active ?? row.active
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'categories');
     return result.rows[0];
   }
 
@@ -1074,6 +1091,7 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
+    this.publishCatalogTaxonomy(ctx.organizationId, 'categories');
     return { deleted: true };
   }
 
@@ -1113,6 +1131,7 @@ export class StaffCatalogController {
         input.active ?? true
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return result.rows[0];
   }
 
@@ -1150,6 +1169,7 @@ export class StaffCatalogController {
         input.active ?? row.active
       ]
     );
+    this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return result.rows[0];
   }
 
@@ -1166,6 +1186,7 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
+    this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return { deleted: true };
   }
 

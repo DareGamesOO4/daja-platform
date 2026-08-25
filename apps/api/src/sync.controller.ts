@@ -125,6 +125,26 @@ export class SyncController {
       const kind = (envelope.command as Record<string, unknown>).kind;
       return typeof kind === 'string' ? kind : undefined;
     };
+    const catalogCollectionByCommand: Readonly<Record<string, string>> = {
+      'catalog.brand.create': 'brands',
+      'catalog.specification.create': 'spec_keys'
+    };
+    const changedCollections = Array.from(
+      new Set(
+        events.flatMap((event) => {
+          if (!appliedEventIds.has(event.eventId)) return [];
+          const collection = catalogCollectionByCommand[commandKind(event.payload) ?? ''];
+          return collection ? [collection] : [];
+        })
+      )
+    );
+    if (changedCollections.length > 0) {
+      this.realtime.publish({
+        organizationId,
+        event: 'catalog.taxonomy.updated',
+        payload: { collections: changedCollections }
+      });
+    }
     const deletedVariantIds = new Set(
       events
         .filter(

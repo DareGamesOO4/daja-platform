@@ -15,6 +15,7 @@ import { CONFIG } from './tokens.js';
 
 type RealtimeEvent =
   | 'product.updated'
+  | 'catalog.taxonomy.updated'
   | 'price.changed'
   | 'media.ready'
   | 'inventory.changed'
@@ -27,6 +28,7 @@ type RealtimeEvent =
 
 const allowedEvents: RealtimeEvent[] = [
   'product.updated',
+  'catalog.taxonomy.updated',
   'price.changed',
   'media.ready',
   'inventory.changed',
