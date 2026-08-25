@@ -1005,6 +1005,36 @@ export class OperationalSyncProjector {
       }
       return { kind: 'catalog.specification', specification: updated.rows[0] };
     }
+    const specificationSlug = catalogSlug(name, specificationId);
+    const existing = await this.client.query<{
+      id: string;
+      key: string;
+      name: string;
+      departmentId: string;
+      unit: string | null;
+    }>(
+      `SELECT id, slug AS key, name, department_id AS "departmentId", unit
+       FROM spec_keys
+       WHERE organization_id = $1 AND deleted_at IS NULL
+         AND (id = $2 OR slug = $3)
+       ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END
+       LIMIT 1`,
+      [ctx.organizationId, specificationId, specificationSlug]
+    );
+    if (existing.rows[0]) {
+      const specification = existing.rows[0];
+      // The website and a temporarily-offline desktop can create the same
+      // logical specification independently. The active slug is unique per
+      // organization, so acknowledge the desktop command with the canonical
+      // server item instead of leaking a PostgreSQL unique-index error as 500.
+      return {
+        kind: 'catalog.specification',
+        specification,
+        ...(specification.id !== specificationId
+          ? { replaceSpecificationId: specificationId }
+          : {})
+      };
+    }
     const result = await this.client.query<{
       id: string;
       key: string;
@@ -1023,7 +1053,7 @@ export class OperationalSyncProjector {
         specificationId,
         ctx.organizationId,
         name,
-        catalogSlug(name, specificationId),
+        specificationSlug,
         departmentId,
         unit || null
       ]
