@@ -88,6 +88,23 @@ export class SyncRepository {
       businessCommandId?: string | undefined;
     }
   ): Promise<SyncEventRecord> {
+    // A website action can publish the same catalog snapshot twice (for
+    // example, attaching a first image and then confirming it as primary).
+    // Server-side events are intentionally keyed by snapshot content, so an
+    // identical event is a successful no-op rather than a database error.
+    if (input.idempotencyKey) {
+      const existing = await this.client.query<SyncEventRow>(
+        `SELECT id, schema_version, revision, organization_id, location_id, device_id, user_id,
+                aggregate_type, aggregate_id, operation, payload, payload_version, base_version,
+                client_timestamp, server_timestamp, idempotency_key, device_sequence, base_payload,
+                offline_package_id, baseline_revision, correlation_id, business_command_id
+         FROM server_sync_events
+         WHERE organization_id = $1 AND idempotency_key = $2
+         LIMIT 1`,
+        [ctx.organizationId, input.idempotencyKey]
+      );
+      if (existing.rowCount === 1) return mapSyncEvent(requireRow(existing));
+    }
     await this.ensureRevisionRow(ctx.organizationId);
     const next = await this.client.query<{ revision: string }>(
       `UPDATE organization_revisions
