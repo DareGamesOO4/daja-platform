@@ -349,10 +349,34 @@ export class StaffCatalogController {
       async (client) => {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
-        const after = await repository.patchProduct(ctx, productId, input);
-        return { beforeSlug: before.slug, after };
+        // A name edit should also update the public URL even for an older
+        // client that does not send a slug explicitly.
+        const after = await repository.patchProduct(ctx, productId, {
+          ...input,
+          ...(input.name !== undefined && input.slug === undefined
+            ? { slug: slugifyLocal(input.name) }
+            : {})
+        });
+        const relocated = await new MediaRepository(client).relocateProductMedia(
+          ctx,
+          { productId, previousSlug: before.slug, nextSlug: after.slug },
+          () => new R2MediaStorageAdapter(this.config)
+        );
+        return { beforeSlug: before.slug, after, staleMediaKeys: relocated.sourceKeys };
       }
     );
+    if (patched.staleMediaKeys.length) {
+      try {
+        await new MediaRepository(this.database.pool).deleteStorageObjects(
+          new R2MediaStorageAdapter(this.config),
+          patched.staleMediaKeys
+        );
+      } catch (error) {
+        // The new keys and DB references are already committed. Leaving an
+        // old R2 copy is safe and preferable to breaking a saved product.
+        this.logger.warn({ err: error, productId }, 'Could not delete old product media keys');
+      }
+    }
     // Audit/outbox/sync must never prevent a catalog administrator from
     // saving a product. They run after the committed catalog change and are
     // retried by their respective workers when infrastructure is available.

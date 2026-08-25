@@ -7,6 +7,7 @@ import type { AppConfig } from '@daja/config';
 import {
   AuditRepository,
   DeviceRepository,
+  MediaRepository,
   OutboxRepository,
   R2MediaStorageAdapter,
   type RedisConnection,
@@ -92,13 +93,34 @@ export class SyncController {
         aggregateId: input.events[0]!.aggregateId,
         payload: { results }
       });
-      return { results, transactionSemantics: 'ordered-per-event' };
+      return {
+        results,
+        transactionSemantics: 'ordered-per-event',
+        staleMediaKeys: projector.takeStaleMediaKeys()
+      };
     });
+    await this.cleanupRelocatedMedia(result.staleMediaKeys);
     // A desktop-originated catalog change bypasses the staff catalog HTTP
     // controller, so invalidate its public cache and notify open storefronts
     // only after the transaction has committed.
     await this.publishCatalogChanges(ctx.organizationId, input.events, result.results);
     return result;
+  }
+
+  private async cleanupRelocatedMedia(keys: Iterable<string>): Promise<void> {
+    const uniqueKeys = [...new Set(keys)];
+    if (!uniqueKeys.length) return;
+    try {
+      await new MediaRepository(this.database.pool).deleteStorageObjects(
+        new R2MediaStorageAdapter(this.config),
+        uniqueKeys
+      );
+    } catch (error) {
+      // New keys are already committed in the catalog. Preserve those working
+      // image URLs if cleanup is temporarily unavailable and retry on a later
+      // maintenance pass instead of failing the desktop sync.
+      this.logger.warn({ err: error, keys: uniqueKeys.length }, 'Could not delete old product media keys');
+    }
   }
 
   private async publishCatalogChanges(
@@ -268,8 +290,13 @@ export class SyncController {
       if (!conflict) throw new Error('Konflikt nije pronađen ili je već razrešen.');
 
       let appliedEvent: { eventId: string; status: string } | undefined;
+      let staleMediaKeys: string[] = [];
       if (input.strategy === 'local') {
         const eventId = randomUUID();
+        const projector = new OperationalSyncProjector(
+          client,
+          new R2MediaStorageAdapter(this.config)
+        );
         const results = await sync.pushBatch(
           ctx,
           [{
@@ -283,12 +310,9 @@ export class SyncController {
             clientTimestamp: new Date().toISOString(),
             payload: conflict.clientPayload
           }],
-          (event) =>
-            new OperationalSyncProjector(client, new R2MediaStorageAdapter(this.config)).materialize(
-              ctx,
-              event
-            )
+          (event) => projector.materialize(ctx, event)
         );
+        staleMediaKeys = projector.takeStaleMediaKeys();
         appliedEvent = results[0];
         if (!appliedEvent || appliedEvent.status !== 'applied') {
           throw new Error('Platform verzija se promenila. Osvežite konflikt pa pokušajte ponovo.');
@@ -313,9 +337,11 @@ export class SyncController {
         strategy: input.strategy,
         appliedEventId: appliedEvent?.eventId,
         aggregateType: conflict.aggregateType,
-        aggregateId: conflict.aggregateId
+        aggregateId: conflict.aggregateId,
+        staleMediaKeys
       };
     });
+    await this.cleanupRelocatedMedia(result.staleMediaKeys);
     if (input.strategy === 'local' && result.aggregateType === 'product_variant' && result.appliedEventId) {
       await this.publishCatalogChanges(ctx.organizationId, [{
         eventId: result.appliedEventId,

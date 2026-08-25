@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -36,6 +37,7 @@ export interface MediaStorageAdapter {
     sizeBytes?: number;
     metadata?: Record<string, string>;
   }): Promise<void>;
+  copyObject(sourceKey: string, destinationKey: string): Promise<void>;
   deleteObject(key: string): Promise<void>;
   bucket(): string;
   publicUrl(key: string): string | null;
@@ -151,6 +153,19 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         ...(input.cacheControl ? { CacheControl: input.cacheControl } : {}),
         ...(input.sizeBytes === undefined ? {} : { ContentLength: input.sizeBytes }),
         ...(input.metadata === undefined ? {} : { Metadata: input.metadata })
+      })
+    );
+  }
+
+  async copyObject(sourceKey: string, destinationKey: string): Promise<void> {
+    if (sourceKey === destinationKey) return;
+    await this.client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucketName,
+        Key: destinationKey,
+        // CopySource is a URL path. Encode each key while keeping the path
+        // separators so R2 copies an object from the same bucket safely.
+        CopySource: `${this.bucketName}/${encodeURIComponent(sourceKey).replace(/%2F/g, '/')}`
       })
     );
   }
@@ -331,6 +346,116 @@ export class MediaRepository {
   }
 
   /**
+   * R2 has object keys rather than real folders. When a product slug changes,
+   * copy each linked R2 asset and derivative under the new readable prefix and
+   * update the canonical DB references in the active transaction. The caller
+   * deletes the old keys only after that transaction commits.
+   */
+  async relocateProductMedia(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    input: { productId: string; previousSlug: string; nextSlug: string },
+    createStorage: () => MediaStorageAdapter
+  ): Promise<{ sourceKeys: string[] }> {
+    if (input.previousSlug === input.nextSlug) return { sourceKeys: [] };
+
+    const assets = await this.client.query<{
+      mediaId: string;
+      storageKey: string;
+      mimeType: string;
+      position: number;
+    }>(
+      `SELECT DISTINCT ON (asset.id)
+         asset.id AS "mediaId", asset.storage_key AS "storageKey", asset.mime_type AS "mimeType", link.position
+       FROM product_media link
+       JOIN media_assets asset ON asset.id = link.media_asset_id
+       WHERE link.organization_id = $1 AND link.product_id = $2
+         AND asset.organization_id = $1 AND asset.storage_provider = 'r2' AND asset.deleted_at IS NULL
+       ORDER BY asset.id, link.position ASC`,
+      [ctx.organizationId, input.productId]
+    );
+    if (!assets.rowCount) return { sourceKeys: [] };
+
+    const storage = createStorage();
+    const copiedKeys = new Set<string>();
+    const sourceKeys = new Set<string>();
+    try {
+      for (const asset of assets.rows) {
+        const originalKey = productMediaStorageKey({
+          organizationId: ctx.organizationId,
+          mediaId: asset.mediaId,
+          productSlug: input.nextSlug,
+          imageIndex: Math.max(1, Number(asset.position) + 1),
+          extension: extensionFromStorageKey(asset.storageKey, asset.mimeType)
+        });
+        const derivatives = await this.client.query<{
+          id: string;
+          width: number;
+          storageKey: string;
+        }>(
+          `SELECT id, width, storage_key AS "storageKey"
+           FROM media_derivatives
+           WHERE organization_id = $1 AND media_asset_id = $2`,
+          [ctx.organizationId, asset.mediaId]
+        );
+
+        if (asset.storageKey !== originalKey) {
+          await storage.copyObject(asset.storageKey, originalKey);
+          copiedKeys.add(originalKey);
+          sourceKeys.add(asset.storageKey);
+        }
+        await this.client.query(
+          `UPDATE media_assets
+           SET storage_key = $3, public_url = $4,
+               metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{productSlug}', to_jsonb($5::text), true),
+               version = version + 1, updated_at = now()
+           WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+          [
+            ctx.organizationId,
+            asset.mediaId,
+            originalKey,
+            storage.publicUrl(originalKey),
+            input.nextSlug
+          ]
+        );
+
+        for (const derivative of derivatives.rows) {
+          const derivativeKey = productMediaThumbnailStorageKey({
+            originalKey,
+            organizationId: ctx.organizationId,
+            mediaId: asset.mediaId,
+            width: Number(derivative.width)
+          });
+          if (derivative.storageKey !== derivativeKey) {
+            await storage.copyObject(derivative.storageKey, derivativeKey);
+            copiedKeys.add(derivativeKey);
+            sourceKeys.add(derivative.storageKey);
+          }
+          await this.client.query(
+            `UPDATE media_derivatives
+             SET storage_key = $4, public_url = $5
+             WHERE organization_id = $1 AND id = $2 AND media_asset_id = $3`,
+            [
+              ctx.organizationId,
+              derivative.id,
+              asset.mediaId,
+              derivativeKey,
+              requiredPublicUrl(storage, derivativeKey)
+            ]
+          );
+        }
+      }
+      return { sourceKeys: [...sourceKeys] };
+    } catch (error) {
+      await Promise.allSettled([...copiedKeys].map((key) => storage.deleteObject(key)));
+      throw error;
+    }
+  }
+
+  async deleteStorageObjects(storage: MediaStorageAdapter, keys: Iterable<string>): Promise<void> {
+    for (const key of new Set(keys)) await storage.deleteObject(key);
+  }
+
+  /**
    * Removes an uploaded asset only when nothing in the catalog still refers to it.
    * The R2 deletes are deliberately performed before the database tombstone: an
    * intermittent storage error leaves the asset available for a later retry
@@ -441,6 +566,17 @@ function extensionForMime(mimeType: string): string {
     default:
       return '';
   }
+}
+
+function extensionFromStorageKey(storageKey: string, mimeType: string): string {
+  const extension = storageKey.match(/(\.[a-z0-9]{1,10})$/i)?.[1];
+  return extension?.toLowerCase() ?? extensionForMime(mimeType);
+}
+
+function requiredPublicUrl(storage: MediaStorageAdapter, key: string): string {
+  const publicUrl = storage.publicUrl(key);
+  if (!publicUrl) throw new ValidationFailedError('A public media URL is required for product media');
+  return publicUrl;
 }
 
 export function productMediaStorageKey(input: {

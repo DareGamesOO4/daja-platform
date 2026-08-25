@@ -147,10 +147,18 @@ function uuid(value: string | undefined): value is string {
  * local command.
  */
 export class OperationalSyncProjector {
+  private readonly staleMediaKeys = new Set<string>();
+
   constructor(
     private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>,
     private readonly mediaStorage?: MediaStorageAdapter
   ) {}
+
+  takeStaleMediaKeys(): string[] {
+    const keys = [...this.staleMediaKeys];
+    this.staleMediaKeys.clear();
+    return keys;
+  }
 
   async materialize(ctx: RequestContext, event: SyncPushEvent): Promise<SyncPushEvent> {
     const envelope = record(event.payload);
@@ -1169,9 +1177,18 @@ export class OperationalSyncProjector {
       return this.catalogSnapshot(ctx.organizationId, resolvedProductId, variantId);
     }
 
-    const current = await this.client.query<{ product_id: string; version: string }>(
-      `SELECT product_id, version::text FROM product_variants
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+    const current = await this.client.query<{
+      product_id: string;
+      version: string;
+      product_slug: string;
+      product_name: string;
+    }>(
+      `SELECT variant.product_id, variant.version::text, product.slug AS product_slug, product.name AS product_name
+       FROM product_variants variant
+       JOIN products product
+         ON product.organization_id = variant.organization_id AND product.id = variant.product_id
+       WHERE variant.organization_id = $1 AND variant.id = $2 AND variant.deleted_at IS NULL
+       FOR UPDATE`,
       [ctx.organizationId, variantId]
     );
     const row = current.rows[0];
@@ -1207,6 +1224,8 @@ export class OperationalSyncProjector {
     if (!sku || !name || priceRsd === undefined || priceRsd < 0) {
       throw new ValidationFailedError('Desktop item update command is incomplete');
     }
+    const nextSlug =
+      text(input, 'slug') ?? (row.product_name !== name ? slug(name, variantId) : row.product_slug);
     const categoryId = text(input, 'categoryId');
     const validCategory = categoryId
       ? await this.client.query<{ id: string }>(
@@ -1242,7 +1261,7 @@ export class OperationalSyncProjector {
         ctx.organizationId,
         row.product_id,
         name,
-        text(input, 'slug') ?? null,
+        nextSlug,
         text(input, 'description') ?? null,
         brand?.rows[0]?.id ?? null,
         validCategory?.rows[0]?.id ?? null,
@@ -1285,6 +1304,14 @@ export class OperationalSyncProjector {
     );
     await this.addCatalogPrices(ctx, variantId, input, currency);
     await this.setImages(ctx.organizationId, row.product_id, input);
+    if (row.product_slug !== nextSlug && this.mediaStorage) {
+      const relocated = await new MediaRepository(this.client).relocateProductMedia(
+        ctx,
+        { productId: row.product_id, previousSlug: row.product_slug, nextSlug },
+        () => this.mediaStorage!
+      );
+      relocated.sourceKeys.forEach((key) => this.staleMediaKeys.add(key));
+    }
     return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
   }
 
