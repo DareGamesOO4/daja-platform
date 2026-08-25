@@ -97,10 +97,15 @@ export function parseWithSchema<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 
 export function normalizeEpc(input: string): string {
-  const epc = input.replace(/[\s:._-]/g, '').toUpperCase();
-  if (!/^[0-9A-F]{8,64}$/.test(epc)) {
+  const epc = input
+    .trim()
+    .replace(/^0x/i, '')
+    .replace(/[\s:._-]/g, '')
+    .toUpperCase();
+  if (!/^[0-9A-F]{8,64}$/.test(epc) || epc.length % 2 !== 0) {
     throw new ValidationFailedError('Malformed EPC', {
-      policy: 'EPC must be 8-64 hexadecimal characters after removing spaces and separators'
+      policy:
+        'EPC must be 8-64 hexadecimal characters with an even length after removing the 0x prefix, spaces and separators'
     });
   }
   return epc;

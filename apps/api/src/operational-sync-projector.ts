@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { InventoryRepository, SyncRepository, type SyncPushEvent } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
+import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
 
 type ItemCommand = {
@@ -942,9 +943,10 @@ export class OperationalSyncProjector {
     event: SyncPushEvent,
     command: TagCommand
   ): Promise<Record<string, unknown>> {
-    const epc = text(command.payload, 'epc');
+    const rawEpc = text(command.payload, 'epc');
     const variantId = text(command.payload, 'productVariantId');
-    if (!epc || !variantId) throw new ValidationFailedError('Desktop RFID command is incomplete');
+    if (!rawEpc || !variantId) throw new ValidationFailedError('Desktop RFID command is incomplete');
+    const epc = normalizeEpc(rawEpc);
     const locationId = text(command.payload, 'locationId');
     const binId = text(command.payload, 'binId');
     await this.client.query(
