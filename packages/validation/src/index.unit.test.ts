@@ -16,7 +16,7 @@ describe('normalizeEpc', () => {
 });
 
 describe('syncAggregateTypeSchema', () => {
-  it.each(['catalog_brand', 'catalog_specification'])(
+  it.each(['catalog_brand', 'catalog_category', 'catalog_specification'])(
     'accepts desktop catalog aggregate %s',
     (aggregateType) => {
       expect(syncAggregateTypeSchema.parse(aggregateType)).toBe(aggregateType);

@@ -127,7 +127,14 @@ export class SyncController {
     };
     const catalogCollectionByCommand: Readonly<Record<string, string>> = {
       'catalog.brand.create': 'brands',
-      'catalog.specification.create': 'spec_keys'
+      'catalog.brand.update': 'brands',
+      'catalog.brand.delete': 'brands',
+      'catalog.category.create': 'categories',
+      'catalog.category.update': 'categories',
+      'catalog.category.delete': 'categories',
+      'catalog.specification.create': 'spec_keys',
+      'catalog.specification.update': 'spec_keys',
+      'catalog.specification.delete': 'spec_keys'
     };
     const changedCollections = Array.from(
       new Set(

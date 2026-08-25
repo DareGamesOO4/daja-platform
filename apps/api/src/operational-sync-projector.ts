@@ -34,9 +34,19 @@ type InventoryCommand = {
 };
 
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
-type CatalogBrandCommand = { kind: 'catalog.brand.create'; payload: Record<string, unknown> };
+type CatalogBrandCommand = {
+  kind: 'catalog.brand.create' | 'catalog.brand.update' | 'catalog.brand.delete';
+  payload: Record<string, unknown>;
+};
+type CatalogCategoryCommand = {
+  kind: 'catalog.category.create' | 'catalog.category.update' | 'catalog.category.delete';
+  payload: Record<string, unknown>;
+};
 type CatalogSpecificationCommand = {
-  kind: 'catalog.specification.create';
+  kind:
+    | 'catalog.specification.create'
+    | 'catalog.specification.update'
+    | 'catalog.specification.delete';
   payload: Record<string, unknown>;
 };
 
@@ -50,6 +60,7 @@ type DesktopCommand =
   | InventoryCommand
   | SettingsCommand
   | CatalogBrandCommand
+  | CatalogCategoryCommand
   | CatalogSpecificationCommand;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -193,16 +204,35 @@ export class OperationalSyncProjector {
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
-    if (kind === 'catalog.brand.create') {
+    if (
+      kind === 'catalog.brand.create' ||
+      kind === 'catalog.brand.update' ||
+      kind === 'catalog.brand.delete'
+    ) {
       const snapshot = await this.catalogBrand(ctx, event, {
-        kind: 'catalog.brand.create',
+        kind,
         payload: commandPayload
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
-    if (kind === 'catalog.specification.create') {
+    if (
+      kind === 'catalog.category.create' ||
+      kind === 'catalog.category.update' ||
+      kind === 'catalog.category.delete'
+    ) {
+      const snapshot = await this.catalogCategory(ctx, event, {
+        kind,
+        payload: commandPayload
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (
+      kind === 'catalog.specification.create' ||
+      kind === 'catalog.specification.update' ||
+      kind === 'catalog.specification.delete'
+    ) {
       const snapshot = await this.catalogSpecification(ctx, event, {
-        kind: 'catalog.specification.create',
+        kind,
         payload: commandPayload
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
@@ -731,6 +761,33 @@ export class OperationalSyncProjector {
     command: CatalogBrandCommand
   ): Promise<Record<string, unknown>> {
     requirePermission(ctx, 'catalog.write');
+    const brandId =
+      command.kind === 'catalog.brand.delete'
+        ? text(command.payload, 'brandId') ?? event.aggregateId
+        : text(command.payload, 'id') ?? event.aggregateId;
+    if (brandId !== event.aggregateId) {
+      throw new ValidationFailedError('Desktop brand identity does not match sync aggregate');
+    }
+    if (command.kind === 'catalog.brand.delete') {
+      const used = await this.client.query(
+        `SELECT 1 FROM products
+         WHERE organization_id = $1 AND brand_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        [ctx.organizationId, brandId]
+      );
+      if (used.rowCount) {
+        throw new ValidationFailedError('Brand cannot be deleted while products still use it');
+      }
+      const deleted = await this.client.query(
+        `UPDATE brands
+         SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, brandId]
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ValidationFailedError('Desktop brand does not exist on Platform');
+      }
+      return { kind: 'catalog.brand', id: brandId, deleted: true };
+    }
     const name = text(command.payload, 'name');
     const requestedDepartmentId = text(command.payload, 'departmentId');
     if (!name || name.length > 240 || !uuid(requestedDepartmentId)) {
@@ -739,6 +796,22 @@ export class OperationalSyncProjector {
     const departmentId = await this.resolveDepartmentId(ctx.organizationId, command.payload);
     if (!departmentId) {
       throw new ValidationFailedError('Selected brand department is not active');
+    }
+    if (command.kind === 'catalog.brand.update') {
+      const updated = await this.client.query<{
+        id: string;
+        name: string;
+        departmentId: string;
+      }>(
+        `UPDATE brands
+         SET name = $3, slug = $4, department_id = $5, active = true, deleted_at = NULL,
+             version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         RETURNING id, name, department_id AS "departmentId"`,
+        [ctx.organizationId, brandId, name, catalogSlug(name, brandId), departmentId]
+      );
+      if (!updated.rows[0]) throw new ValidationFailedError('Desktop brand does not exist on Platform');
+      return { kind: 'catalog.brand', brand: updated.rows[0] };
     }
     const result = await this.client.query<{
       id: string;
@@ -752,15 +825,105 @@ export class OperationalSyncProjector {
            active = true, deleted_at = NULL, version = brands.version + 1, updated_at = now()
        RETURNING id, name, department_id AS "departmentId"`,
       [
-        event.aggregateId,
+        brandId,
         ctx.organizationId,
         name,
-        catalogSlug(name, event.aggregateId),
+        catalogSlug(name, brandId),
         departmentId
       ]
     );
     if (!result.rows[0]) throw new ValidationFailedError('Desktop brand could not be saved');
     return { kind: 'catalog.brand', brand: result.rows[0] };
+  }
+
+  private async catalogCategory(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: CatalogCategoryCommand
+  ): Promise<Record<string, unknown>> {
+    requirePermission(ctx, 'catalog.write');
+    const categoryId =
+      command.kind === 'catalog.category.delete'
+        ? text(command.payload, 'categoryId') ?? event.aggregateId
+        : text(command.payload, 'id') ?? event.aggregateId;
+    if (categoryId !== event.aggregateId) {
+      throw new ValidationFailedError('Desktop category identity does not match sync aggregate');
+    }
+    if (command.kind === 'catalog.category.delete') {
+      const used = await this.client.query(
+        `SELECT 1 FROM products
+         WHERE organization_id = $1 AND primary_category_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        [ctx.organizationId, categoryId]
+      );
+      if (used.rowCount) {
+        throw new ValidationFailedError('Category cannot be deleted while products still use it');
+      }
+      const deleted = await this.client.query(
+        `UPDATE categories
+         SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, categoryId]
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ValidationFailedError('Desktop category does not exist on Platform');
+      }
+      return { kind: 'catalog.category', id: categoryId, deleted: true };
+    }
+    const name = text(command.payload, 'name');
+    const requestedDepartmentId = text(command.payload, 'departmentId');
+    const brandId = text(command.payload, 'brandId');
+    if (!name || name.length > 240 || !uuid(requestedDepartmentId) || !uuid(brandId)) {
+      throw new ValidationFailedError('Desktop category command is incomplete');
+    }
+    const departmentId = await this.resolveDepartmentId(ctx.organizationId, command.payload);
+    if (!departmentId) {
+      throw new ValidationFailedError('Selected category department is not active');
+    }
+    const brand = await this.client.query(
+      `SELECT 1 FROM brands
+       WHERE organization_id = $1 AND id = $2 AND department_id = $3
+         AND active AND deleted_at IS NULL`,
+      [ctx.organizationId, brandId, departmentId]
+    );
+    if (!brand.rowCount) {
+      throw new ValidationFailedError('Selected category brand is not active in this department');
+    }
+    if (command.kind === 'catalog.category.update') {
+      const updated = await this.client.query<{
+        id: string;
+        name: string;
+        departmentId: string;
+        brandId: string;
+      }>(
+        `UPDATE categories
+         SET name = $3, slug = $4, department_id = $5, brand_id = $6, active = true,
+             deleted_at = NULL, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         RETURNING id, name, department_id AS "departmentId", brand_id AS "brandId"`,
+        [ctx.organizationId, categoryId, name, catalogSlug(name, categoryId), departmentId, brandId]
+      );
+      if (!updated.rows[0]) {
+        throw new ValidationFailedError('Desktop category does not exist on Platform');
+      }
+      return { kind: 'catalog.category', category: updated.rows[0] };
+    }
+    const created = await this.client.query<{
+      id: string;
+      name: string;
+      departmentId: string;
+      brandId: string;
+    }>(
+      `INSERT INTO categories (id, organization_id, parent_id, department_id, brand_id, name, slug, sort_order, active)
+       VALUES ($1, $2, NULL, $3, $4, $5, $6, 0, true)
+       ON CONFLICT (id) DO UPDATE
+       SET name = EXCLUDED.name, slug = EXCLUDED.slug, department_id = EXCLUDED.department_id,
+           brand_id = EXCLUDED.brand_id, active = true, deleted_at = NULL,
+           version = categories.version + 1, updated_at = now()
+       RETURNING id, name, department_id AS "departmentId", brand_id AS "brandId"`,
+      [categoryId, ctx.organizationId, departmentId, brandId, name, catalogSlug(name, categoryId)]
+    );
+    if (!created.rows[0]) throw new ValidationFailedError('Desktop category could not be saved');
+    return { kind: 'catalog.category', category: created.rows[0] };
   }
 
   private async catalogSpecification(
@@ -769,6 +932,25 @@ export class OperationalSyncProjector {
     command: CatalogSpecificationCommand
   ): Promise<Record<string, unknown>> {
     requirePermission(ctx, 'catalog.write');
+    const specificationId =
+      command.kind === 'catalog.specification.delete'
+        ? text(command.payload, 'specificationId') ?? event.aggregateId
+        : text(command.payload, 'id') ?? event.aggregateId;
+    if (specificationId !== event.aggregateId) {
+      throw new ValidationFailedError('Desktop specification identity does not match sync aggregate');
+    }
+    if (command.kind === 'catalog.specification.delete') {
+      const deleted = await this.client.query(
+        `UPDATE spec_keys
+         SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, specificationId]
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ValidationFailedError('Desktop specification does not exist on Platform');
+      }
+      return { kind: 'catalog.specification', id: specificationId, deleted: true };
+    }
     const name = text(command.payload, 'name');
     const requestedDepartmentId = text(command.payload, 'departmentId');
     const rawUnit = command.payload.unit;
@@ -786,6 +968,26 @@ export class OperationalSyncProjector {
     if (!departmentId) {
       throw new ValidationFailedError('Selected specification department is not active');
     }
+    if (command.kind === 'catalog.specification.update') {
+      const updated = await this.client.query<{
+        id: string;
+        key: string;
+        name: string;
+        departmentId: string;
+        unit: string | null;
+      }>(
+        `UPDATE spec_keys
+         SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = 'text', active = true,
+             deleted_at = NULL, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
+        [ctx.organizationId, specificationId, name, catalogSlug(name, specificationId), departmentId, unit || null]
+      );
+      if (!updated.rows[0]) {
+        throw new ValidationFailedError('Desktop specification does not exist on Platform');
+      }
+      return { kind: 'catalog.specification', specification: updated.rows[0] };
+    }
     const result = await this.client.query<{
       id: string;
       key: string;
@@ -801,10 +1003,10 @@ export class OperationalSyncProjector {
            version = spec_keys.version + 1, updated_at = now()
        RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
       [
-        event.aggregateId,
+        specificationId,
         ctx.organizationId,
         name,
-        catalogSlug(name, event.aggregateId),
+        catalogSlug(name, specificationId),
         departmentId,
         unit || null
       ]
