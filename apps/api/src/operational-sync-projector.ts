@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { InventoryRepository, SyncRepository, type SyncPushEvent } from '@daja/database';
+import {
+  InventoryRepository,
+  MediaRepository,
+  SyncRepository,
+  type MediaStorageAdapter,
+  type SyncPushEvent
+} from '@daja/database';
 import { requirePermission, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
@@ -141,7 +147,10 @@ function uuid(value: string | undefined): value is string {
  * local command.
  */
 export class OperationalSyncProjector {
-  constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
+  constructor(
+    private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>,
+    private readonly mediaStorage?: MediaStorageAdapter
+  ) {}
 
   async materialize(ctx: RequestContext, event: SyncPushEvent): Promise<SyncPushEvent> {
     const envelope = record(event.payload);
@@ -1168,6 +1177,7 @@ export class OperationalSyncProjector {
     const row = current.rows[0];
     if (!row) throw new ValidationFailedError('Desktop item does not exist on Platform');
     if (command.kind === 'item.delete') {
+      await this.removeProductMedia(ctx.organizationId, row.product_id);
       await this.client.query(
         `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
          version = version + 1, updated_at = now()
@@ -1405,16 +1415,48 @@ export class OperationalSyncProjector {
     productId: string,
     input: Record<string, unknown>
   ): Promise<void> {
+    const hasImageInput = Array.isArray(input.imageUris) || Object.hasOwn(input, 'imageUri');
+    if (!hasImageInput) return;
     const fromPayload = Array.isArray(input.imageUris)
       ? input.imageUris.filter((value): value is string => typeof value === 'string')
       : [];
     const imageUris = fromPayload.length
       ? fromPayload
       : [text(input, 'imageUri')].filter((value): value is string => value !== undefined);
+    const mediaIds: string[] = [];
     let position = 0;
     for (const imageUri of imageUris) {
       if (!/^https?:\/\//i.test(imageUri)) continue;
-      await this.setImage(organizationId, productId, imageUri, position++);
+      const mediaId = await this.setImage(organizationId, productId, imageUri, position++);
+      if (mediaId && !mediaIds.includes(mediaId)) mediaIds.push(mediaId);
+    }
+    const existing = await this.client.query<{ id: string; media_asset_id: string }>(
+      `SELECT id, media_asset_id FROM product_media
+       WHERE organization_id = $1 AND product_id = $2`,
+      [organizationId, productId]
+    );
+    const stale = existing.rows.filter((row) => !mediaIds.includes(row.media_asset_id));
+    if (stale.length) {
+      await this.client.query(
+        `DELETE FROM product_media
+         WHERE organization_id = $1 AND product_id = $2 AND id = ANY($3::uuid[])`,
+        [organizationId, productId, stale.map((row) => row.id)]
+      );
+      for (const mediaId of new Set(stale.map((row) => row.media_asset_id))) {
+        await this.discardMedia(organizationId, mediaId);
+      }
+    }
+    await this.client.query(
+      `UPDATE product_media SET is_primary = false
+       WHERE organization_id = $1 AND product_id = $2`,
+      [organizationId, productId]
+    );
+    for (const [index, mediaId] of mediaIds.entries()) {
+      await this.client.query(
+        `UPDATE product_media SET position = $4, is_primary = $5
+         WHERE organization_id = $1 AND product_id = $2 AND media_asset_id = $3`,
+        [organizationId, productId, mediaId, index, index === 0]
+      );
     }
   }
 
@@ -1423,7 +1465,7 @@ export class OperationalSyncProjector {
     productId: string,
     imageUri: string,
     position: number
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     // The RFID desktop app first imports a linked image through /media/external.
     // Reuse that R2 asset (and its 512px derivative) when the later catalog
     // sync event arrives. Older clients may still send arbitrary external URLs,
@@ -1449,7 +1491,7 @@ export class OperationalSyncProjector {
       );
       mediaId = media.rows[0]?.id;
     }
-    if (!mediaId) return;
+    if (!mediaId) return undefined;
     await this.client.query(
       `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2 AND $3 = 0`,
       [organizationId, productId, position]
@@ -1459,6 +1501,28 @@ export class OperationalSyncProjector {
        SELECT $1, $2, $3, 'gallery', $4, $5
        WHERE NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id = $1 AND product_id = $2 AND media_asset_id = $3)`,
       [organizationId, productId, mediaId, position, position === 0]
+    );
+    return mediaId;
+  }
+
+  private async removeProductMedia(organizationId: string, productId: string): Promise<void> {
+    const removed = await this.client.query<{ media_asset_id: string }>(
+      `DELETE FROM product_media
+       WHERE organization_id = $1 AND product_id = $2
+       RETURNING media_asset_id`,
+      [organizationId, productId]
+    );
+    for (const mediaId of new Set(removed.rows.map((row) => row.media_asset_id))) {
+      await this.discardMedia(organizationId, mediaId);
+    }
+  }
+
+  private async discardMedia(organizationId: string, mediaId: string): Promise<void> {
+    if (!this.mediaStorage) return;
+    await new MediaRepository(this.client).discardUnreferenced(
+      { organizationId },
+      mediaId,
+      this.mediaStorage
     );
   }
 

@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { QueueEvents, Worker, type Job, type JobsOptions } from 'bullmq';
 import type { Redis } from 'ioredis';
 import sharp from 'sharp';
@@ -229,14 +229,15 @@ async function processMediaJob(
         checksumSha256: sha256(output.data)
       });
     }
-    await tx.run(async (pgClient) => {
-      await new MediaRepository(pgClient).markReady({
+    const markedReady = await tx.run(async (pgClient) => {
+      const ready = await new MediaRepository(pgClient).markReady({
         organizationId,
         mediaId,
         width: sourceWidth,
         height: sourceHeight,
         derivatives
       });
+      if (!ready) return false;
       await new OutboxRepository(pgClient).append({
         ctx: { organizationId },
         eventType: 'MediaReady',
@@ -247,7 +248,15 @@ async function processMediaJob(
           derivatives: derivatives.map((item) => ({ width: item.width, publicUrl: item.publicUrl }))
         }
       });
+      return true;
     });
+    if (!markedReady) {
+      await Promise.all(
+        derivatives.map((derivative) =>
+          client.send(new DeleteObjectCommand({ Bucket: config.R2_BUCKET, Key: derivative.storageKey }))
+        )
+      );
+    }
   } catch (error) {
     await tx.run((pgClient) =>
       new MediaRepository(pgClient).markFailed(

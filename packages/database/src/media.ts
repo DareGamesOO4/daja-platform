@@ -287,13 +287,17 @@ export class MediaRepository {
       sizeBytes: number;
       checksumSha256?: string;
     }>;
-  }): Promise<void> {
-    await this.client.query(
+  }): Promise<boolean> {
+    const updated = await this.client.query<{ id: string }>(
       `UPDATE media_assets
        SET status = 'ready', width = $3, height = $4, version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2`,
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING id`,
       [input.organizationId, input.mediaId, input.width, input.height]
     );
+    // A user may remove an image while the worker is generating thumbnails.
+    // Do not recreate derivative metadata for an asset already discarded.
+    if (updated.rowCount !== 1) return false;
     for (const derivative of input.derivatives) {
       await this.client.query(
         `INSERT INTO media_derivatives (organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes, checksum_sha256)
@@ -314,15 +318,60 @@ export class MediaRepository {
         ]
       );
     }
+    return true;
   }
 
   async markFailed(organizationId: string, mediaId: string, reason: string): Promise<void> {
     await this.client.query(
       `UPDATE media_assets
        SET status = 'failed', metadata = metadata || $3::jsonb, version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2`,
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [organizationId, mediaId, JSON.stringify({ failureReason: reason })]
     );
+  }
+
+  /**
+   * Removes an uploaded asset only when nothing in the catalog still refers to it.
+   * The R2 deletes are deliberately performed before the database tombstone: an
+   * intermittent storage error leaves the asset available for a later retry
+   * instead of making an undeletable orphan invisible to the application.
+   */
+  async discardUnreferenced(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    mediaId: string,
+    storage: MediaStorageAdapter
+  ): Promise<{ deleted: boolean }> {
+    const asset = await this.getForUpdate(ctx, mediaId);
+    const references = await this.client.query<{ referenced: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM product_media WHERE organization_id = $1 AND media_asset_id = $2
+         UNION ALL
+         SELECT 1 FROM brands WHERE organization_id = $1 AND logo_media_id = $2 AND deleted_at IS NULL
+       ) AS referenced`,
+      [ctx.organizationId, mediaId]
+    );
+    if (references.rows[0]?.referenced) return { deleted: false };
+
+    const derivatives = await this.client.query<{ storage_key: string }>(
+      `SELECT storage_key FROM media_derivatives
+       WHERE organization_id = $1 AND media_asset_id = $2`,
+      [ctx.organizationId, mediaId]
+    );
+    if (asset.storage_provider === 'r2') {
+      const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key)]);
+      for (const key of keys) await storage.deleteObject(key);
+    }
+    await this.client.query(
+      `DELETE FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2`,
+      [ctx.organizationId, mediaId]
+    );
+    await this.client.query(
+      `UPDATE media_assets
+       SET status = 'deleted', deleted_at = now(), version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, mediaId]
+    );
+    return { deleted: true };
   }
 
   private async getForUpdate(
@@ -344,6 +393,7 @@ export class MediaRepository {
 export interface MediaAssetRow {
   id: string;
   organization_id: string;
+  storage_provider: string;
   storage_bucket: string;
   storage_key: string;
   public_url: string | null;
@@ -401,7 +451,10 @@ export function productMediaStorageKey(input: {
   extension: string;
 }): string {
   if (input.productSlug && input.imageIndex) {
-    return `${input.productSlug}/${input.productSlug}-${input.imageIndex}${input.extension}`;
+    // The human-readable folder stays stable, but the object itself must be
+    // unique. Otherwise an async delete of a replaced image can erase a newer
+    // upload that reused the same product/index path.
+    return `${input.productSlug}/${input.productSlug}-${input.imageIndex}-${input.mediaId}${input.extension}`;
   }
   return `org/${input.organizationId}/media/${input.mediaId}/original${input.extension}`;
 }

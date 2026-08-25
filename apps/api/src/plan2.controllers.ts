@@ -423,6 +423,17 @@ export class StaffCatalogController {
            WHERE organization_id = $1 AND product_id = $2 AND deleted_at IS NULL`,
           [ctx.organizationId, productId]
         );
+        const media = await client.query<{ media_asset_id: string }>(
+          `DELETE FROM product_media
+           WHERE organization_id = $1 AND product_id = $2
+           RETURNING media_asset_id`,
+          [ctx.organizationId, productId]
+        );
+        const mediaRepository = new MediaRepository(client);
+        const storage = new R2MediaStorageAdapter(this.config);
+        for (const mediaId of new Set(media.rows.map((item) => item.media_asset_id))) {
+          await mediaRepository.discardUnreferenced(ctx, mediaId, storage);
+        }
         await repository.softDeleteProduct(ctx, productId);
         await new AuditRepository(client).append({
           ctx,
@@ -787,11 +798,23 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, productIdParam);
+    const linkId = parseWithSchema(uuidSchema, mediaLinkIdParam);
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
-    const result = await this.database.pool.query(
-      `DELETE FROM product_media WHERE organization_id = $1 AND product_id = $2 AND id = $3`,
-      [ctx.organizationId, productId, parseWithSchema(uuidSchema, mediaLinkIdParam)]
-    );
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const deleted = await client.query<{ media_asset_id: string }>(
+        `DELETE FROM product_media
+         WHERE organization_id = $1 AND product_id = $2 AND id = $3
+         RETURNING media_asset_id`,
+        [ctx.organizationId, productId, linkId]
+      );
+      if (deleted.rowCount !== 1) throw new TenantAccessDeniedError();
+      await new MediaRepository(client).discardUnreferenced(
+        ctx,
+        deleted.rows[0]!.media_asset_id,
+        new R2MediaStorageAdapter(this.config)
+      );
+      return deleted;
+    });
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
@@ -1391,6 +1414,17 @@ export class MediaController {
       await queue.close();
     }
     return result;
+  }
+
+  /** Deletes a completed or pending upload that was never attached to a product. */
+  @Delete('uploads/:mediaId')
+  async discardUpload(@Req() request: Request, @Param('mediaId') mediaId: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'media.upload');
+    const id = parseWithSchema(uuidSchema, mediaId);
+    return new TransactionManager(this.database.pool, this.logger).run((client) =>
+      new MediaRepository(client).discardUnreferenced(ctx, id, new R2MediaStorageAdapter(this.config))
+    );
   }
 }
 

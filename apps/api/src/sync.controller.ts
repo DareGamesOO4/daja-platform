@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { z } from 'zod';
+import type { AppConfig } from '@daja/config';
 import {
   AuditRepository,
   DeviceRepository,
   OutboxRepository,
+  R2MediaStorageAdapter,
   type RedisConnection,
   SyncRepository,
   TransactionManager,
@@ -15,7 +17,7 @@ import {
 import type { Logger } from '@daja/observability';
 import { requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
-import { DATABASE, LOGGER, REDIS } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -66,6 +68,7 @@ export class SyncController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection,
+    @Inject(CONFIG) private readonly config: AppConfig,
     private readonly realtime: RealtimeGateway
   ) {}
 
@@ -78,7 +81,7 @@ export class SyncController {
       if (ctx.deviceId) {
         await new DeviceRepository(client).assertActiveDevice(ctx.organizationId, ctx.deviceId);
       }
-      const projector = new OperationalSyncProjector(client);
+      const projector = new OperationalSyncProjector(client, new R2MediaStorageAdapter(this.config));
       const results = await new SyncRepository(client).pushBatch(ctx, input.events, (event) =>
         projector.materialize(ctx, event)
       );
@@ -280,7 +283,11 @@ export class SyncController {
             clientTimestamp: new Date().toISOString(),
             payload: conflict.clientPayload
           }],
-          (event) => new OperationalSyncProjector(client).materialize(ctx, event)
+          (event) =>
+            new OperationalSyncProjector(client, new R2MediaStorageAdapter(this.config)).materialize(
+              ctx,
+              event
+            )
         );
         appliedEvent = results[0];
         if (!appliedEvent || appliedEvent.status !== 'applied') {
