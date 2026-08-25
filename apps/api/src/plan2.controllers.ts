@@ -1178,7 +1178,7 @@ export class StaffCatalogController {
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
-              v.id AS "variantId", v.current_price_amount AS "currentPriceAmount", v.currency,
+              v.id AS "variantId", v.sku, v.barcode, v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
