@@ -426,13 +426,14 @@ export class SyncRepository {
     // The product editor submits one complete catalog form. A normal desktop
     // item save is therefore a deliberate last-save-wins edit, including its
     // selected gender, and must not become a false conflict merely because a
-    // website create/update completed moments before it. Destructive deletes
-    // remain version-protected below.
+    // website create/update completed moments before it. An explicit desktop
+    // delete is intentional as well: it must remove the article instead of
+    // leaving a stale copy behind because its local revision was older.
     const command = event.payload.command;
     if (
       typeof command === 'object' &&
       command !== null &&
-      String((command as Record<string, unknown>).kind) === 'item.update'
+      ['item.update', 'item.delete'].includes(String((command as Record<string, unknown>).kind))
     ) {
       return null;
     }

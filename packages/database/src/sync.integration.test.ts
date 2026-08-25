@@ -82,6 +82,31 @@ describe('plan 3 sync foundation', () => {
     expect(conflicts).toHaveLength(1);
   });
 
+  it('accepts an explicit desktop item delete even with a stale base version', async () => {
+    const product = await database.query<{ id: string }>(
+      `INSERT INTO products (organization_id, name, slug, published, version)
+       VALUES ($1, 'Delete Product', 'delete-product', true, 4)
+       RETURNING id`,
+      [organizationId]
+    );
+    const variant = await database.query<{ id: string }>(
+      `INSERT INTO product_variants (organization_id, product_id, sku, current_price_amount, currency, published, version)
+       VALUES ($1, $2, 'DELETE-1', 1000, 'RSD', true, 4)
+       RETURNING id`,
+      [organizationId, product.rows[0]!.id]
+    );
+
+    const result = await new SyncRepository(database.pool).pushBatch(ctx, [{
+      ...event('sync-delete-stale-1', variant.rows[0]!.id, {
+        command: { kind: 'item.delete', payload: {} }
+      }),
+      aggregateType: 'product_variant',
+      baseVersion: 1
+    }]);
+
+    expect(result[0]?.status).toBe('applied');
+  });
+
   it('creates device identity and bootstrap snapshot watermark', async () => {
     const device = await new DeviceRepository(database.pool).registerDevice(ctx, {
       deviceKey: 'rfiddaja-device-1',
