@@ -18,6 +18,11 @@ type ItemCommand = {
 
 type TagCommand = { kind: 'tag.assign'; payload: Record<string, unknown> };
 
+// PostgreSQL stores catalog amounts in integer cents. Validate before the
+// conversion so a malformed desktop value becomes a clear sync validation
+// error instead of a generic database/server error.
+const MAX_PRICE_RSD = Math.floor(2_147_483_647 / 100);
+
 type LocationCommand = { kind: 'location.upsert'; payload: Record<string, unknown> };
 
 type LocationLayoutCommand = {
@@ -1123,7 +1128,7 @@ export class OperationalSyncProjector {
     const variantId =
       command.kind === 'item.create' ? event.aggregateId : (text(input, 'id') ?? event.aggregateId);
     if (command.kind === 'item.create') {
-      if (!name || priceRsd === undefined || priceRsd < 0) {
+      if (!name || priceRsd === undefined || priceRsd < 0 || priceRsd > MAX_PRICE_RSD) {
         throw new ValidationFailedError('Desktop item create command is incomplete');
       }
       const sku = requestedSku ?? null;
@@ -1283,7 +1288,7 @@ export class OperationalSyncProjector {
       return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
     }
     const sku = requestedSku === undefined ? row.variant_sku : requestedSku;
-    if (!name || priceRsd === undefined || priceRsd < 0) {
+    if (!name || priceRsd === undefined || priceRsd < 0 || priceRsd > MAX_PRICE_RSD) {
       throw new ValidationFailedError('Desktop item update command is incomplete');
     }
     const nextSlug =
@@ -1621,7 +1626,7 @@ export class OperationalSyncProjector {
     variantId: string
   ): Promise<Record<string, unknown>> {
     const result = await this.client.query(
-      `SELECT p.id AS "productId", p.name AS "productName", p.slug, p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
+      `SELECT p.id AS "productId", p.external_id AS "externalId", p.name AS "productName", p.slug, p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
               p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
