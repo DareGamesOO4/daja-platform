@@ -61,18 +61,16 @@ type CatalogSpecificationCommand = {
   payload: Record<string, unknown>;
 };
 
-type DesktopCommand =
-  | ItemCommand
-  | TagCommand
-  | LocationCommand
-  | LocationLayoutCommand
-  | WarehouseZoneCommand
-  | WarehouseBinCommand
-  | InventoryCommand
-  | SettingsCommand
-  | CatalogBrandCommand
-  | CatalogCategoryCommand
-  | CatalogSpecificationCommand;
+type RfidCycleCountSnapshot = {
+  readonly kind: 'rfid.cycle_count';
+  readonly protocolVersion: 1;
+  readonly operation: 'create' | 'expected_batch' | 'read_batch' | 'state' | 'results';
+  readonly count: Record<string, unknown>;
+  readonly expectedItems?: readonly Record<string, unknown>[];
+  readonly reads?: readonly Record<string, unknown>[];
+  readonly results?: readonly Record<string, unknown>[];
+  readonly action?: 'start' | 'pause' | 'resume' | 'review' | 'complete' | 'cancel' | 'claim' | undefined;
+};
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -111,6 +109,11 @@ function integer(input: Record<string, unknown>, key: string): number | undefine
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
 }
 
+function decimal(input: Record<string, unknown>, key: string): number | undefined {
+  const value = input[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function records(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => record(item) !== undefined)
@@ -118,7 +121,8 @@ function records(value: unknown): Record<string, unknown>[] {
 }
 
 function boolean(input: Record<string, unknown>, key: string, fallback: boolean): boolean {
-  return typeof input[key] === 'boolean' ? (input[key] as boolean) : fallback;
+  const value = input[key];
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 function slug(value: string, suffix: string): string {
@@ -172,6 +176,11 @@ export class OperationalSyncProjector {
 
   async materialize(ctx: RequestContext, event: SyncPushEvent): Promise<SyncPushEvent> {
     const envelope = record(event.payload);
+    const operationalSnapshot = record(envelope?.operationalSnapshot);
+    if (operationalSnapshot?.kind === 'rfid.cycle_count') {
+      const snapshot = await this.rfidCycleCount(ctx, event, operationalSnapshot);
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
     const command = record(envelope?.command);
     const kind = command?.kind;
     const commandPayload = record(command?.payload);
@@ -281,6 +290,416 @@ export class OperationalSyncProjector {
     // Existing generic events remain compatible. They deliberately stay event
     // log entries until their server domain model has a matching projector.
     return event;
+  }
+
+  /**
+   * Persist the complete RFID count protocol instead of replaying a desktop
+   * command on another machine. Every row is organization and location
+   * scoped; read packets are merged by (count, EPC), so retries and an
+   * interrupted connection cannot create duplicate observations.
+   */
+  private async rfidCycleCount(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    requirePermission(ctx, 'rfid_counts.sync');
+    const protocolVersion = integer(input, 'protocolVersion');
+    const operation = text(input, 'operation');
+    const count = record(input.count);
+    if (
+      protocolVersion !== 1 ||
+      !count ||
+      !['create', 'expected_batch', 'read_batch', 'state', 'results'].includes(operation ?? '')
+    ) {
+      throw new ValidationFailedError('Invalid RFID cycle count sync payload');
+    }
+    const countId = text(count, 'id') ?? event.aggregateId;
+    const locationId = text(count, 'locationId');
+    if (!countId || countId !== event.aggregateId || !locationId) {
+      throw new ValidationFailedError('RFID cycle count identity or location is missing');
+    }
+    const location = await this.client.query<{ id: string }>(
+      `SELECT id FROM locations WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, locationId]
+    );
+    if (!location.rows[0]) {
+      throw new ValidationFailedError('RFID cycle count location is outside the organization');
+    }
+    if (event.locationId && event.locationId !== locationId) {
+      throw new ValidationFailedError('RFID cycle count event location does not match its payload');
+    }
+    if (ctx.locationId && ctx.locationId !== locationId) {
+      throw new ValidationFailedError('RFID cycle count is outside the active location scope');
+    }
+    const snapshot: RfidCycleCountSnapshot = {
+      kind: 'rfid.cycle_count',
+      protocolVersion: 1,
+      operation: operation as RfidCycleCountSnapshot['operation'],
+      count,
+      ...(Array.isArray(input.expectedItems) ? { expectedItems: records(input.expectedItems) } : {}),
+      ...(Array.isArray(input.reads) ? { reads: records(input.reads) } : {}),
+      ...(Array.isArray(input.results) ? { results: records(input.results) } : {}),
+      ...(text(input, 'action') ? { action: text(input, 'action') as RfidCycleCountSnapshot['action'] } : {})
+    };
+
+    if (snapshot.operation === 'create') {
+      await this.upsertRfidCycleCount(ctx, countId, count, true);
+    } else {
+      const existing = await this.client.query<{
+        id: string;
+        ownerDeviceId: string | null;
+        status: string;
+        version: string;
+      }>(
+        `SELECT id, owner_device_id AS "ownerDeviceId", status, version::text AS version
+         FROM rfid_cycle_counts
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, countId]
+      );
+      if (!existing.rows[0]) {
+        throw new ValidationFailedError('RFID cycle count has not been created in cloud yet');
+      }
+      if (snapshot.operation === 'state') {
+        await this.applyRfidCycleCountState(ctx, countId, count, snapshot.action, existing.rows[0]);
+      } else if (existing.rows[0].ownerDeviceId && existing.rows[0].ownerDeviceId !== ctx.deviceId) {
+        throw new ValidationFailedError('RFID cycle count is owned by another desktop device');
+      }
+    }
+
+    if (snapshot.operation === 'expected_batch') {
+      await this.upsertRfidExpectedItems(ctx, countId, snapshot.expectedItems ?? []);
+    }
+    if (snapshot.operation === 'read_batch') {
+      await this.upsertRfidReads(ctx, countId, snapshot.reads ?? []);
+    }
+    if (snapshot.operation === 'results') {
+      await this.upsertRfidResults(ctx, countId, snapshot.results ?? []);
+      await this.updateRfidCycleTotals(ctx.organizationId, countId);
+    }
+
+    const canonical = await this.client.query<{
+      id: string;
+      locationId: string;
+      warehouseId: string | null;
+      zoneId: string | null;
+      binId: string | null;
+      name: string;
+      status: string;
+      expectedTotal: number;
+      readTotal: number;
+      foundTotal: number;
+      missingTotal: number;
+      unexpectedTotal: number;
+      startedAt: Date | null;
+      completedAt: Date | null;
+      createdByUserId: string;
+      ownerDeviceId: string | null;
+      ownerState: string;
+      version: string;
+      createdAt: Date;
+      updatedAt: Date;
+    }>(
+      `SELECT id, location_id AS "locationId", warehouse_id AS "warehouseId", zone_id AS "zoneId",
+              bin_id AS "binId", name, status, expected_total AS "expectedTotal",
+              read_total AS "readTotal", found_total AS "foundTotal", missing_total AS "missingTotal",
+              unexpected_total AS "unexpectedTotal", started_at AS "startedAt", completed_at AS "completedAt",
+              created_by_user_id AS "createdByUserId", owner_device_id AS "ownerDeviceId",
+              owner_state AS "ownerState", version::text AS version,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM rfid_cycle_counts WHERE organization_id = $1 AND id = $2`,
+      [ctx.organizationId, countId]
+    );
+    const header = canonical.rows[0];
+    if (!header) throw new ValidationFailedError('RFID cycle count could not be materialized');
+    return {
+      kind: 'rfid.cycle_count',
+      protocolVersion: 1,
+      operation: snapshot.operation,
+      ...(snapshot.action ? { action: snapshot.action } : {}),
+      count: {
+        ...header,
+        version: Number(header.version),
+        startedAt: header.startedAt?.toISOString() ?? null,
+        completedAt: header.completedAt?.toISOString() ?? null,
+        createdAt: header.createdAt.toISOString(),
+        updatedAt: header.updatedAt.toISOString()
+      },
+      ...(snapshot.operation === 'expected_batch' ? { expectedItems: snapshot.expectedItems ?? [] } : {}),
+      ...(snapshot.operation === 'read_batch' ? { reads: snapshot.reads ?? [] } : {}),
+      ...(snapshot.operation === 'results' ? { results: snapshot.results ?? [] } : {})
+    };
+  }
+
+  private async upsertRfidCycleCount(
+    ctx: RequestContext,
+    countId: string,
+    input: Record<string, unknown>,
+    creating: boolean
+  ): Promise<void> {
+    const name = text(input, 'name');
+    const locationId = text(input, 'locationId');
+    const createdByUserId = text(input, 'createdByUserId') ?? ctx.userId;
+    if (!name || !locationId || !createdByUserId) {
+      throw new ValidationFailedError('RFID cycle count header is incomplete');
+    }
+    const status = text(input, 'status') ?? 'draft';
+    if (!['draft', 'ready', 'in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(status)) {
+      throw new ValidationFailedError('RFID cycle count status is invalid');
+    }
+    // Ownership belongs to the authenticated desktop session, never to a
+    // caller-supplied reader identifier in the payload.
+    const ownerDeviceId = ctx.deviceId ?? null;
+    await this.client.query(
+      `INSERT INTO rfid_cycle_counts (
+         id, organization_id, location_id, warehouse_id, zone_id, bin_id, name, status,
+         expected_total, read_total, found_total, missing_total, unexpected_total,
+         started_at, completed_at, created_by_user_id, owner_device_id, owner_state, protocol_version
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+         $14::timestamptz, $15::timestamptz, $16, $17, $18, 1
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         expected_total = GREATEST(rfid_cycle_counts.expected_total, EXCLUDED.expected_total),
+         updated_at = now()
+       WHERE rfid_cycle_counts.organization_id = EXCLUDED.organization_id`,
+      [
+        countId,
+        ctx.organizationId,
+        locationId,
+        text(input, 'warehouseId') ?? null,
+        text(input, 'zoneId') ?? null,
+        text(input, 'binId') ?? null,
+        name,
+        status,
+        integer(input, 'expectedTotal') ?? 0,
+        integer(input, 'readTotal') ?? 0,
+        integer(input, 'foundTotal') ?? 0,
+        integer(input, 'missingTotal') ?? 0,
+        integer(input, 'unexpectedTotal') ?? 0,
+        text(input, 'startedAt') ?? null,
+        text(input, 'completedAt') ?? null,
+        createdByUserId,
+        ownerDeviceId,
+        ownerDeviceId ? 'owned' : 'none'
+      ]
+    );
+    if (!creating) return;
+  }
+
+  private async applyRfidCycleCountState(
+    ctx: RequestContext,
+    countId: string,
+    count: Record<string, unknown>,
+    action: RfidCycleCountSnapshot['action'] | undefined,
+    existing: { ownerDeviceId: string | null; status: string; version: string }
+  ): Promise<void> {
+    if (!action || !['start', 'pause', 'resume', 'review', 'complete', 'cancel', 'claim'].includes(action)) {
+      throw new ValidationFailedError('RFID cycle count state action is invalid');
+    }
+    if (!ctx.deviceId) throw new ValidationFailedError('RFID cycle count state requires a device');
+    if (action === 'claim') {
+      const claimed = await this.client.query(
+        `UPDATE rfid_cycle_counts
+         SET owner_device_id = $3, owner_state = 'owned', version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND status = 'paused' AND owner_device_id IS NULL`,
+        [ctx.organizationId, countId, ctx.deviceId]
+      );
+      if (claimed.rowCount !== 1) {
+        throw new ValidationFailedError('RFID cycle count cannot be claimed because it is already owned');
+      }
+      return;
+    }
+    if (existing.ownerDeviceId !== ctx.deviceId) {
+      throw new ValidationFailedError('Only the owning desktop may change this RFID count');
+    }
+    const nextStatus = text(count, 'status');
+    if (!nextStatus || !['in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(nextStatus)) {
+      throw new ValidationFailedError('RFID cycle count next status is invalid');
+    }
+    const release = action === 'pause' || action === 'review' || action === 'complete' || action === 'cancel';
+    const updated = await this.client.query(
+      `UPDATE rfid_cycle_counts
+       SET status = $3, started_at = COALESCE(started_at, $4::timestamptz),
+           completed_at = COALESCE($5::timestamptz, completed_at),
+           owner_device_id = CASE WHEN $6 THEN NULL ELSE owner_device_id END,
+           owner_state = CASE WHEN $6 THEN 'released' ELSE 'owned' END,
+           expected_total = GREATEST(expected_total, $7), read_total = GREATEST(read_total, $8),
+           found_total = GREATEST(found_total, $9), missing_total = GREATEST(missing_total, $10),
+           unexpected_total = GREATEST(unexpected_total, $11), version = version + 1, updated_at = now()
+       WHERE organization_id = $1 AND id = $2 AND owner_device_id = $12`,
+      [
+        ctx.organizationId,
+        countId,
+        nextStatus,
+        text(count, 'startedAt') ?? null,
+        text(count, 'completedAt') ?? null,
+        release,
+        integer(count, 'expectedTotal') ?? 0,
+        integer(count, 'readTotal') ?? 0,
+        integer(count, 'foundTotal') ?? 0,
+        integer(count, 'missingTotal') ?? 0,
+        integer(count, 'unexpectedTotal') ?? 0,
+        ctx.deviceId
+      ]
+    );
+    if (updated.rowCount !== 1) throw new ValidationFailedError('RFID cycle count ownership changed');
+  }
+
+  private async upsertRfidExpectedItems(
+    ctx: RequestContext,
+    countId: string,
+    rows: readonly Record<string, unknown>[]
+  ): Promise<void> {
+    for (const row of rows) {
+      const id = text(row, 'id');
+      const epcValue = text(row, 'epc');
+      const expectedLocationId = text(row, 'expectedLocationId');
+      if (!id || !epcValue || !expectedLocationId) {
+        throw new ValidationFailedError('RFID expected item is incomplete');
+      }
+      const epc = normalizeEpc(epcValue);
+      await this.client.query(
+        `INSERT INTO rfid_cycle_count_expected_items (
+           id, organization_id, cycle_count_id, rfid_tag_id, product_variant_id, epc,
+           expected_location_id, expected_bin_id, snapshot_version
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (organization_id, cycle_count_id, epc) DO UPDATE SET
+           rfid_tag_id = EXCLUDED.rfid_tag_id, product_variant_id = EXCLUDED.product_variant_id,
+           expected_location_id = EXCLUDED.expected_location_id, expected_bin_id = EXCLUDED.expected_bin_id,
+           snapshot_version = EXCLUDED.snapshot_version, version = rfid_cycle_count_expected_items.version + 1,
+           updated_at = now()`,
+        [
+          id,
+          ctx.organizationId,
+          countId,
+          text(row, 'rfidTagId') ?? null,
+          text(row, 'productVariantId') ?? null,
+          epc,
+          expectedLocationId,
+          text(row, 'expectedBinId') ?? null,
+          integer(row, 'snapshotVersion') ?? 1
+        ]
+      );
+    }
+    await this.updateRfidCycleTotals(ctx.organizationId, countId);
+  }
+
+  private async upsertRfidReads(
+    ctx: RequestContext,
+    countId: string,
+    rows: readonly Record<string, unknown>[]
+  ): Promise<void> {
+    if (!ctx.deviceId) throw new ValidationFailedError('RFID read packet requires a device');
+    if (rows.length > 100) throw new ValidationFailedError('RFID read packet may contain at most 100 EPCs');
+    for (const row of rows) {
+      const id = text(row, 'id');
+      const epcValue = text(row, 'epc');
+      const firstSeenAt = text(row, 'firstReadAt');
+      const lastSeenAt = text(row, 'lastReadAt');
+      if (!id || !epcValue || !firstSeenAt || !lastSeenAt) {
+        throw new ValidationFailedError('RFID read packet item is incomplete');
+      }
+      const epc = normalizeEpc(epcValue);
+      await this.client.query(
+        `INSERT INTO rfid_cycle_count_reads (
+           id, organization_id, cycle_count_id, rfid_tag_id, epc, device_id, antenna,
+           first_seen_at, last_seen_at, read_count, strongest_rssi, last_rssi, frequency_khz, sequence
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14)
+         ON CONFLICT (organization_id, cycle_count_id, epc) DO UPDATE SET
+           rfid_tag_id = COALESCE(EXCLUDED.rfid_tag_id, rfid_cycle_count_reads.rfid_tag_id),
+           device_id = EXCLUDED.device_id, antenna = EXCLUDED.antenna,
+           first_seen_at = LEAST(rfid_cycle_count_reads.first_seen_at, EXCLUDED.first_seen_at),
+           last_seen_at = GREATEST(rfid_cycle_count_reads.last_seen_at, EXCLUDED.last_seen_at),
+           read_count = GREATEST(rfid_cycle_count_reads.read_count, EXCLUDED.read_count),
+           strongest_rssi = CASE
+             WHEN rfid_cycle_count_reads.strongest_rssi IS NULL THEN EXCLUDED.strongest_rssi
+             WHEN EXCLUDED.strongest_rssi IS NULL THEN rfid_cycle_count_reads.strongest_rssi
+             ELSE GREATEST(rfid_cycle_count_reads.strongest_rssi, EXCLUDED.strongest_rssi)
+           END,
+           last_rssi = EXCLUDED.last_rssi, frequency_khz = EXCLUDED.frequency_khz,
+           sequence = EXCLUDED.sequence, version = rfid_cycle_count_reads.version + 1, updated_at = now()`,
+        [
+          id,
+          ctx.organizationId,
+          countId,
+          text(row, 'rfidTagId') ?? null,
+          epc,
+          ctx.deviceId,
+          integer(row, 'antenna') ?? null,
+          firstSeenAt,
+          lastSeenAt,
+          Math.max(1, integer(row, 'rawReadCount') ?? 1),
+          decimal(row, 'strongestRssi') ?? null,
+          decimal(row, 'lastRssi') ?? null,
+          integer(row, 'frequencyKhz') ?? null,
+          integer(row, 'sequence') ?? null
+        ]
+      );
+    }
+    await this.updateRfidCycleTotals(ctx.organizationId, countId);
+  }
+
+  private async upsertRfidResults(
+    ctx: RequestContext,
+    countId: string,
+    rows: readonly Record<string, unknown>[]
+  ): Promise<void> {
+    for (const row of rows) {
+      const id = text(row, 'id');
+      const epcValue = text(row, 'epc');
+      const classification = text(row, 'classification');
+      if (!id || !epcValue || !['found', 'missing', 'unexpected'].includes(classification ?? '')) {
+        throw new ValidationFailedError('RFID result is incomplete');
+      }
+      await this.client.query(
+        `INSERT INTO rfid_cycle_count_results (
+           id, organization_id, cycle_count_id, rfid_tag_id, product_variant_id, epc, classification,
+           expected_location_id, observed_location_id, strongest_rssi, resolution, resolved_by_user_id, resolved_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::timestamptz)
+         ON CONFLICT (organization_id, cycle_count_id, epc) DO UPDATE SET
+           rfid_tag_id = EXCLUDED.rfid_tag_id, product_variant_id = EXCLUDED.product_variant_id,
+           classification = EXCLUDED.classification, expected_location_id = EXCLUDED.expected_location_id,
+           observed_location_id = EXCLUDED.observed_location_id, strongest_rssi = EXCLUDED.strongest_rssi,
+           resolution = EXCLUDED.resolution, resolved_by_user_id = EXCLUDED.resolved_by_user_id,
+           resolved_at = EXCLUDED.resolved_at, version = rfid_cycle_count_results.version + 1, updated_at = now()`,
+        [
+          id, ctx.organizationId, countId, text(row, 'rfidTagId') ?? null,
+          text(row, 'productVariantId') ?? null, normalizeEpc(epcValue), classification,
+          text(row, 'expectedLocationId') ?? null, text(row, 'observedLocationId') ?? null,
+          decimal(row, 'strongestRssi') ?? null, text(row, 'resolution') ?? null,
+          text(row, 'resolvedByUserId') ?? null, text(row, 'resolvedAt') ?? null
+        ]
+      );
+    }
+  }
+
+  private async updateRfidCycleTotals(organizationId: string, countId: string): Promise<void> {
+    await this.client.query(
+      `UPDATE rfid_cycle_counts count SET
+         expected_total = (SELECT COUNT(*) FROM rfid_cycle_count_expected_items expected
+                           WHERE expected.organization_id = count.organization_id AND expected.cycle_count_id = count.id),
+         read_total = (SELECT COUNT(*) FROM rfid_cycle_count_reads reads
+                       WHERE reads.organization_id = count.organization_id AND reads.cycle_count_id = count.id),
+         found_total = (SELECT COUNT(*) FROM rfid_cycle_count_reads reads
+                        JOIN rfid_cycle_count_expected_items expected
+                          ON expected.organization_id = reads.organization_id
+                         AND expected.cycle_count_id = reads.cycle_count_id AND expected.epc = reads.epc
+                        WHERE reads.organization_id = count.organization_id AND reads.cycle_count_id = count.id),
+         missing_total = (SELECT COUNT(*) FROM rfid_cycle_count_expected_items expected
+                          WHERE expected.organization_id = count.organization_id AND expected.cycle_count_id = count.id
+                            AND NOT EXISTS (SELECT 1 FROM rfid_cycle_count_reads reads
+                                            WHERE reads.organization_id = expected.organization_id
+                                              AND reads.cycle_count_id = expected.cycle_count_id AND reads.epc = expected.epc)),
+         unexpected_total = (SELECT COUNT(*) FROM rfid_cycle_count_reads reads
+                             WHERE reads.organization_id = count.organization_id AND reads.cycle_count_id = count.id
+                               AND NOT EXISTS (SELECT 1 FROM rfid_cycle_count_expected_items expected
+                                               WHERE expected.organization_id = reads.organization_id
+                                                 AND expected.cycle_count_id = reads.cycle_count_id AND expected.epc = reads.epc)),
+         updated_at = now()
+       WHERE count.organization_id = $1 AND count.id = $2`,
+      [organizationId, countId]
+    );
   }
 
   /**
