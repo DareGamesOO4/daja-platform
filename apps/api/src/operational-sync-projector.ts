@@ -180,7 +180,13 @@ export class OperationalSyncProjector {
         { kind: kind as ItemCommand['kind'], payload: commandPayload },
         entityIds
       );
-      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+      const canonicalRecord = record(snapshot.record);
+      const canonicalVariantId = text(canonicalRecord ?? {}, 'variantId');
+      return {
+        ...event,
+        ...(canonicalVariantId ? { aggregateId: canonicalVariantId } : {}),
+        payload: { ...event.payload, operationalSnapshot: snapshot }
+      };
     }
     if (kind === 'tag.assign') {
       const snapshot = await this.tag(ctx, event, { kind: 'tag.assign', payload: commandPayload });
@@ -1121,17 +1127,29 @@ export class OperationalSyncProjector {
         throw new ValidationFailedError('Desktop item create command is incomplete');
       }
       const sku = requestedSku ?? null;
-      const productId =
+      // Desktop has to create an ID while offline. It is only a correlation
+      // key: Platform owns the canonical product and variant UUIDs, exactly
+      // like it does for products created through the web admin.
+      const sourceVariantId = event.aggregateId;
+      const sourceProductId =
         text(input, 'productId') ??
         (entityIds === undefined ? undefined : text(entityIds, 'productId'));
       const categoryId = text(input, 'categoryId');
       const existing = await this.client.query<{ id: string; product_id: string }>(
-        `SELECT id, product_id FROM product_variants
-         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-        [ctx.organizationId, variantId]
+        `SELECT v.id, v.product_id
+         FROM products p
+         JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
+         WHERE p.organization_id = $1 AND p.external_id = $2 AND p.deleted_at IS NULL
+           AND v.deleted_at IS NULL
+         LIMIT 1`,
+        [ctx.organizationId, `rfiddaja:${sourceVariantId}`]
       );
       if (existing.rowCount === 1)
-        return this.catalogSnapshot(ctx.organizationId, existing.rows[0]!.product_id, variantId);
+        return {
+          ...(await this.catalogSnapshot(ctx.organizationId, existing.rows[0]!.product_id, existing.rows[0]!.id)),
+          sourceProductId,
+          sourceVariantId
+        };
 
       const category = categoryId
         ? await this.client.query<{ id: string }>(
@@ -1159,7 +1177,8 @@ export class OperationalSyncProjector {
             [ctx.organizationId, localBrandName]
           )
         : undefined;
-      const resolvedProductId = productId ?? event.aggregateId;
+      const resolvedProductId = randomUUID();
+      const resolvedVariantId = randomUUID();
       await this.client.query(
         `INSERT INTO products (id, organization_id, name, slug, description, brand_id, primary_category_id, seo, features, model_3d_url, active, published, external_id, department_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14)
@@ -1181,7 +1200,7 @@ export class OperationalSyncProjector {
           text(input, 'model3dUrl') ?? null,
           boolean(input, 'active', true),
           boolean(input, 'published', true),
-          `rfiddaja:${variantId}`,
+          `rfiddaja:${sourceVariantId}`,
           departmentId
         ]
       );
@@ -1189,7 +1208,7 @@ export class OperationalSyncProjector {
         `INSERT INTO product_variants (id, organization_id, product_id, sku, barcode, name, gender, current_price_amount, currency, attributes, active, published)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
         [
-          variantId,
+          resolvedVariantId,
           ctx.organizationId,
           resolvedProductId,
           sku,
@@ -1206,11 +1225,15 @@ export class OperationalSyncProjector {
       await this.client.query(
         `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
          VALUES ($1, $2, $3, $4, 'sell', $5)`,
-        [ctx.organizationId, variantId, priceRsd * 100, currency, ctx.userId]
+        [ctx.organizationId, resolvedVariantId, priceRsd * 100, currency, ctx.userId]
       );
-      await this.addCatalogPrices(ctx, variantId, input, currency);
+      await this.addCatalogPrices(ctx, resolvedVariantId, input, currency);
       await this.setImages(ctx.organizationId, resolvedProductId, input);
-      return this.catalogSnapshot(ctx.organizationId, resolvedProductId, variantId);
+      return {
+        ...(await this.catalogSnapshot(ctx.organizationId, resolvedProductId, resolvedVariantId)),
+        sourceProductId,
+        sourceVariantId
+      };
     }
 
     const current = await this.client.query<{
