@@ -80,6 +80,11 @@ function text(input: Record<string, unknown>, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function nullableText(input: Record<string, unknown>, key: string): string | null | undefined {
+  if (!Object.prototype.hasOwnProperty.call(input, key)) return undefined;
+  return text(input, key) ?? null;
+}
+
 /** The website stores Serbian gender labels with diacritics. Older desktop
  * builds emitted ASCII values, so normalize at the API boundary and keep one
  * catalog value across every client. */
@@ -120,10 +125,6 @@ function slug(value: string, suffix: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 140);
   return `${base || 'artikal'}-${suffix.slice(0, 8)}`;
-}
-
-function generatedSku(variantId: string): string {
-  return `ARTIKAL-${variantId.replace(/-/g, '').toUpperCase()}`;
 }
 
 function catalogSlug(value: string, fallbackId: string): string {
@@ -1109,7 +1110,7 @@ export class OperationalSyncProjector {
     entityIds: Record<string, unknown> | undefined
   ): Promise<Record<string, unknown>> {
     const input = command.payload;
-    const requestedSku = text(input, 'sku');
+    const requestedSku = nullableText(input, 'sku');
     const name = text(input, 'name');
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
@@ -1119,7 +1120,7 @@ export class OperationalSyncProjector {
       if (!name || priceRsd === undefined || priceRsd < 0) {
         throw new ValidationFailedError('Desktop item create command is incomplete');
       }
-      const sku = requestedSku ?? generatedSku(variantId);
+      const sku = requestedSku ?? null;
       const productId =
         text(input, 'productId') ??
         (entityIds === undefined ? undefined : text(entityIds, 'productId'));
@@ -1217,7 +1218,7 @@ export class OperationalSyncProjector {
       version: string;
       product_slug: string;
       product_name: string;
-      variant_sku: string;
+      variant_sku: string | null;
     }>(
       `SELECT variant.product_id, variant.version::text, product.slug AS product_slug, product.name AS product_name,
               variant.sku AS variant_sku
@@ -1258,7 +1259,7 @@ export class OperationalSyncProjector {
       );
       return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
     }
-    const sku = requestedSku ?? row.variant_sku;
+    const sku = requestedSku === undefined ? row.variant_sku : requestedSku;
     if (!name || priceRsd === undefined || priceRsd < 0) {
       throw new ValidationFailedError('Desktop item update command is incomplete');
     }

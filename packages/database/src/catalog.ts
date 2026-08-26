@@ -37,7 +37,7 @@ export interface VariantRecord {
   id: string;
   organizationId: string;
   productId: string;
-  sku: string;
+  sku: string | null;
   barcode: string | null;
   name: string | null;
   gender: string | null;
@@ -435,7 +435,7 @@ export class CatalogRepository {
     ctx: RequestContext,
     productId: string,
     input: {
-      sku: string;
+      sku?: string | null | undefined;
       barcode?: string | null | undefined;
       name?: string | null | undefined;
       gender?: string | null | undefined;
@@ -483,7 +483,7 @@ export class CatalogRepository {
     id: string,
     input: Partial<{
       expectedVersion: number | undefined;
-      sku: string | undefined;
+      sku: string | null | undefined;
       barcode: string | null | undefined;
       name: string | null | undefined;
       gender: string | null | undefined;
@@ -664,7 +664,7 @@ interface VariantRow {
   id: string;
   organization_id: string;
   product_id: string;
-  sku: string;
+  sku: string | null;
   barcode: string | null;
   name: string | null;
   gender: string | null;

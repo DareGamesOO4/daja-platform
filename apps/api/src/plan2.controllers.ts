@@ -88,8 +88,16 @@ const productPatchSchema = productCreateSchema.partial().extend({
   expectedVersion: z.coerce.number().int().positive().optional()
 });
 
+const optionalSkuSchema = z
+  .string()
+  .trim()
+  .max(120)
+  .nullable()
+  .optional()
+  .transform((value) => value || null);
+
 const variantCreateSchema = z.object({
-  sku: z.string().trim().min(1).max(120),
+  sku: optionalSkuSchema,
   barcode: z.string().trim().min(1).max(120).nullable().optional(),
   name: z.string().trim().min(1).max(240).nullable().optional(),
   gender: z.string().trim().min(1).max(80).nullable().optional(),
