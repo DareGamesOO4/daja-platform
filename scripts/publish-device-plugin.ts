@@ -26,6 +26,7 @@ interface Options {
   archivePath: string;
   pluginId: string;
   version: string;
+  releaseNotes: string;
 }
 
 const PLUGIN_ID = /^[a-z][a-z0-9-]{1,79}$/;
@@ -58,7 +59,11 @@ function parseOptions(arguments_: readonly string[]): Options {
   }
   if (!PLUGIN_ID.test(pluginId)) throw new Error('Plugin ID is not valid.');
   if (!VERSION.test(version)) throw new Error('Plugin version is not valid.');
-  return { archivePath: resolve(archivePath), pluginId, version };
+  const releaseNotes =
+    values.get('--release-notes') ??
+    'Updated device plugin runtime.';
+  if (releaseNotes.length > 2_000) throw new Error('Plugin release notes are too long.');
+  return { archivePath: resolve(archivePath), pluginId, version, releaseNotes };
 }
 
 async function sha256(path: string): Promise<string> {
@@ -154,7 +159,7 @@ async function main(): Promise<void> {
         JSON.stringify(baseline.platforms),
         JSON.stringify(baseline.capabilities),
         baseline.min_app_version,
-        'Repacked vendor SDK with safe paths, validated YRM100 runtime profile, and explicit Windows driver installer.',
+        options.releaseNotes,
         storageKey,
         archive.size,
         checksum,

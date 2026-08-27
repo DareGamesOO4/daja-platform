@@ -502,8 +502,9 @@ export class OperationalSyncProjector {
       const claimed = await this.client.query(
         `UPDATE rfid_cycle_counts
          SET owner_device_id = $3, owner_state = 'owned', version = version + 1, updated_at = now()
-         WHERE organization_id = $1 AND id = $2 AND status = 'paused' AND owner_device_id IS NULL`,
-        [ctx.organizationId, countId, ctx.deviceId]
+         WHERE organization_id = $1 AND id = $2 AND status = 'paused'
+           AND owner_device_id IS DISTINCT FROM $3 AND version = $4::bigint`,
+        [ctx.organizationId, countId, ctx.deviceId, existing.version]
       );
       if (claimed.rowCount !== 1) {
         throw new ValidationFailedError('RFID cycle count cannot be claimed because it is already owned');
@@ -517,7 +518,7 @@ export class OperationalSyncProjector {
     if (!nextStatus || !['in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(nextStatus)) {
       throw new ValidationFailedError('RFID cycle count next status is invalid');
     }
-    const release = action === 'pause' || action === 'review' || action === 'complete' || action === 'cancel';
+    const release = action === 'review' || action === 'complete' || action === 'cancel';
     const updated = await this.client.query(
       `UPDATE rfid_cycle_counts
        SET status = $3, started_at = COALESCE(started_at, $4::timestamptz),

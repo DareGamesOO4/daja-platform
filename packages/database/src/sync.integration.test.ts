@@ -148,7 +148,7 @@ describe('plan 3 sync foundation', () => {
     ).rejects.toThrow();
   });
 
-  it('merges retried RFID read packets and transfers a paused count atomically', async () => {
+  it('merges retried RFID read packets, preserves the paused owner and transfers atomically', async () => {
     const firstDevice = await registerSyncDevice(database, 'rfid-cloud-owner');
     const secondDevice = await registerSyncDevice(database, 'rfid-cloud-claimant');
     const countId = randomUUID();
@@ -215,6 +215,12 @@ describe('plan 3 sync foundation', () => {
         count: { ...header, status: 'paused', readTotal: 1, foundTotal: 1, missingTotal: 0 }
       }
     });
+    const paused = await database.query<{ owner: string; status: string }>(
+      `SELECT owner_device_id::text AS owner, status FROM rfid_cycle_counts WHERE organization_id = $1 AND id = $2`,
+      [organizationId, countId]
+    );
+    expect(paused.rows[0]).toEqual({ owner: firstDevice, status: 'paused' });
+
     await push(secondContext, 'rfid-claim', {
       operationalSnapshot: {
         kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'state', action: 'claim',
@@ -226,6 +232,18 @@ describe('plan 3 sync foundation', () => {
       [organizationId, countId]
     );
     expect(claimed.rows[0]).toEqual({ owner: secondDevice, status: 'paused' });
+
+    await push(secondContext, 'rfid-resume', {
+      operationalSnapshot: {
+        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'state', action: 'resume',
+        count: { ...header, status: 'in_progress', readTotal: 1, foundTotal: 1, missingTotal: 0 }
+      }
+    });
+    const resumed = await database.query<{ owner: string; status: string }>(
+      `SELECT owner_device_id::text AS owner, status FROM rfid_cycle_counts WHERE organization_id = $1 AND id = $2`,
+      [organizationId, countId]
+    );
+    expect(resumed.rows[0]).toEqual({ owner: secondDevice, status: 'in_progress' });
   });
 });
 
