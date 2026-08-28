@@ -69,7 +69,7 @@ type RfidCycleCountSnapshot = {
   readonly expectedItems?: readonly Record<string, unknown>[];
   readonly reads?: readonly Record<string, unknown>[];
   readonly results?: readonly Record<string, unknown>[];
-  readonly action?: 'start' | 'pause' | 'resume' | 'review' | 'complete' | 'cancel' | 'claim' | undefined;
+  readonly action?: 'start' | 'restart' | 'pause' | 'resume' | 'review' | 'complete' | 'cancel' | 'claim' | undefined;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -494,7 +494,7 @@ export class OperationalSyncProjector {
     action: RfidCycleCountSnapshot['action'] | undefined,
     existing: { ownerDeviceId: string | null; status: string; version: string }
   ): Promise<void> {
-    if (!action || !['start', 'pause', 'resume', 'review', 'complete', 'cancel', 'claim'].includes(action)) {
+    if (!action || !['start', 'restart', 'pause', 'resume', 'review', 'complete', 'cancel', 'claim'].includes(action)) {
       throw new ValidationFailedError('RFID cycle count state action is invalid');
     }
     if (!ctx.deviceId) throw new ValidationFailedError('RFID cycle count state requires a device');
@@ -508,6 +508,37 @@ export class OperationalSyncProjector {
       );
       if (claimed.rowCount !== 1) {
         throw new ValidationFailedError('RFID cycle count cannot be claimed because it is already owned');
+      }
+      return;
+    }
+    if (action === 'restart') {
+      if (!['in_progress', 'paused', 'review', 'completed'].includes(existing.status)) {
+        throw new ValidationFailedError('RFID cycle count cannot be restarted from its current status');
+      }
+      const restarted = await this.client.query(
+        `WITH authorized_count AS (
+           SELECT id FROM rfid_cycle_counts
+           WHERE organization_id = $1 AND id = $2
+             AND (owner_device_id = $3 OR owner_device_id IS NULL)
+         ), cleared_reads AS (
+           DELETE FROM rfid_cycle_count_reads
+           WHERE organization_id = $1 AND cycle_count_id = $2
+             AND EXISTS (SELECT 1 FROM authorized_count)
+         ), cleared_results AS (
+           DELETE FROM rfid_cycle_count_results
+           WHERE organization_id = $1 AND cycle_count_id = $2
+             AND EXISTS (SELECT 1 FROM authorized_count)
+         )
+         UPDATE rfid_cycle_counts
+         SET status = 'in_progress', started_at = COALESCE($4::timestamptz, now()), completed_at = NULL,
+             owner_device_id = $3, owner_state = 'owned', read_total = 0, found_total = 0,
+             missing_total = expected_total, unexpected_total = 0, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2
+           AND EXISTS (SELECT 1 FROM authorized_count)`,
+        [ctx.organizationId, countId, ctx.deviceId, text(count, 'startedAt') ?? null]
+      );
+      if (restarted.rowCount !== 1) {
+        throw new ValidationFailedError('Only the owning desktop may restart this RFID count');
       }
       return;
     }
