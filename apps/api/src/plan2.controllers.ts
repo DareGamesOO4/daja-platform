@@ -832,21 +832,23 @@ export class StaffCatalogController {
     const productId = parseWithSchema(uuidSchema, productIdParam);
     const linkId = parseWithSchema(uuidSchema, mediaLinkIdParam);
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
-    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const deleted = await client.query<{ media_asset_id: string }>(
-        `DELETE FROM product_media
+    const result = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const deleted = await client.query<{ media_asset_id: string }>(
+          `DELETE FROM product_media
          WHERE organization_id = $1 AND product_id = $2 AND id = $3
          RETURNING media_asset_id`,
-        [ctx.organizationId, productId, linkId]
-      );
-      if (deleted.rowCount !== 1) throw new TenantAccessDeniedError();
-      await new MediaRepository(client).discardUnreferenced(
-        ctx,
-        deleted.rows[0]!.media_asset_id,
-        new R2MediaStorageAdapter(this.config)
-      );
-      return deleted;
-    });
+          [ctx.organizationId, productId, linkId]
+        );
+        if (deleted.rowCount !== 1) throw new TenantAccessDeniedError();
+        await new MediaRepository(client).discardUnreferenced(
+          ctx,
+          deleted.rows[0]!.media_asset_id,
+          new R2MediaStorageAdapter(this.config)
+        );
+        return deleted;
+      }
+    );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
@@ -1258,6 +1260,7 @@ export class StaffCatalogController {
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
+              tag.id AS "rfidTagId", tag.epc, tag.tid, tag.status AS "rfidTagStatus",
               media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
        FROM products p
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
@@ -1274,6 +1277,19 @@ export class StaffCatalogController {
          ORDER BY updated_at DESC
          LIMIT 1
        ) inventory ON true
+       LEFT JOIN LATERAL (
+         SELECT t.id, t.epc, t.tid, t.status
+         FROM rfid_tags t
+         LEFT JOIN inventory_items item
+           ON item.id = t.inventory_item_id
+          AND item.organization_id = t.organization_id
+          AND item.deleted_at IS NULL
+         WHERE t.organization_id = p.organization_id
+           AND t.deleted_at IS NULL
+           AND (t.variant_id = v.id OR item.variant_id = v.id)
+         ORDER BY t.updated_at DESC
+         LIMIT 1
+       ) tag ON true
        LEFT JOIN LATERAL (
          SELECT ma.public_url, md.public_url AS thumbnail_url
          FROM product_media pm
@@ -1455,7 +1471,11 @@ export class MediaController {
     requirePermission(ctx, 'media.upload');
     const id = parseWithSchema(uuidSchema, mediaId);
     return new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new MediaRepository(client).discardUnreferenced(ctx, id, new R2MediaStorageAdapter(this.config))
+      new MediaRepository(client).discardUnreferenced(
+        ctx,
+        id,
+        new R2MediaStorageAdapter(this.config)
+      )
     );
   }
 }
