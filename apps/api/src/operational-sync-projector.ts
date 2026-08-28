@@ -187,6 +187,35 @@ export class OperationalSyncProjector {
     if (!envelope || !command || !commandPayload || typeof kind !== 'string') return event;
 
     const entityIds = record(envelope.entityIds);
+    // A desktop writes the business command before it emits the richer RFID
+    // snapshot (which contains expected items and reads). Materialize the
+    // header from that command as well, so an interrupted snapshot upload can
+    // never leave its later RFID batches without a cloud parent record.
+    if (kind === 'count.create') {
+      const locationId = text(commandPayload, 'locationId');
+      const createdByUserId = text(commandPayload, 'actorUserId') ?? ctx.userId;
+      if (!locationId || !createdByUserId) {
+        throw new ValidationFailedError('RFID cycle count command is incomplete');
+      }
+      const snapshot = await this.rfidCycleCount(ctx, event, {
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'create',
+        count: {
+          id: event.aggregateId,
+          locationId,
+          name: 'RFID popis',
+          status: 'draft',
+          expectedTotal: 0,
+          readTotal: 0,
+          foundTotal: 0,
+          missingTotal: 0,
+          unexpectedTotal: 0,
+          createdByUserId
+        }
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
     if (kind.startsWith('item.')) {
       const snapshot = await this.item(
         ctx,
