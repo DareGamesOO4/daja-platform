@@ -542,14 +542,18 @@ export class OperationalSyncProjector {
       }
       return;
     }
-    if (existing.ownerDeviceId !== ctx.deviceId) {
-      throw new ValidationFailedError('Only the owning desktop may change this RFID count');
-    }
     const nextStatus = text(count, 'status');
     if (!nextStatus || !['in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(nextStatus)) {
       throw new ValidationFailedError('RFID cycle count next status is invalid');
     }
     const release = action === 'review' || action === 'complete' || action === 'cancel';
+    // A desktop emits the business command and its RFID state snapshot for the
+    // same terminal action. The command may release ownership before the
+    // snapshot arrives, so accept that exact terminal state as a no-op.
+    if (release && existing.ownerDeviceId === null && existing.status === nextStatus) return;
+    if (existing.ownerDeviceId !== ctx.deviceId) {
+      throw new ValidationFailedError('Only the owning desktop may change this RFID count');
+    }
     const updated = await this.client.query(
       `UPDATE rfid_cycle_counts
        SET status = $3, started_at = COALESCE(started_at, $4::timestamptz),
