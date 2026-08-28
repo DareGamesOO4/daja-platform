@@ -97,13 +97,15 @@ describe('plan 3 sync foundation', () => {
       [organizationId, product.rows[0]!.id]
     );
 
-    const result = await new SyncRepository(database.pool).pushBatch(ctx, [{
-      ...event('sync-delete-stale-1', variant.rows[0]!.id, {
-        command: { kind: 'item.delete', payload: {} }
-      }),
-      aggregateType: 'product_variant',
-      baseVersion: 1
-    }]);
+    const result = await new SyncRepository(database.pool).pushBatch(ctx, [
+      {
+        ...event('sync-delete-stale-1', variant.rows[0]!.id, {
+          command: { kind: 'item.delete', payload: {} }
+        }),
+        aggregateType: 'product_variant',
+        baseVersion: 1
+      }
+    ]);
 
     expect(result[0]?.status).toBe('applied');
   });
@@ -148,6 +150,83 @@ describe('plan 3 sync foundation', () => {
     ).rejects.toThrow();
   });
 
+  it('reassigns an EPC that already exists in Platform instead of failing the desktop sync', async () => {
+    const sourceProduct = await database.query<{ id: string }>(
+      `INSERT INTO products (organization_id, name, slug, published)
+       VALUES ($1, 'Old tag owner', 'old-tag-owner', true) RETURNING id`,
+      [organizationId]
+    );
+    const targetProduct = await database.query<{ id: string }>(
+      `INSERT INTO products (organization_id, name, slug, published)
+       VALUES ($1, 'New tag owner', 'new-tag-owner', true) RETURNING id`,
+      [organizationId]
+    );
+    const sourceVariant = await database.query<{ id: string }>(
+      `INSERT INTO product_variants (organization_id, product_id, sku, current_price_amount, currency, published)
+       VALUES ($1, $2, 'OLD-TAG', 1000, 'RSD', true) RETURNING id`,
+      [organizationId, sourceProduct.rows[0]!.id]
+    );
+    const targetVariant = await database.query<{ id: string }>(
+      `INSERT INTO product_variants (organization_id, product_id, sku, current_price_amount, currency, published)
+       VALUES ($1, $2, 'NEW-TAG', 1000, 'RSD', true) RETURNING id`,
+      [organizationId, targetProduct.rows[0]!.id]
+    );
+    const epc = 'E200470F651060273BDD0109';
+    const existingTag = await database.query<{ id: string }>(
+      `INSERT INTO rfid_tags (organization_id, epc, variant_id, status)
+       VALUES ($1, $2, $3, 'assigned') RETURNING id`,
+      [organizationId, epc, sourceVariant.rows[0]!.id]
+    );
+    const desktopTagId = randomUUID();
+    const projector = new OperationalSyncProjector(database.pool);
+    const result = await new SyncRepository(database.pool).pushBatch(
+      ctx,
+      [
+        {
+          eventId: randomUUID(),
+          idempotencyKey: 'desktop-tag-reassignment',
+          aggregateType: 'rfid_tag',
+          aggregateId: desktopTagId,
+          operation: 'command',
+          payloadVersion: 1,
+          clientTimestamp: new Date().toISOString(),
+          locationId,
+          payload: {
+            command: {
+              kind: 'tag.assign',
+              payload: {
+                schemaVersion: 1,
+                organizationId,
+                productVariantId: targetVariant.rows[0]!.id,
+                epc,
+                locationId,
+                actorUserId: userId,
+                deviceId: randomUUID()
+              }
+            }
+          }
+        }
+      ],
+      (input) => projector.materialize(ctx, input)
+    );
+
+    expect(result[0]?.status).toBe('applied');
+    const tag = await database.query<{ id: string; variantId: string }>(
+      `SELECT id, variant_id AS "variantId" FROM rfid_tags
+       WHERE organization_id = $1 AND epc = $2 AND deleted_at IS NULL`,
+      [organizationId, epc]
+    );
+    expect(tag.rows).toEqual([
+      { id: existingTag.rows[0]!.id, variantId: targetVariant.rows[0]!.id }
+    ]);
+    const assignment = await database.query<{ tagId: string; locationId: string }>(
+      `SELECT tag_id AS "tagId", location_id AS "locationId" FROM rfid_tag_events
+       WHERE organization_id = $1 AND tag_id = $2 AND event_type = 'assigned'`,
+      [organizationId, existingTag.rows[0]!.id]
+    );
+    expect(assignment.rows).toEqual([{ tagId: existingTag.rows[0]!.id, locationId }]);
+  });
+
   it('merges retried RFID read packets, preserves the paused owner and transfers atomically', async () => {
     const firstDevice = await registerSyncDevice(database, 'rfid-cloud-owner');
     const secondDevice = await registerSyncDevice(database, 'rfid-cloud-claimant');
@@ -179,29 +258,75 @@ describe('plan 3 sync foundation', () => {
       createdByUserId: userId
     };
     await push(firstContext, 'rfid-create', {
-      operationalSnapshot: { kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'create', count: header }
+      operationalSnapshot: {
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'create',
+        count: header
+      }
     });
     await push(firstContext, 'rfid-expected', {
       operationalSnapshot: {
-        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'expected_batch', count: header,
-        expectedItems: [{ id: randomUUID(), epc: 'E2000017221101441890ABCD', expectedLocationId: locationId, snapshotVersion: 1 }]
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'expected_batch',
+        count: header,
+        expectedItems: [
+          {
+            id: randomUUID(),
+            epc: 'E2000017221101441890ABCD',
+            expectedLocationId: locationId,
+            snapshotVersion: 1
+          }
+        ]
       }
     });
     const read = {
-      id: randomUUID(), epc: 'E2000017221101441890ABCD', deviceId: firstDevice,
-      firstReadAt: '2026-08-26T10:00:00.000Z', lastReadAt: '2026-08-26T10:00:01.000Z',
-      rawReadCount: 1, strongestRssi: -62, lastRssi: -62, antenna: 1, sequence: 1
+      id: randomUUID(),
+      epc: 'E2000017221101441890ABCD',
+      deviceId: firstDevice,
+      firstReadAt: '2026-08-26T10:00:00.000Z',
+      lastReadAt: '2026-08-26T10:00:01.000Z',
+      rawReadCount: 1,
+      strongestRssi: -62,
+      lastRssi: -62,
+      antenna: 1,
+      sequence: 1
     };
     await push(firstContext, 'rfid-read-first', {
-      operationalSnapshot: { kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'read_batch', count: header, reads: [read] }
+      operationalSnapshot: {
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'read_batch',
+        count: header,
+        reads: [read]
+      }
     });
     await push(firstContext, 'rfid-read-retry', {
       operationalSnapshot: {
-        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'read_batch', count: header,
-        reads: [{ ...read, id: randomUUID(), lastReadAt: '2026-08-26T10:00:03.000Z', rawReadCount: 4, strongestRssi: -48, lastRssi: -48, sequence: 4 }]
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'read_batch',
+        count: header,
+        reads: [
+          {
+            ...read,
+            id: randomUUID(),
+            lastReadAt: '2026-08-26T10:00:03.000Z',
+            rawReadCount: 4,
+            strongestRssi: -48,
+            lastRssi: -48,
+            sequence: 4
+          }
+        ]
       }
     });
-    const merged = await database.query<{ count: string; reads: string; strongest: number; last: Date }>(
+    const merged = await database.query<{
+      count: string;
+      reads: string;
+      strongest: number;
+      last: Date;
+    }>(
       `SELECT COUNT(*)::text AS count, MAX(read_count)::text AS reads, MAX(strongest_rssi) AS strongest, MAX(last_seen_at) AS last
        FROM rfid_cycle_count_reads WHERE organization_id = $1 AND cycle_count_id = $2`,
       [organizationId, countId]
@@ -211,7 +336,10 @@ describe('plan 3 sync foundation', () => {
 
     await push(firstContext, 'rfid-pause', {
       operationalSnapshot: {
-        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'state', action: 'pause',
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'state',
+        action: 'pause',
         count: { ...header, status: 'paused', readTotal: 1, foundTotal: 1, missingTotal: 0 }
       }
     });
@@ -223,7 +351,10 @@ describe('plan 3 sync foundation', () => {
 
     await push(secondContext, 'rfid-claim', {
       operationalSnapshot: {
-        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'state', action: 'claim',
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'state',
+        action: 'claim',
         count: { ...header, status: 'paused' }
       }
     });
@@ -235,7 +366,10 @@ describe('plan 3 sync foundation', () => {
 
     await push(secondContext, 'rfid-resume', {
       operationalSnapshot: {
-        kind: 'rfid.cycle_count', protocolVersion: 1, operation: 'state', action: 'resume',
+        kind: 'rfid.cycle_count',
+        protocolVersion: 1,
+        operation: 'state',
+        action: 'resume',
         count: { ...header, status: 'in_progress', readTotal: 1, foundTotal: 1, missingTotal: 0 }
       }
     });
@@ -289,7 +423,14 @@ async function registerSyncDevice(database: Database, deviceKey: string): Promis
 
 function rfidEvent(idempotencyKey: string, aggregateId: string, payload: Record<string, unknown>) {
   return {
-    eventId: randomUUID(), idempotencyKey, aggregateType: 'cycle_count', aggregateId,
-    operation: 'event', payloadVersion: 2, clientTimestamp: new Date().toISOString(), locationId, payload
+    eventId: randomUUID(),
+    idempotencyKey,
+    aggregateType: 'cycle_count',
+    aggregateId,
+    operation: 'event',
+    payloadVersion: 2,
+    clientTimestamp: new Date().toISOString(),
+    locationId,
+    payload
   };
 }

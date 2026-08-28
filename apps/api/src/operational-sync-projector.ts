@@ -73,7 +73,16 @@ type RfidCycleCountSnapshot = {
   readonly expectedItems?: readonly Record<string, unknown>[];
   readonly reads?: readonly Record<string, unknown>[];
   readonly results?: readonly Record<string, unknown>[];
-  readonly action?: 'start' | 'restart' | 'pause' | 'resume' | 'review' | 'complete' | 'cancel' | 'claim' | undefined;
+  readonly action?:
+    | 'start'
+    | 'restart'
+    | 'pause'
+    | 'resume'
+    | 'review'
+    | 'complete'
+    | 'cancel'
+    | 'claim'
+    | undefined;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -374,10 +383,14 @@ export class OperationalSyncProjector {
       protocolVersion: 1,
       operation: operation as RfidCycleCountSnapshot['operation'],
       count,
-      ...(Array.isArray(input.expectedItems) ? { expectedItems: records(input.expectedItems) } : {}),
+      ...(Array.isArray(input.expectedItems)
+        ? { expectedItems: records(input.expectedItems) }
+        : {}),
       ...(Array.isArray(input.reads) ? { reads: records(input.reads) } : {}),
       ...(Array.isArray(input.results) ? { results: records(input.results) } : {}),
-      ...(text(input, 'action') ? { action: text(input, 'action') as RfidCycleCountSnapshot['action'] } : {})
+      ...(text(input, 'action')
+        ? { action: text(input, 'action') as RfidCycleCountSnapshot['action'] }
+        : {})
     };
 
     if (snapshot.operation === 'create') {
@@ -399,7 +412,10 @@ export class OperationalSyncProjector {
       }
       if (snapshot.operation === 'state') {
         await this.applyRfidCycleCountState(ctx, countId, count, snapshot.action, existing.rows[0]);
-      } else if (existing.rows[0].ownerDeviceId && existing.rows[0].ownerDeviceId !== ctx.deviceId) {
+      } else if (
+        existing.rows[0].ownerDeviceId &&
+        existing.rows[0].ownerDeviceId !== ctx.deviceId
+      ) {
         throw new ValidationFailedError('RFID cycle count is owned by another desktop device');
       }
     }
@@ -462,7 +478,9 @@ export class OperationalSyncProjector {
         createdAt: header.createdAt.toISOString(),
         updatedAt: header.updatedAt.toISOString()
       },
-      ...(snapshot.operation === 'expected_batch' ? { expectedItems: snapshot.expectedItems ?? [] } : {}),
+      ...(snapshot.operation === 'expected_batch'
+        ? { expectedItems: snapshot.expectedItems ?? [] }
+        : {}),
       ...(snapshot.operation === 'read_batch' ? { reads: snapshot.reads ?? [] } : {}),
       ...(snapshot.operation === 'results' ? { results: snapshot.results ?? [] } : {})
     };
@@ -481,7 +499,11 @@ export class OperationalSyncProjector {
       throw new ValidationFailedError('RFID cycle count header is incomplete');
     }
     const status = text(input, 'status') ?? 'draft';
-    if (!['draft', 'ready', 'in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(status)) {
+    if (
+      !['draft', 'ready', 'in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(
+        status
+      )
+    ) {
       throw new ValidationFailedError('RFID cycle count status is invalid');
     }
     // Ownership belongs to the authenticated desktop session, never to a
@@ -531,7 +553,12 @@ export class OperationalSyncProjector {
     action: RfidCycleCountSnapshot['action'] | undefined,
     existing: { ownerDeviceId: string | null; status: string; version: string }
   ): Promise<void> {
-    if (!action || !['start', 'restart', 'pause', 'resume', 'review', 'complete', 'cancel', 'claim'].includes(action)) {
+    if (
+      !action ||
+      !['start', 'restart', 'pause', 'resume', 'review', 'complete', 'cancel', 'claim'].includes(
+        action
+      )
+    ) {
       throw new ValidationFailedError('RFID cycle count state action is invalid');
     }
     if (!ctx.deviceId) throw new ValidationFailedError('RFID cycle count state requires a device');
@@ -544,13 +571,17 @@ export class OperationalSyncProjector {
         [ctx.organizationId, countId, ctx.deviceId, existing.version]
       );
       if (claimed.rowCount !== 1) {
-        throw new ValidationFailedError('RFID cycle count cannot be claimed because it is already owned');
+        throw new ValidationFailedError(
+          'RFID cycle count cannot be claimed because it is already owned'
+        );
       }
       return;
     }
     if (action === 'restart') {
       if (!['in_progress', 'paused', 'review', 'completed'].includes(existing.status)) {
-        throw new ValidationFailedError('RFID cycle count cannot be restarted from its current status');
+        throw new ValidationFailedError(
+          'RFID cycle count cannot be restarted from its current status'
+        );
       }
       const restarted = await this.client.query(
         `WITH authorized_count AS (
@@ -580,7 +611,10 @@ export class OperationalSyncProjector {
       return;
     }
     const nextStatus = text(count, 'status');
-    if (!nextStatus || !['in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(nextStatus)) {
+    if (
+      !nextStatus ||
+      !['in_progress', 'paused', 'review', 'completed', 'cancelled'].includes(nextStatus)
+    ) {
       throw new ValidationFailedError('RFID cycle count next status is invalid');
     }
     const release = action === 'review' || action === 'complete' || action === 'cancel';
@@ -616,7 +650,8 @@ export class OperationalSyncProjector {
         ctx.deviceId
       ]
     );
-    if (updated.rowCount !== 1) throw new ValidationFailedError('RFID cycle count ownership changed');
+    if (updated.rowCount !== 1)
+      throw new ValidationFailedError('RFID cycle count ownership changed');
   }
 
   private async upsertRfidExpectedItems(
@@ -664,7 +699,8 @@ export class OperationalSyncProjector {
     rows: readonly Record<string, unknown>[]
   ): Promise<void> {
     if (!ctx.deviceId) throw new ValidationFailedError('RFID read packet requires a device');
-    if (rows.length > 100) throw new ValidationFailedError('RFID read packet may contain at most 100 EPCs');
+    if (rows.length > 100)
+      throw new ValidationFailedError('RFID read packet may contain at most 100 EPCs');
     for (const row of rows) {
       const id = text(row, 'id');
       const epcValue = text(row, 'epc');
@@ -737,11 +773,19 @@ export class OperationalSyncProjector {
            resolution = EXCLUDED.resolution, resolved_by_user_id = EXCLUDED.resolved_by_user_id,
            resolved_at = EXCLUDED.resolved_at, version = rfid_cycle_count_results.version + 1, updated_at = now()`,
         [
-          id, ctx.organizationId, countId, text(row, 'rfidTagId') ?? null,
-          text(row, 'productVariantId') ?? null, normalizeEpc(epcValue), classification,
-          text(row, 'expectedLocationId') ?? null, text(row, 'observedLocationId') ?? null,
-          decimal(row, 'strongestRssi') ?? null, text(row, 'resolution') ?? null,
-          text(row, 'resolvedByUserId') ?? null, text(row, 'resolvedAt') ?? null
+          id,
+          ctx.organizationId,
+          countId,
+          text(row, 'rfidTagId') ?? null,
+          text(row, 'productVariantId') ?? null,
+          normalizeEpc(epcValue),
+          classification,
+          text(row, 'expectedLocationId') ?? null,
+          text(row, 'observedLocationId') ?? null,
+          decimal(row, 'strongestRssi') ?? null,
+          text(row, 'resolution') ?? null,
+          text(row, 'resolvedByUserId') ?? null,
+          text(row, 'resolvedAt') ?? null
         ]
       );
     }
@@ -1288,8 +1332,8 @@ export class OperationalSyncProjector {
     requirePermission(ctx, 'catalog.write');
     const brandId =
       command.kind === 'catalog.brand.delete'
-        ? text(command.payload, 'brandId') ?? event.aggregateId
-        : text(command.payload, 'id') ?? event.aggregateId;
+        ? (text(command.payload, 'brandId') ?? event.aggregateId)
+        : (text(command.payload, 'id') ?? event.aggregateId);
     if (brandId !== event.aggregateId) {
       throw new ValidationFailedError('Desktop brand identity does not match sync aggregate');
     }
@@ -1335,7 +1379,8 @@ export class OperationalSyncProjector {
          RETURNING id, name, department_id AS "departmentId"`,
         [ctx.organizationId, brandId, name, catalogSlug(name, brandId), departmentId]
       );
-      if (!updated.rows[0]) throw new ValidationFailedError('Desktop brand does not exist on Platform');
+      if (!updated.rows[0])
+        throw new ValidationFailedError('Desktop brand does not exist on Platform');
       return { kind: 'catalog.brand', brand: updated.rows[0] };
     }
     const result = await this.client.query<{
@@ -1349,13 +1394,7 @@ export class OperationalSyncProjector {
        SET name = EXCLUDED.name, slug = EXCLUDED.slug, department_id = EXCLUDED.department_id,
            active = true, deleted_at = NULL, version = brands.version + 1, updated_at = now()
        RETURNING id, name, department_id AS "departmentId"`,
-      [
-        brandId,
-        ctx.organizationId,
-        name,
-        catalogSlug(name, brandId),
-        departmentId
-      ]
+      [brandId, ctx.organizationId, name, catalogSlug(name, brandId), departmentId]
     );
     if (!result.rows[0]) throw new ValidationFailedError('Desktop brand could not be saved');
     return { kind: 'catalog.brand', brand: result.rows[0] };
@@ -1369,8 +1408,8 @@ export class OperationalSyncProjector {
     requirePermission(ctx, 'catalog.write');
     const categoryId =
       command.kind === 'catalog.category.delete'
-        ? text(command.payload, 'categoryId') ?? event.aggregateId
-        : text(command.payload, 'id') ?? event.aggregateId;
+        ? (text(command.payload, 'categoryId') ?? event.aggregateId)
+        : (text(command.payload, 'id') ?? event.aggregateId);
     if (categoryId !== event.aggregateId) {
       throw new ValidationFailedError('Desktop category identity does not match sync aggregate');
     }
@@ -1459,10 +1498,12 @@ export class OperationalSyncProjector {
     requirePermission(ctx, 'catalog.write');
     const specificationId =
       command.kind === 'catalog.specification.delete'
-        ? text(command.payload, 'specificationId') ?? event.aggregateId
-        : text(command.payload, 'id') ?? event.aggregateId;
+        ? (text(command.payload, 'specificationId') ?? event.aggregateId)
+        : (text(command.payload, 'id') ?? event.aggregateId);
     if (specificationId !== event.aggregateId) {
-      throw new ValidationFailedError('Desktop specification identity does not match sync aggregate');
+      throw new ValidationFailedError(
+        'Desktop specification identity does not match sync aggregate'
+      );
     }
     if (command.kind === 'catalog.specification.delete') {
       const deleted = await this.client.query(
@@ -1506,7 +1547,14 @@ export class OperationalSyncProjector {
              deleted_at = NULL, version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
-        [ctx.organizationId, specificationId, name, catalogSlug(name, specificationId), departmentId, unit || null]
+        [
+          ctx.organizationId,
+          specificationId,
+          name,
+          catalogSlug(name, specificationId),
+          departmentId,
+          unit || null
+        ]
       );
       if (!updated.rows[0]) {
         throw new ValidationFailedError('Desktop specification does not exist on Platform');
@@ -1538,9 +1586,7 @@ export class OperationalSyncProjector {
       return {
         kind: 'catalog.specification',
         specification,
-        ...(specification.id !== specificationId
-          ? { replaceSpecificationId: specificationId }
-          : {})
+        ...(specification.id !== specificationId ? { replaceSpecificationId: specificationId } : {})
       };
     }
     const result = await this.client.query<{
@@ -1557,14 +1603,7 @@ export class OperationalSyncProjector {
            unit = EXCLUDED.unit, data_type = 'text', active = true, deleted_at = NULL,
            version = spec_keys.version + 1, updated_at = now()
        RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
-      [
-        specificationId,
-        ctx.organizationId,
-        name,
-        specificationSlug,
-        departmentId,
-        unit || null
-      ]
+      [specificationId, ctx.organizationId, name, specificationSlug, departmentId, unit || null]
     );
     if (!result.rows[0])
       throw new ValidationFailedError('Desktop specification could not be saved');
@@ -1580,8 +1619,8 @@ export class OperationalSyncProjector {
   ): Promise<Record<string, unknown>> {
     const supplierId =
       command.kind === 'supplier.delete'
-        ? text(command.payload, 'supplierId') ?? event.aggregateId
-        : text(command.payload, 'id') ?? event.aggregateId;
+        ? (text(command.payload, 'supplierId') ?? event.aggregateId)
+        : (text(command.payload, 'id') ?? event.aggregateId);
     if (!uuid(supplierId) || supplierId !== event.aggregateId) {
       throw new ValidationFailedError('Desktop supplier identity does not match sync aggregate');
     }
@@ -1729,7 +1768,11 @@ export class OperationalSyncProjector {
       );
       if (existing.rowCount === 1)
         return {
-          ...(await this.catalogSnapshot(ctx.organizationId, existing.rows[0]!.product_id, existing.rows[0]!.id)),
+          ...(await this.catalogSnapshot(
+            ctx.organizationId,
+            existing.rows[0]!.product_id,
+            existing.rows[0]!.id
+          )),
           sourceProductId,
           sourceVariantId
         };
@@ -1972,13 +2015,70 @@ export class OperationalSyncProjector {
     const epc = normalizeEpc(rawEpc);
     const locationId = text(command.payload, 'locationId');
     const binId = text(command.payload, 'binId');
-    await this.client.query(
-      `INSERT INTO rfid_tags (id, organization_id, epc, tid, variant_id, status)
-       VALUES ($1, $2, upper($3), $4, $5, 'assigned')
-       ON CONFLICT (id) DO UPDATE SET epc = EXCLUDED.epc, tid = EXCLUDED.tid, variant_id = EXCLUDED.variant_id,
-         status = 'assigned', version = rfid_tags.version + 1, updated_at = now()
-       RETURNING id, epc, tid, variant_id AS "variantId", status, version`,
+    // Validate the foreign key before mutating a tag.  Otherwise a missing
+    // cloud variant bubbles up as PostgreSQL's generic 500 response and the
+    // desktop keeps retrying an operation that can never succeed.
+    const variant = await this.client.query<{ productId: string }>(
+      `SELECT product_id AS "productId"
+       FROM product_variants
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    const productId = variant.rows[0]?.productId;
+    if (!productId)
+      throw new ValidationFailedError('Desktop RFID variant does not exist on Platform');
+
+    // EPC identifies the physical tag, while the desktop aggregate ID is
+    // generated locally.  A tag can therefore already exist in Platform
+    // under a different desktop ID (for example from an earlier import).  In
+    // that case update the canonical EPC record instead of trying to insert a
+    // duplicate row and failing on rfid_tags_active_org_epc_uq.
+    const tagWithSameId = await this.client.query<{ epc: string }>(
+      `SELECT epc FROM rfid_tags
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       FOR UPDATE`,
+      [ctx.organizationId, event.aggregateId]
+    );
+    if (tagWithSameId.rows[0] && tagWithSameId.rows[0].epc !== epc) {
+      throw new ValidationFailedError('Desktop RFID tag identity is already used by another EPC');
+    }
+    const tag = await this.client.query<{ id: string }>(
+      `INSERT INTO rfid_tags (id, organization_id, epc, tid, variant_id, status, last_seen_at)
+       VALUES ($1, $2, upper($3), $4, $5, 'assigned', now())
+       ON CONFLICT (organization_id, epc) WHERE deleted_at IS NULL
+       DO UPDATE SET
+         tid = COALESCE(EXCLUDED.tid, rfid_tags.tid),
+         variant_id = EXCLUDED.variant_id,
+         status = 'assigned',
+         last_seen_at = now(),
+         version = rfid_tags.version + 1,
+         updated_at = now()
+       RETURNING id`,
       [event.aggregateId, ctx.organizationId, epc, text(command.payload, 'tid') ?? null, variantId]
+    );
+    const canonicalTagId = tag.rows[0]?.id;
+    if (!canonicalTagId) throw new ValidationFailedError('Desktop RFID tag could not be saved');
+    await this.client.query(
+      `INSERT INTO rfid_tag_events (organization_id, tag_id, location_id, event_type, metadata)
+       VALUES ($1, $2, $3, 'assigned', $4::jsonb)`,
+      [
+        ctx.organizationId,
+        canonicalTagId,
+        locationId ?? null,
+        JSON.stringify({
+          source: 'rfiddaja_desktop_sync',
+          ...(binId ? { binId } : {}),
+          ...(text(command.payload, 'userMemory')
+            ? { userMemory: text(command.payload, 'userMemory') }
+            : {}),
+          ...(text(command.payload, 'deviceId')
+            ? { deviceId: text(command.payload, 'deviceId') }
+            : {}),
+          ...(text(command.payload, 'replaceTagId')
+            ? { replaceTagId: text(command.payload, 'replaceTagId') }
+            : {})
+        })
+      ]
     );
     // The desktop records a tag assignment separately from the inventory
     // quantity.  Preserve the selected shelf even when the initial quantity
@@ -2012,15 +2112,6 @@ export class OperationalSyncProjector {
         metadata: { command: command.kind }
       });
     }
-    const variant = await this.client.query<{ productId: string }>(
-      `SELECT product_id AS "productId"
-       FROM product_variants
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [ctx.organizationId, variantId]
-    );
-    const productId = variant.rows[0]?.productId;
-    if (!productId)
-      throw new ValidationFailedError('Desktop RFID variant does not exist on Platform');
     return this.catalogSnapshot(ctx.organizationId, productId, variantId);
   }
 
