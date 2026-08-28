@@ -12,6 +12,64 @@ type StateProjector = {
 };
 
 describe('OperationalSyncProjector RFID terminal state', () => {
+  it('materializes a supplier command into a canonical cloud snapshot', async () => {
+    const supplierId = '11111111-1111-4111-8111-111111111111';
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: supplierId,
+            code: 'SUP-001',
+            name: 'Daja Trade',
+            taxNumber: '109876543',
+            contactEmail: 'nabavka@example.test',
+            active: true,
+            version: '1'
+          }
+        ]
+      });
+    const projector = new OperationalSyncProjector({ query } as never);
+
+    const result = await projector.materialize(
+      {
+        requestId: 'request-id',
+        correlationId: 'correlation-id',
+        organizationId: 'organization-id',
+        userId: 'user-id',
+        roles: [],
+        permissions: ['sync.write']
+      },
+      {
+        eventId: 'event-id',
+        idempotencyKey: 'idempotency-key',
+        aggregateType: 'supplier',
+        aggregateId: supplierId,
+        operation: 'command',
+        payloadVersion: 1,
+        payload: {
+          command: {
+            kind: 'supplier.upsert',
+            payload: {
+              code: 'sup-001',
+              name: 'Daja Trade',
+              taxNumber: '109876543',
+              contactEmail: 'nabavka@example.test',
+              active: true
+            }
+          }
+        }
+      }
+    );
+
+    expect(query.mock.calls[1]?.[0]).toContain('INSERT INTO suppliers');
+    expect(result.payload.operationalSnapshot).toMatchObject({
+      kind: 'supplier',
+      supplier: { id: supplierId, code: 'SUP-001', name: 'Daja Trade' }
+    });
+  });
+
   it('materializes an RFID count header directly from its create command', async () => {
     const query = vi
       .fn()

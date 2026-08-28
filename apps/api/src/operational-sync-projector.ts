@@ -60,6 +60,10 @@ type CatalogSpecificationCommand = {
     | 'catalog.specification.delete';
   payload: Record<string, unknown>;
 };
+type SupplierCommand = {
+  kind: 'supplier.upsert' | 'supplier.delete';
+  payload: Record<string, unknown>;
+};
 
 type RfidCycleCountSnapshot = {
   readonly kind: 'rfid.cycle_count';
@@ -306,6 +310,10 @@ export class OperationalSyncProjector {
         kind,
         payload: commandPayload
       });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'supplier.upsert' || kind === 'supplier.delete') {
+      const snapshot = await this.supplier(ctx, event, { kind, payload: commandPayload });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (kind === 'settings.update') {
@@ -1561,6 +1569,92 @@ export class OperationalSyncProjector {
     if (!result.rows[0])
       throw new ValidationFailedError('Desktop specification could not be saved');
     return { kind: 'catalog.specification', specification: result.rows[0] };
+  }
+
+  /** Persist supplier master data as a canonical cloud record. Unlike the
+   * older generic event, this snapshot can be applied by every desktop. */
+  private async supplier(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: SupplierCommand
+  ): Promise<Record<string, unknown>> {
+    const supplierId =
+      command.kind === 'supplier.delete'
+        ? text(command.payload, 'supplierId') ?? event.aggregateId
+        : text(command.payload, 'id') ?? event.aggregateId;
+    if (!uuid(supplierId) || supplierId !== event.aggregateId) {
+      throw new ValidationFailedError('Desktop supplier identity does not match sync aggregate');
+    }
+    if (command.kind === 'supplier.delete') {
+      const deleted = await this.client.query(
+        `UPDATE suppliers
+         SET active = false, deleted_at = COALESCE(deleted_at, now()),
+             version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, supplierId]
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ValidationFailedError('Desktop supplier does not exist on Platform');
+      }
+      return { kind: 'supplier', id: supplierId, deleted: true };
+    }
+
+    const code = text(command.payload, 'code')?.toUpperCase();
+    const name = text(command.payload, 'name');
+    const taxId = nullableText(command.payload, 'taxNumber');
+    const contactEmail = nullableText(command.payload, 'contactEmail');
+    if (
+      !code ||
+      code.length > 100 ||
+      !name ||
+      name.length > 200 ||
+      (typeof taxId === 'string' && taxId.length > 100) ||
+      (typeof contactEmail === 'string' &&
+        (contactEmail.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)))
+    ) {
+      throw new ValidationFailedError('Desktop supplier command is incomplete');
+    }
+    const duplicate = await this.client.query<{ id: string }>(
+      `SELECT id FROM suppliers
+       WHERE organization_id = $1 AND code = $2 AND id <> $3 AND deleted_at IS NULL
+       LIMIT 1`,
+      [ctx.organizationId, code, supplierId]
+    );
+    if (duplicate.rows[0]) {
+      throw new ValidationFailedError('Supplier code already exists in this organization');
+    }
+    const result = await this.client.query<{
+      id: string;
+      code: string;
+      name: string;
+      taxNumber: string | null;
+      contactEmail: string | null;
+      active: boolean;
+      version: string;
+    }>(
+      `INSERT INTO suppliers (id, organization_id, code, name, tax_id, contact_email, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO UPDATE
+       SET code = EXCLUDED.code, name = EXCLUDED.name, tax_id = EXCLUDED.tax_id,
+           contact_email = EXCLUDED.contact_email, active = EXCLUDED.active, deleted_at = NULL,
+           version = suppliers.version + 1, updated_at = now()
+       WHERE suppliers.organization_id = EXCLUDED.organization_id
+       RETURNING id, code, name, tax_id AS "taxNumber", contact_email AS "contactEmail",
+                 active, version::text AS version`,
+      [
+        supplierId,
+        ctx.organizationId,
+        code,
+        name,
+        taxId ?? null,
+        contactEmail ?? null,
+        boolean(command.payload, 'active', true)
+      ]
+    );
+    if (!result.rows[0]) {
+      throw new ValidationFailedError('Supplier belongs to another organization');
+    }
+    return { kind: 'supplier', supplier: result.rows[0] };
   }
 
   private async settings(
