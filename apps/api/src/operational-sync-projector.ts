@@ -1992,10 +1992,10 @@ export class OperationalSyncProjector {
     );
     await this.addCatalogPrices(ctx, variantId, input, currency);
     await this.setImages(ctx.organizationId, row.product_id, input);
-    if (input.epc === null) {
-      // Desktop sends null only when the EPC field was explicitly cleared.
-      // RFID tags are stored separately from the variant, so clear either
-      // possible relation before publishing the refreshed catalog snapshot.
+    if (input.epc === null || input.trackByTag === false) {
+      // Desktop sends null when the EPC field is explicitly cleared. Older
+      // desktop builds express the same intent by disabling tag tracking, so
+      // accept both forms. RFID tags are stored separately from the variant.
       await this.client.query(
         `UPDATE rfid_tags t
          SET inventory_item_id = NULL, variant_id = NULL, status = 'unassigned',
