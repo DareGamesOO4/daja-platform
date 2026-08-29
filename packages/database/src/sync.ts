@@ -271,11 +271,13 @@ export class SyncRepository {
     const cursor = input.cursor ?? '';
     const result = await this.client.query(
       `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
+              p.created_at AS "productCreatedAt", p.updated_at AS "productUpdatedAt",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
               p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.gender,
               v.current_price_amount AS "priceAmount", v.currency, v.attributes, v.active, v.published,
+              v.created_at AS "variantCreatedAt", v.updated_at AS "variantUpdatedAt",
               v.version AS "variantVersion", media.public_url AS "imageUri",
               sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
               cost.amount_minor AS "costAmount",
@@ -313,7 +315,7 @@ export class SyncRepository {
          ORDER BY created_at DESC LIMIT 1
        ) cost ON true
        LEFT JOIN LATERAL (
-         SELECT t.id, t.epc, t.status
+         SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt"
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
