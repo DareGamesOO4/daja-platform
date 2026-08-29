@@ -1602,6 +1602,7 @@ export class RfidController {
   async unassign(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'rfid.assign');
+    const tagId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(
       z.object({
         expectedVersion: z.coerce.number().int().positive().optional(),
@@ -1609,10 +1610,28 @@ export class RfidController {
       }),
       body
     );
-    const tag = await new TransactionManager(this.database.pool, this.logger).run(
+    const result = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
+        // Capture the owning variant before unassignTag clears both the direct
+        // variant relation and the inventory-item relation. The resulting
+        // catalog snapshot is what tells every RFID desktop client to remove
+        // the EPC from its local item list.
+        const owner = await client.query<{ productId: string; variantId: string }>(
+          `SELECT v.product_id AS "productId", v.id AS "variantId"
+           FROM rfid_tags t
+           LEFT JOIN inventory_items item
+             ON item.id = t.inventory_item_id
+            AND item.organization_id = t.organization_id
+            AND item.deleted_at IS NULL
+           JOIN product_variants v
+             ON v.id = COALESCE(t.variant_id, item.variant_id)
+            AND v.organization_id = t.organization_id
+            AND v.deleted_at IS NULL
+           WHERE t.organization_id = $1 AND t.id = $2 AND t.deleted_at IS NULL`,
+          [ctx.organizationId, tagId]
+        );
         const tag = await new RfidRepository(client).unassignTag(ctx, {
-          tagId: parseWithSchema(uuidSchema, id),
+          tagId,
           ...input
         });
         await new AuditRepository(client).append({
@@ -1630,11 +1649,19 @@ export class RfidController {
           aggregateId: tag.id,
           payload: { tagId: tag.id }
         });
+        const variant = owner.rows[0];
+        if (variant) {
+          await new OperationalSyncProjector(client).publishProductChange(
+            ctx,
+            variant.productId,
+            variant.variantId
+          );
+        }
         return tag;
       }
     );
-    await this.invalidateRfid(ctx.organizationId, tag.epc);
-    return tag;
+    await this.invalidateRfid(ctx.organizationId, result.epc);
+    return result;
   }
 
   @Patch('rfid/tags/:id/status')
