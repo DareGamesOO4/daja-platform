@@ -109,6 +109,8 @@ const variantCreateSchema = z.object({
 });
 
 const variantPatchSchema = variantCreateSchema.partial().extend({
+  // null is intentional: it means the user explicitly cleared the EPC field.
+  epc: z.string().trim().min(1).nullable().optional(),
   expectedVersion: z.coerce.number().int().positive().optional()
 });
 const scheduledPriceSchema = z.object({
@@ -539,11 +541,34 @@ export class StaffCatalogController {
     const patched = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
         const repository = new CatalogRepository(client);
+        const { epc, ...variantInput } = input;
         const { before, after, priceChanged } = await repository.patchVariant(
           ctx,
           variantId,
-          input
+          variantInput
         );
+        // The EPC field lives in rfid_tags, not product_variants. A deliberate
+        // null sent from the admin form must therefore clear every tag relation
+        // for this variant in the same Save operation.
+        if (epc === null) {
+          await client.query(
+            `UPDATE rfid_tags t
+             SET inventory_item_id = NULL, variant_id = NULL, status = 'unassigned',
+                 version = version + 1, updated_at = now()
+             WHERE t.organization_id = $1 AND t.deleted_at IS NULL
+               AND (
+                 t.variant_id = $2
+                 OR EXISTS (
+                   SELECT 1 FROM inventory_items item
+                   WHERE item.id = t.inventory_item_id
+                     AND item.organization_id = t.organization_id
+                     AND item.deleted_at IS NULL
+                     AND item.variant_id = $2
+                 )
+               )`,
+            [ctx.organizationId, variantId]
+          );
+        }
         const product = await repository.getProduct(ctx, after.productId);
         await new AuditRepository(client).append({
           ctx,
