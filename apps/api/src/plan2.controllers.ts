@@ -11,10 +11,11 @@ import {
   Post,
   Put,
   Query,
-  Req
+  Req,
+  Res
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
@@ -157,6 +158,20 @@ const departmentSchema = z.object({
   active: z.boolean().optional()
 });
 
+function escapeXml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function sitemapLastmod(value: string | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
 @Controller('public/catalog')
 export class PublicCatalogController {
   constructor(
@@ -179,6 +194,61 @@ export class PublicCatalogController {
       limit: parseWithSchema(paginationLimitSchema, query.limit),
       sort: query.sort
     });
+  }
+
+  @Get('sitemap.xml')
+  async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
+    const ctx = this.publicContext(request);
+    const cacheKey = `catalog:sitemap:${ctx.organizationId}`;
+    const cached = await this.redis.client.get(cacheKey);
+    if (cached) {
+      response
+        .type('application/xml')
+        .setHeader('Cache-Control', 'public, max-age=3600')
+        .send(cached);
+      return;
+    }
+
+    const rows = (
+      await this.database.pool.query<{
+        slug: string;
+        updated_at: string | Date;
+        images: string[];
+      }>(
+        `SELECT p.slug, p.updated_at,
+                COALESCE(media.items, '[]'::jsonb) AS images
+         FROM products p
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id) AS items
+           FROM product_media pm
+           JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+           WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ) media ON true
+         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published
+         ORDER BY p.updated_at DESC, p.id DESC`,
+        [ctx.organizationId]
+      )
+    ).rows;
+    const configuredSiteUrl = this.config.OAUTH_FRONTEND_REDIRECT_URL ||
+      this.config.CORS_ALLOWED_ORIGINS.find((origin) => !origin.includes('localhost')) ||
+      'https://dajashop.rs';
+    const siteUrl = configuredSiteUrl.replace(/\/$/, '');
+    const entries = rows
+      .map((row) => {
+        const productUrl = `${siteUrl}/product/${encodeURIComponent(row.slug)}`;
+        const images = (Array.isArray(row.images) ? row.images : [])
+          .filter(Boolean)
+          .map((image) => `<image:image><image:loc>${escapeXml(image)}</image:loc></image:image>`)
+          .join('');
+        return `<url><loc>${escapeXml(productUrl)}</loc><lastmod>${sitemapLastmod(row.updated_at)}</lastmod>${images}</url>`;
+      })
+      .join('');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">${entries}</urlset>`;
+    await this.redis.client.set(cacheKey, xml, 'EX', 3600);
+    response
+      .type('application/xml')
+      .setHeader('Cache-Control', 'public, max-age=3600')
+      .send(xml);
   }
 
   @Get('products/:slug')
@@ -447,10 +517,11 @@ export class StaffCatalogController {
     const result = await this.database.pool.query(
       `UPDATE products SET active = $3, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, active, published`,
+       RETURNING id, slug, active, published`,
       [ctx.organizationId, productId, input.active]
     );
     if (!result.rowCount) throw new TenantAccessDeniedError();
+    await this.invalidateCatalog(ctx.organizationId, result.rows[0].slug);
     return result.rows[0];
   }
 
@@ -1350,10 +1421,11 @@ export class StaffCatalogController {
 
   private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {
     const validSlugs = slugs.filter((slug): slug is string => Boolean(slug));
-    const keys = validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`);
-    if (keys.length > 0) {
-      await this.redis.client.del(...keys);
-    }
+    const keys = [
+      `catalog:sitemap:${organizationId}`,
+      ...validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`)
+    ];
+    await this.redis.client.del(...keys);
     const products = await this.database.pool.query<{ id: string; slug: string }>(
       `SELECT id, slug FROM products
        WHERE organization_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
