@@ -93,7 +93,7 @@ export class CustomerAuthService {
     });
   }
 
-  startGoogleOAuth(organizationId: string): string {
+  startGoogleOAuth(organizationId: string, returnTo?: string): string {
     this.assertGoogleOAuthConfigured();
     const state = signJwt(
       {
@@ -101,7 +101,8 @@ export class CustomerAuthService {
         sub: 'google-oauth-state',
         org: organizationId,
         jti: randomUUID(),
-        provider: 'google'
+        provider: 'google',
+        returnTo: this.resolveOAuthReturnUrl(returnTo)
       },
       this.config.JWT_ACCESS_SECRET,
       600
@@ -270,8 +271,8 @@ export class CustomerAuthService {
     };
   }
 
-  oauthSuccessRedirect(tokens: CustomerTokenPair): string {
-    const url = new URL(this.oauthFrontendRedirectUrl());
+  oauthSuccessRedirect(tokens: CustomerTokenPair, state?: string): string {
+    const url = new URL(this.oauthReturnUrlFromState(state));
     url.hash = new URLSearchParams({
       oauth: 'success',
       accessToken: tokens.accessToken,
@@ -280,8 +281,8 @@ export class CustomerAuthService {
     return url.toString();
   }
 
-  oauthErrorRedirect(): string {
-    const url = new URL(this.oauthFrontendRedirectUrl());
+  oauthErrorRedirect(state?: string): string {
+    const url = new URL(this.oauthReturnUrlFromState(state));
     url.searchParams.set('oauth_error', 'google_sign_in_failed');
     return url.toString();
   }
@@ -443,6 +444,41 @@ export class CustomerAuthService {
       throw new ValidationFailedError('OAUTH_FRONTEND_REDIRECT_URL is not configured');
     }
     return this.config.OAUTH_FRONTEND_REDIRECT_URL;
+  }
+
+  /**
+   * Only allow storefront origins configured for CORS. The requested origin
+   * comes from the browser, but is signed into state only after this check, so
+   * an OAuth callback can never become an open redirect.
+   */
+  private resolveOAuthReturnUrl(returnTo: unknown): string {
+    const fallback = this.oauthFrontendRedirectUrl();
+    if (typeof returnTo !== 'string' || !returnTo) return fallback;
+    try {
+      const candidate = new URL(returnTo);
+      const allowedOrigins = new Set(
+        [fallback, ...this.config.CORS_ALLOWED_ORIGINS].map((value) => new URL(value).origin)
+      );
+      return allowedOrigins.has(candidate.origin) ? candidate.toString() : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private oauthReturnUrlFromState(stateToken?: string): string {
+    if (!stateToken) return this.oauthFrontendRedirectUrl();
+    try {
+      const state = verifyJwt(stateToken, this.config.JWT_ACCESS_SECRET, 'access');
+      if (
+        state.sub !== 'google-oauth-state' ||
+        state.provider !== 'google'
+      ) {
+        return this.oauthFrontendRedirectUrl();
+      }
+      return this.resolveOAuthReturnUrl(state.returnTo);
+    } catch {
+      return this.oauthFrontendRedirectUrl();
+    }
   }
 }
 

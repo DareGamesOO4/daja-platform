@@ -169,9 +169,12 @@ export class CustomerAuthController {
   }
 
   @Get('oauth/google/start')
-  googleOauthStart(@Res() response: Response) {
+  googleOauthStart(
+    @Query('returnTo') returnTo: string | undefined,
+    @Res() response: Response
+  ) {
     const organizationId = publicOrganizationId(this.config);
-    const url = this.auth.startGoogleOAuth(organizationId);
+    const url = this.auth.startGoogleOAuth(organizationId, returnTo);
     response.redirect(url);
   }
 
@@ -193,7 +196,7 @@ export class CustomerAuthController {
       return;
     }
     if (error || !code || !state) {
-      response.redirect(this.auth.oauthErrorRedirect());
+      response.redirect(this.auth.oauthErrorRedirect(state));
       return;
     }
     try {
@@ -202,9 +205,9 @@ export class CustomerAuthController {
         code,
         state
       });
-      response.redirect(this.auth.oauthSuccessRedirect(tokens));
+      response.redirect(this.auth.oauthSuccessRedirect(tokens, state));
     } catch {
-      response.redirect(this.auth.oauthErrorRedirect());
+      response.redirect(this.auth.oauthErrorRedirect(state));
     }
   }
 
