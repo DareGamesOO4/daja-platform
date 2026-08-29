@@ -1992,6 +1992,28 @@ export class OperationalSyncProjector {
     );
     await this.addCatalogPrices(ctx, variantId, input, currency);
     await this.setImages(ctx.organizationId, row.product_id, input);
+    if (input.epc === null) {
+      // Desktop sends null only when the EPC field was explicitly cleared.
+      // RFID tags are stored separately from the variant, so clear either
+      // possible relation before publishing the refreshed catalog snapshot.
+      await this.client.query(
+        `UPDATE rfid_tags t
+         SET inventory_item_id = NULL, variant_id = NULL, status = 'unassigned',
+             version = version + 1, updated_at = now()
+         WHERE t.organization_id = $1 AND t.deleted_at IS NULL
+           AND (
+             t.variant_id = $2
+             OR EXISTS (
+               SELECT 1 FROM inventory_items item
+               WHERE item.id = t.inventory_item_id
+                 AND item.organization_id = t.organization_id
+                 AND item.deleted_at IS NULL
+                 AND item.variant_id = $2
+             )
+           )`,
+        [ctx.organizationId, variantId]
+      );
+    }
     if (row.product_slug !== nextSlug && this.mediaStorage) {
       const relocated = await new MediaRepository(this.client).relocateProductMedia(
         ctx,
