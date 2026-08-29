@@ -16,6 +16,7 @@ export interface ProductRecord {
   name: string;
   slug: string;
   description: string | null;
+  itemCondition: 'new' | 'used' | 'refurbished';
   departmentId: string | null;
   brandId: string | null;
   primaryCategoryId: string | null;
@@ -39,6 +40,7 @@ export interface VariantRecord {
   productId: string;
   sku: string | null;
   barcode: string | null;
+  mpn: string | null;
   name: string | null;
   gender: string | null;
   currentPriceAmount: number;
@@ -180,41 +182,18 @@ export class CatalogRepository {
 
   async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
     const result = await this.client.query(
-      `SELECT p.*, d.slug AS department, b.name AS brand_name, c.name AS category_name,
-              (
-                SELECT vp.amount_minor
-                FROM product_variants pv
-                JOIN LATERAL (
-                  SELECT amount_minor
-                  FROM variant_prices
-                  WHERE organization_id = p.organization_id AND variant_id = pv.id
-                    AND price_type = 'sale' AND valid_from <= now()
-                    AND (valid_until IS NULL OR valid_until > now())
-                  ORDER BY valid_from DESC, created_at DESC
-                  LIMIT 1
-                ) vp ON true
-                WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
-                  AND pv.deleted_at IS NULL AND pv.active AND pv.published
-                ORDER BY pv.current_price_amount, pv.id
-                LIMIT 1
-              ) AS "salePrice",
-              (
-                SELECT vp.valid_until
-                FROM product_variants pv
-                JOIN LATERAL (
-                  SELECT valid_until
-                  FROM variant_prices
-                  WHERE organization_id = p.organization_id AND variant_id = pv.id
-                    AND price_type = 'sale' AND valid_from <= now()
-                    AND (valid_until IS NULL OR valid_until > now())
-                  ORDER BY valid_from DESC, created_at DESC
-                  LIMIT 1
-                ) vp ON true
-                WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
-                  AND pv.deleted_at IS NULL AND pv.active AND pv.published
-                ORDER BY pv.current_price_amount, pv.id
-                LIMIT 1
-              ) AS "saleValidUntil",
+      `SELECT p.*, p.item_condition AS "itemCondition", d.slug AS department, b.name AS brand_name, c.name AS category_name,
+              v.id AS "variantId", v.sku, v.barcode, v.mpn, v.currency,
+              v.current_price_amount AS "regularPrice",
+              COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,
+              active_sale.amount_minor AS "salePrice",
+              active_sale.valid_until AS "saleValidUntil",
+              COALESCE(inventory.quantity, 0) AS "availableQuantity",
+              (COALESCE(inventory.quantity, 0) > 0) AS "inStock",
+              jsonb_build_object(
+                'availableQuantity', COALESCE(inventory.quantity, 0),
+                'inStock', (COALESCE(inventory.quantity, 0) > 0)
+              ) AS availability,
               COALESCE(variants.items, '[]'::jsonb) AS variants,
               COALESCE(media.items, '[]'::jsonb) AS images,
               media.primary_image_url AS "primaryImageUrl",
@@ -223,6 +202,35 @@ export class CatalogRepository {
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT pv.*
+         FROM product_variants pv
+         WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
+           AND pv.deleted_at IS NULL AND pv.active AND pv.published
+         ORDER BY pv.current_price_amount, pv.id
+         LIMIT 1
+       ) v ON true
+       LEFT JOIN LATERAL (
+         SELECT vp.amount_minor, vp.valid_until
+         FROM variant_prices vp
+         WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+           AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND (vp.valid_until IS NULL OR vp.valid_until > now())
+         ORDER BY vp.valid_from DESC, vp.created_at DESC
+         LIMIT 1
+       ) active_sale ON true
+       LEFT JOIN LATERAL (
+         SELECT SUM(ib.quantity)::integer AS quantity
+         FROM inventory_balances ib
+         JOIN product_variants inventory_variant
+           ON inventory_variant.id = ib.variant_id
+          AND inventory_variant.organization_id = ib.organization_id
+          AND inventory_variant.product_id = p.id
+          AND inventory_variant.deleted_at IS NULL
+          AND inventory_variant.active
+          AND inventory_variant.published
+         WHERE ib.organization_id = p.organization_id
+       ) inventory ON true
        LEFT JOIN LATERAL (
          SELECT jsonb_agg(to_jsonb(v) ORDER BY v.current_price_amount) AS items
          FROM product_variants v
@@ -237,7 +245,8 @@ export class CatalogRepository {
                'thumb', thumb.public_url,
                'role', pm.role,
                'position', pm.position,
-               'isPrimary', pm.is_primary
+               'isPrimary', pm.is_primary,
+               'altText', pm.alt_text
              )
              ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
            ) FILTER (WHERE ma.id IS NOT NULL) AS items,
@@ -259,6 +268,22 @@ export class CatalogRepository {
       [ctx.organizationId, slug]
     );
     return result.rows[0] ?? null;
+  }
+
+  async getPublicProductRedirect(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    oldSlug: string
+  ): Promise<string | null> {
+    const result = await this.client.query<{ redirect_to: string }>(
+      `SELECT p.slug AS redirect_to
+       FROM product_slug_redirects r
+       JOIN products p ON p.id = r.product_id AND p.organization_id = r.organization_id
+       WHERE r.organization_id = $1 AND r.old_slug = $2
+         AND p.deleted_at IS NULL AND p.active AND p.published
+       LIMIT 1`,
+      [ctx.organizationId, oldSlug]
+    );
+    return result.rows[0]?.redirect_to ?? null;
   }
 
   async listBrands(ctx: Pick<RequestContext, 'organizationId'>) {
@@ -289,6 +314,7 @@ export class CatalogRepository {
       name: string;
       slug: string;
       description?: string | null | undefined;
+      itemCondition?: 'new' | 'used' | 'refurbished' | undefined;
       departmentId?: string | null | undefined;
       brandId?: string | null | undefined;
       primaryCategoryId?: string | null | undefined;
@@ -308,14 +334,15 @@ export class CatalogRepository {
     await this.assertCatalogHierarchy(ctx.organizationId, input.departmentId, input.brandId, input.primaryCategoryId);
     try {
       const result = await this.client.query<ProductRow>(
-        `INSERT INTO products (organization_id, name, slug, description, department_id, brand_id, primary_category_id, seo, features, model_3d_url, marketing_flags, active, published, legacy_firestore_id, external_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15)
+        `INSERT INTO products (organization_id, name, slug, description, item_condition, department_id, brand_id, primary_category_id, seo, features, model_3d_url, marketing_flags, active, published, legacy_firestore_id, external_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13, $14, $15, $16)
          RETURNING *`,
         [
           ctx.organizationId,
           input.name,
           input.slug,
           input.description ?? null,
+          input.itemCondition ?? 'new',
           input.departmentId ?? null,
           input.brandId ?? null,
           input.primaryCategoryId ?? null,
@@ -357,6 +384,7 @@ export class CatalogRepository {
       name: string | undefined;
       slug: string | undefined;
       description: string | null | undefined;
+      itemCondition: 'new' | 'used' | 'refurbished' | undefined;
       departmentId: string | null | undefined;
       brandId: string | null | undefined;
       primaryCategoryId: string | null | undefined;
@@ -382,8 +410,8 @@ export class CatalogRepository {
     try {
       const result = await this.client.query<ProductRow>(
         `UPDATE products
-         SET name = $3, slug = $4, description = $5, department_id = $6, brand_id = $7, primary_category_id = $8,
-             seo = $9::jsonb, features = $10::jsonb, model_3d_url = $11, marketing_flags = $12::jsonb, active = $13, published = $14, version = version + 1, updated_at = now()
+         SET name = $3, slug = $4, description = $5, item_condition = $6, department_id = $7, brand_id = $8, primary_category_id = $9,
+             seo = $10::jsonb, features = $11::jsonb, model_3d_url = $12, marketing_flags = $13::jsonb, active = $14, published = $15, version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING *`,
         [
@@ -392,6 +420,7 @@ export class CatalogRepository {
           next.name,
           next.slug,
           next.description,
+          next.itemCondition,
           next.departmentId,
           next.brandId,
           next.primaryCategoryId,
@@ -437,6 +466,7 @@ export class CatalogRepository {
     input: {
       sku?: string | null | undefined;
       barcode?: string | null | undefined;
+      mpn?: string | null | undefined;
       name?: string | null | undefined;
       gender?: string | null | undefined;
       currentPriceAmount: number;
@@ -449,14 +479,15 @@ export class CatalogRepository {
     await this.getProduct(ctx, productId);
     try {
       const result = await this.client.query<VariantRow>(
-        `INSERT INTO product_variants (organization_id, product_id, sku, barcode, name, gender, current_price_amount, currency, attributes, active, published)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+        `INSERT INTO product_variants (organization_id, product_id, sku, barcode, mpn, name, gender, current_price_amount, currency, attributes, active, published)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
          RETURNING *`,
         [
           ctx.organizationId,
           productId,
           input.sku,
           input.barcode ?? null,
+          input.mpn ?? null,
           input.name ?? null,
           input.gender ?? null,
           input.currentPriceAmount,
@@ -485,6 +516,7 @@ export class CatalogRepository {
       expectedVersion: number | undefined;
       sku: string | null | undefined;
       barcode: string | null | undefined;
+      mpn: string | null | undefined;
       name: string | null | undefined;
       gender: string | null | undefined;
       currentPriceAmount: number | undefined;
@@ -505,8 +537,8 @@ export class CatalogRepository {
     try {
       const result = await this.client.query<VariantRow>(
         `UPDATE product_variants
-         SET sku = $3, barcode = $4, name = $5, gender = $6, current_price_amount = $7,
-             currency = $8, attributes = $9::jsonb, active = $10, published = $11,
+         SET sku = $3, barcode = $4, mpn = $5, name = $6, gender = $7, current_price_amount = $8,
+             currency = $9, attributes = $10::jsonb, active = $11, published = $12,
              version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING *`,
@@ -515,6 +547,7 @@ export class CatalogRepository {
           id,
           next.sku,
           next.barcode,
+          next.mpn,
           next.name,
           next.gender,
           next.currentPriceAmount,
@@ -643,6 +676,7 @@ interface ProductRow {
   name: string;
   slug: string;
   description: string | null;
+  item_condition: 'new' | 'used' | 'refurbished';
   department_id: string | null;
   brand_id: string | null;
   primary_category_id: string | null;
@@ -666,6 +700,7 @@ interface VariantRow {
   product_id: string;
   sku: string | null;
   barcode: string | null;
+  mpn: string | null;
   name: string | null;
   gender: string | null;
   current_price_amount: number;
@@ -691,6 +726,7 @@ function mapProduct(row: ProductRow): ProductRecord {
     name: row.name,
     slug: row.slug,
     description: row.description,
+    itemCondition: row.item_condition,
     departmentId: row.department_id,
     brandId: row.brand_id,
     primaryCategoryId: row.primary_category_id,
@@ -716,6 +752,7 @@ function mapVariant(row: VariantRow): VariantRecord {
     productId: row.product_id,
     sku: row.sku,
     barcode: row.barcode,
+    mpn: row.mpn,
     name: row.name,
     gender: row.gender,
     currentPriceAmount: row.current_price_amount,

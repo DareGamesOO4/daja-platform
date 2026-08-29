@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Inject,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -52,6 +53,7 @@ const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
   slug: slugSchema,
   description: z.string().max(20_000).nullable().optional(),
+  itemCondition: z.enum(['new', 'used', 'refurbished']).optional(),
   brandId: uuidSchema.nullable().optional(),
   primaryCategoryId: uuidSchema.nullable().optional(),
   departmentId: uuidSchema.nullable().optional(),
@@ -99,6 +101,7 @@ const optionalSkuSchema = z
 const variantCreateSchema = z.object({
   sku: optionalSkuSchema,
   barcode: z.string().trim().min(1).max(120).nullable().optional(),
+  mpn: z.string().trim().min(1).max(120).nullable().optional(),
   name: z.string().trim().min(1).max(240).nullable().optional(),
   gender: z.string().trim().min(1).max(80).nullable().optional(),
   currentPriceAmount: amountMinorSchema,
@@ -187,16 +190,22 @@ export class PublicCatalogController {
     if (cached) {
       return JSON.parse(cached) as unknown;
     }
-    const product = await new CatalogRepository(this.database.pool).getPublicProductBySlug(
-      ctx,
-      normalizedSlug
-    );
+    const repository = new CatalogRepository(this.database.pool);
+    const product = await repository.getPublicProductBySlug(ctx, normalizedSlug);
+    if (!product) {
+      const redirectTo = await repository.getPublicProductRedirect(ctx, normalizedSlug);
+      if (!redirectTo) throw new NotFoundException('Product not found');
+      // Return an absolute site path, not only a slug: both the SPA and the
+      // Pages worker can then replace/redirect without depending on the
+      // current route's relative path.
+      const redirect = { redirectTo: `/product/${redirectTo}` };
+      await this.redis.client.set(cacheKey, JSON.stringify(redirect), 'EX', 120);
+      return redirect;
+    }
     // Do not cache a sale beyond its expiry. A client refreshes only this
     // slug at that moment and must receive the regular price immediately.
     const saleExpiry =
-      product && typeof product === 'object'
-        ? (product as { saleValidUntil?: string | null }).saleValidUntil
-        : null;
+      (product as { saleValidUntil?: string | null }).saleValidUntil;
     const expiresIn = saleExpiry ? new Date(saleExpiry).getTime() - Date.now() : Infinity;
     const cacheSeconds = Number.isFinite(expiresIn)
       ? Math.max(1, Math.min(120, Math.ceil(expiresIn / 1000)))
@@ -359,14 +368,16 @@ export class StaffCatalogController {
       async (client) => {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
-        // A name edit should also update the public URL even for an older
-        // client that does not send a slug explicitly.
-        const after = await repository.patchProduct(ctx, productId, {
-          ...input,
-          ...(input.name !== undefined && input.slug === undefined
-            ? { slug: slugifyLocal(input.name) }
-            : {})
-        });
+        const after = await repository.patchProduct(ctx, productId, input);
+        if (before.slug !== after.slug) {
+          await client.query(
+            `INSERT INTO product_slug_redirects (organization_id, product_id, old_slug)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (organization_id, old_slug)
+             DO UPDATE SET product_id = EXCLUDED.product_id, created_at = now()`,
+            [ctx.organizationId, productId, before.slug]
+          );
+        }
         const relocated = await new MediaRepository(client).relocateProductMedia(
           ctx,
           { productId, previousSlug: before.slug, nextSlug: after.slug },
@@ -719,7 +730,7 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.read');
     return (
       await this.database.pool.query(
-        `SELECT pm.id, pm.media_asset_id AS "mediaId", pm.variant_id AS "variantId", pm.role, pm.position, pm.is_primary AS "isPrimary",
+        `SELECT pm.id, pm.media_asset_id AS "mediaId", pm.variant_id AS "variantId", pm.role, pm.position, pm.is_primary AS "isPrimary", pm.alt_text AS "altText",
               ma.public_url AS url, ma.status
        FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id
        WHERE pm.organization_id = $1 AND pm.product_id = $2
@@ -744,7 +755,8 @@ export class StaffCatalogController {
         role: z.string().trim().min(1).max(40).optional(),
         position: z.coerce.number().int().min(0).optional(),
         isPrimary: z.boolean().optional(),
-        variantId: uuidSchema.nullable().optional()
+        variantId: uuidSchema.nullable().optional(),
+        altText: z.string().trim().max(240).nullable().optional()
       }),
       body
     );
@@ -768,9 +780,9 @@ export class StaffCatalogController {
         [ctx.organizationId, productId]
       );
     const result = await this.database.pool.query(
-      `INSERT INTO product_media (organization_id, product_id, variant_id, media_asset_id, role, position, is_primary)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
+      `INSERT INTO product_media (organization_id, product_id, variant_id, media_asset_id, role, position, is_primary, alt_text)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
       [
         ctx.organizationId,
         productId,
@@ -778,7 +790,8 @@ export class StaffCatalogController {
         input.mediaId,
         input.role ?? 'gallery',
         input.position ?? 0,
-        input.isPrimary ?? false
+        input.isPrimary ?? false,
+        input.altText ?? null
       ]
     );
     await this.publishProductSnapshots(ctx, productId);
@@ -802,7 +815,8 @@ export class StaffCatalogController {
         position: z.coerce.number().int().min(0).optional(),
         isPrimary: z.boolean().optional(),
         role: z.string().trim().min(1).max(40).optional(),
-        variantId: uuidSchema.nullable().optional()
+        variantId: uuidSchema.nullable().optional(),
+        altText: z.string().trim().max(240).nullable().optional()
       }),
       body
     );
@@ -827,9 +841,9 @@ export class StaffCatalogController {
       );
     }
     const result = await this.database.pool.query(
-      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id)
+      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id), alt_text = COALESCE($8, alt_text)
        WHERE organization_id = $1 AND product_id = $2 AND id = $3
-       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary"`,
+       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
       [
         ctx.organizationId,
         productId,
@@ -837,7 +851,8 @@ export class StaffCatalogController {
         input.position ?? null,
         input.role ?? null,
         input.isPrimary ?? null,
-        input.variantId ?? null
+        input.variantId ?? null,
+        input.altText ?? null
       ]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
@@ -1279,9 +1294,9 @@ export class StaffCatalogController {
     return (
       await this.database.pool.query(
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
-              p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.seo, p.features,
+              p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
-              v.id AS "variantId", v.sku, v.barcode, v.current_price_amount AS "currentPriceAmount", v.currency,
+              v.id AS "variantId", v.sku, v.barcode, v.mpn, v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
