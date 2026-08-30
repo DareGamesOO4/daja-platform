@@ -13,7 +13,6 @@ import {
   Res
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import { StorefrontRepository, type Database } from '@daja/database';
@@ -40,6 +39,7 @@ const loginSchema = z.object({
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
 
 const addressSchema = z.object({
@@ -84,7 +84,6 @@ const newsletterSchema = z.object({
   email: z.string().email(),
   source: z.string().trim().min(1).max(80).optional()
 });
-const newsletterConfirmationTokenSchema = z.string().trim().min(32).max(256);
 
 const statusSchema = z.object({
   status: z.string().trim().min(1).max(80)
@@ -138,6 +137,23 @@ export class CustomerAuthController {
     return {
       user: serializeCustomerPrincipal(await this.auth.requireCustomer(bearerToken(request)))
     };
+  }
+
+  @Post('email/verification')
+  async requestEmailVerification(@Req() request: Request) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    return this.auth.requestEmailVerification({
+      organizationId: customer.organizationId,
+      customerId: customer.customerId
+    });
+  }
+
+  @Get('email/verify')
+  async confirmEmailVerification(@Query('token') token: unknown) {
+    const confirmed = await this.auth.confirmEmailVerification(
+      parseWithSchema(emailVerificationTokenSchema, token)
+    );
+    return { status: 'verified', email: confirmed.email };
   }
 
   @Post('admin/session')
@@ -557,36 +573,13 @@ export class StorefrontContentController {
   @Post('newsletter/subscribe')
   async subscribe(@Body() body: unknown) {
     const input = parseWithSchema(newsletterSchema, body);
-    const confirmationToken = randomBytes(32).toString('base64url');
     const subscriber = await new StorefrontRepository(this.database.pool).subscribeNewsletter({
       organizationId: publicOrganizationId(this.config),
-      ...input,
-      verificationTokenHash: tokenHash(confirmationToken),
-      verificationExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-    });
-    const confirmationUrl = new URL('/newsletter/confirm', this.config.STOREFRONT_PUBLIC_BASE_URL);
-    confirmationUrl.searchParams.set('token', confirmationToken);
-    await this.newsletterEmail.sendNewsletterConfirmationEmail({
-      recipient: subscriber.email,
-      confirmationUrl: confirmationUrl.toString()
-    });
-    return { ...subscriber, verificationRequired: true };
-  }
-
-  @Get('newsletter/confirm')
-  async confirmNewsletter(@Query('token') token: unknown) {
-    const confirmationToken = parseWithSchema(newsletterConfirmationTokenSchema, token);
-    const subscriber = await new StorefrontRepository(this.database.pool).confirmNewsletterSubscription({
-      organizationId: publicOrganizationId(this.config),
-      verificationTokenHash: tokenHash(confirmationToken)
+      ...input
     });
     await this.newsletterEmail.sendWelcomeEmail(subscriber.email);
-    return { status: 'confirmed' };
+    return subscriber;
   }
-}
-
-function tokenHash(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
 }
 
 @Controller('media')

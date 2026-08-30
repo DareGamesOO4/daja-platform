@@ -30,6 +30,23 @@ export class NewsletterEmailService {
     });
   }
 
+  async sendAccountVerificationEmail(input: {
+    recipient: string;
+    verificationUrl: string;
+  }): Promise<void> {
+    const verificationUrl = escapeHtml(input.verificationUrl);
+    await this.sendEmail({
+      recipient: input.recipient,
+      subject: 'Potvrdite email adresu za DajaShop nalog',
+      text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink vazi 15 minuta.`,
+      html:
+        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite email adresu</h1><p style="font-size:16px;line-height:1.6">Otvorite dugme ispod da potvrdite email adresu svog DajaShop naloga.</p><p style="margin:28px 0"><a href="' +
+        verificationUrl +
+        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdi email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link vazi 15 minuta i moze da se iskoristi samo jednom. Ako niste vi zatrazili verifikaciju, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      tag: 'account-email-verification'
+    });
+  }
+
   async sendWelcomeEmail(recipient: string): Promise<void> {
     await this.sendEmail({
       recipient,
@@ -74,9 +91,9 @@ export class NewsletterEmailService {
           EmailTags: [{ Name: 'type', Value: input.tag }]
         })
       );
-      this.logger.info({ messageId: response.MessageId, tag: input.tag }, 'Newsletter email sent');
+      this.logger.info({ messageId: response.MessageId, tag: input.tag }, 'Transactional email sent');
     } catch (error) {
-      this.logger.error({ err: error, tag: input.tag }, 'Unable to send newsletter email');
+      this.logger.error({ err: error, tag: input.tag }, 'Unable to send transactional email');
     }
   }
 

@@ -6,7 +6,7 @@ import { OrganizationRepository } from './repositories.js';
 import { StorefrontRepository } from './storefront.js';
 import type { Database } from './pool.js';
 
-describe('newsletter double opt-in', () => {
+describe('storefront email subscriptions and verification', () => {
   let database: Database;
   let organizationId: string;
 
@@ -15,8 +15,8 @@ describe('newsletter double opt-in', () => {
     await resetDatabase(database.pool);
     await migrate(database.pool);
     const organization = await new OrganizationRepository(database.pool).create({
-      name: 'Newsletter test',
-      slug: 'newsletter-test'
+      name: 'Storefront email test',
+      slug: 'storefront-email-test'
     });
     organizationId = organization.id;
     await createFixtureUser(database.pool, organization.id);
@@ -26,63 +26,59 @@ describe('newsletter double opt-in', () => {
     await database?.close();
   });
 
-  it('keeps a subscription pending until its token is confirmed', async () => {
+  it('activates newsletter subscriptions immediately and rejects duplicates', async () => {
     const repository = new StorefrontRepository(database.pool);
-    const pending = await repository.subscribeNewsletter({
+    const subscription = await repository.subscribeNewsletter({
       organizationId,
-      email: 'customer@example.com',
-      verificationTokenHash: 'first-token-hash',
-      verificationExpiresAt: new Date(Date.now() + 60_000)
+      email: 'customer@example.com'
     });
 
-    expect(pending.active).toBe(false);
-
-    const confirmed = await repository.confirmNewsletterSubscription({
-      organizationId,
-      verificationTokenHash: 'first-token-hash'
-    });
-    expect(confirmed.email).toBe('customer@example.com');
-
-    const state = await database.pool.query<{
-      active: boolean;
-      verification_token_hash: string | null;
-      confirmed_at: Date | null;
-    }>(
-      `SELECT active, verification_token_hash, confirmed_at
-       FROM newsletter_subscribers
-       WHERE organization_id = $1 AND normalized_email = lower($2)`,
-      [organizationId, 'customer@example.com']
-    );
-    expect(state.rows[0]).toMatchObject({
-      active: true,
-      verification_token_hash: null
-    });
-    expect(state.rows[0]?.confirmed_at).toBeInstanceOf(Date);
-
+    expect(subscription.active).toBe(true);
     await expect(
-      repository.subscribeNewsletter({
-        organizationId,
-        email: 'customer@example.com',
-        verificationTokenHash: 'replacement-token-hash',
-        verificationExpiresAt: new Date(Date.now() + 60_000)
-      })
+      repository.subscribeNewsletter({ organizationId, email: 'customer@example.com' })
     ).rejects.toMatchObject({ code: ERROR_CODES.resourceConflict });
   });
 
-  it('rejects expired confirmation tokens', async () => {
+  it('verifies a customer email with a single-use, valid token', async () => {
     const repository = new StorefrontRepository(database.pool);
-    await repository.subscribeNewsletter({
+    const customer = await repository.createPasswordCustomer({
       organizationId,
-      email: 'expired@example.com',
-      verificationTokenHash: 'expired-token-hash',
-      verificationExpiresAt: new Date(Date.now() - 1_000)
+      email: 'customer@example.com',
+      displayName: 'Customer',
+      passwordHash: 'not-used-by-this-test'
     });
 
-    await expect(
-      repository.confirmNewsletterSubscription({
-        organizationId,
-        verificationTokenHash: 'expired-token-hash'
-      })
-    ).rejects.toMatchObject({ code: ERROR_CODES.validationFailed });
+    await repository.createCustomerEmailVerification({
+      organizationId,
+      customerId: customer.customerId,
+      tokenHash: 'valid-token-hash',
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+    });
+    await expect(repository.confirmCustomerEmailVerification('valid-token-hash')).resolves.toEqual({
+      email: 'customer@example.com'
+    });
+    await expect(repository.confirmCustomerEmailVerification('valid-token-hash')).rejects.toMatchObject({
+      code: ERROR_CODES.validationFailed
+    });
+  });
+
+  it('rejects expired customer verification tokens', async () => {
+    const repository = new StorefrontRepository(database.pool);
+    const customer = await repository.createPasswordCustomer({
+      organizationId,
+      email: 'expired@example.com',
+      displayName: 'Expired customer',
+      passwordHash: 'not-used-by-this-test'
+    });
+    await repository.createCustomerEmailVerification({
+      organizationId,
+      customerId: customer.customerId,
+      tokenHash: 'expired-token-hash',
+      expiresAt: new Date(Date.now() - 1000)
+    });
+
+    await expect(repository.confirmCustomerEmailVerification('expired-token-hash')).rejects.toMatchObject({
+      code: ERROR_CODES.validationFailed
+    });
   });
 });

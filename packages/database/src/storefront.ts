@@ -799,32 +799,13 @@ export class StorefrontRepository {
     organizationId: string;
     email: string;
     source?: string | undefined;
-    verificationTokenHash: string;
-    verificationExpiresAt: Date;
   }) {
-    const result = await this.client.query(
-      `INSERT INTO newsletter_subscribers (
-         organization_id, email, source, active, verification_token_hash, verification_expires_at
-       )
-       VALUES ($1, $2, $3, false, $4, $5)
-       ON CONFLICT (organization_id, normalized_email)
-       DO UPDATE
-       SET email = EXCLUDED.email,
-           source = EXCLUDED.source,
-           active = false,
-           verification_token_hash = EXCLUDED.verification_token_hash,
-           verification_expires_at = EXCLUDED.verification_expires_at,
-           confirmed_at = NULL,
-           updated_at = now()
-       WHERE newsletter_subscribers.active = false
+    const result = await this.client.query<{ id: string; email: string; active: boolean }>(
+      `INSERT INTO newsletter_subscribers (organization_id, email, source, active)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organization_id, normalized_email) DO NOTHING
        RETURNING id, email, active`,
-      [
-        input.organizationId,
-        input.email,
-        input.source ?? 'site',
-        input.verificationTokenHash,
-        input.verificationExpiresAt
-      ]
+      [input.organizationId, input.email, input.source ?? 'site']
     );
     // The pg query overload is erased by the narrowed client type here.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
@@ -835,28 +816,54 @@ export class StorefrontRepository {
     return row;
   }
 
-  async confirmNewsletterSubscription(input: {
+  async createCustomerEmailVerification(input: {
     organizationId: string;
-    verificationTokenHash: string;
-  }): Promise<{ id: string; email: string }> {
-    const result = await this.client.query<{ id: string; email: string }>(
-      `UPDATE newsletter_subscribers
-       SET active = true,
-           confirmed_at = now(),
-           verification_token_hash = NULL,
-           verification_expires_at = NULL,
-           updated_at = now()
-       WHERE organization_id = $1
-         AND active = false
-         AND verification_token_hash = $2
-         AND verification_expires_at > now()
-       RETURNING id, email`,
-      [input.organizationId, input.verificationTokenHash]
+    customerId: string;
+    tokenHash: string;
+    expiresAt: Date;
+  }): Promise<{ email: string; alreadyVerified: boolean }> {
+    const customer = await this.client.query<{ email: string | null; email_verified: boolean }>(
+      `SELECT email, email_verified
+       FROM customers
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [input.organizationId, input.customerId]
+    );
+    const row = requireRow(customer);
+    if (!row.email) throw new ValidationFailedError('This account does not have an email address.');
+    if (row.email_verified) return { email: row.email, alreadyVerified: true };
+
+    await this.client.query(
+      `INSERT INTO customer_email_verification_tokens (
+         organization_id, customer_id, token_hash, expires_at
+       ) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, customer_id) WHERE used_at IS NULL
+       DO UPDATE SET token_hash = EXCLUDED.token_hash,
+                     expires_at = EXCLUDED.expires_at,
+                     created_at = now()`,
+      [input.organizationId, input.customerId, input.tokenHash, input.expiresAt]
+    );
+    return { email: row.email, alreadyVerified: false };
+  }
+
+  async confirmCustomerEmailVerification(tokenHash: string): Promise<{ email: string }> {
+    const result = await this.client.query<{ email: string }>(
+      `WITH matched_token AS (
+         UPDATE customer_email_verification_tokens
+         SET used_at = now()
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+         RETURNING organization_id, customer_id
+       )
+       UPDATE customers c
+       SET email_verified = true, updated_at = now(), version = version + 1
+       FROM matched_token token
+       WHERE c.organization_id = token.organization_id
+         AND c.id = token.customer_id
+         AND c.deleted_at IS NULL
+       RETURNING c.email`,
+      [tokenHash]
     );
     const row = result.rows[0];
-    if (!row) {
-      throw new ValidationFailedError('Newsletter confirmation link is invalid or expired.');
-    }
+    if (!row?.email) throw new ValidationFailedError('Verification link is invalid or expired.');
     return row;
   }
 

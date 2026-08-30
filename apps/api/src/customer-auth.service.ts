@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { argon2id, hash, verify } from 'argon2';
 import type { AppConfig } from '@daja/config';
@@ -19,6 +19,7 @@ import {
   verifyJwt
 } from '@daja/security';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
+import { NewsletterEmailService } from './newsletter-email.service.js';
 
 export interface CustomerTokenPair {
   accessToken: string;
@@ -33,8 +34,34 @@ export class CustomerAuthService {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(NewsletterEmailService) private readonly email: NewsletterEmailService
   ) {}
+
+  async requestEmailVerification(input: { organizationId: string; customerId: string }) {
+    const token = randomBytes(32).toString('base64url');
+    const verification = await new TransactionManager(this.database.pool, this.logger).run((client) =>
+      new StorefrontRepository(client).createCustomerEmailVerification({
+        organizationId: input.organizationId,
+        customerId: input.customerId,
+        tokenHash: sha256Hex(token),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      })
+    );
+    if (verification.alreadyVerified) return { status: 'already_verified' as const };
+
+    const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
+    verificationUrl.searchParams.set('token', token);
+    await this.email.sendAccountVerificationEmail({
+      recipient: verification.email,
+      verificationUrl: verificationUrl.toString()
+    });
+    return { status: 'sent' as const };
+  }
+
+  async confirmEmailVerification(token: string) {
+    return new StorefrontRepository(this.database.pool).confirmCustomerEmailVerification(sha256Hex(token));
+  }
 
   async register(input: {
     organizationId: string;
