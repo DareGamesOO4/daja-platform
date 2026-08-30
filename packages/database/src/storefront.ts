@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg';
 import {
   InvalidCredentialsError,
   InvalidTokenError,
+  ResourceConflictError,
   ResourceNotFoundError,
   ValidationFailedError
 } from '@daja/security';
@@ -803,7 +804,7 @@ export class StorefrontRepository {
       `INSERT INTO newsletter_subscribers (organization_id, email, source, active)
        VALUES ($1, $2, $3, true)
        ON CONFLICT (organization_id, normalized_email)
-       DO UPDATE SET active = true, source = EXCLUDED.source, updated_at = now()
+       DO NOTHING
        RETURNING id, email, active`,
       [input.organizationId, input.email, input.source ?? 'site']
     );
@@ -811,7 +812,7 @@ export class StorefrontRepository {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const row: { id: string; email: string; active: boolean } | undefined = result.rows[0];
     if (!row) {
-      throw new ResourceNotFoundError('newsletter subscriber');
+      throw new ResourceConflictError('Ova email adresa je već prijavljena na newsletter.');
     }
     return row;
   }
