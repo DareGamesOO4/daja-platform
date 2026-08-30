@@ -799,20 +799,63 @@ export class StorefrontRepository {
     organizationId: string;
     email: string;
     source?: string | undefined;
+    verificationTokenHash: string;
+    verificationExpiresAt: Date;
   }) {
     const result = await this.client.query(
-      `INSERT INTO newsletter_subscribers (organization_id, email, source, active)
-       VALUES ($1, $2, $3, true)
+      `INSERT INTO newsletter_subscribers (
+         organization_id, email, source, active, verification_token_hash, verification_expires_at
+       )
+       VALUES ($1, $2, $3, false, $4, $5)
        ON CONFLICT (organization_id, normalized_email)
-       DO NOTHING
+       DO UPDATE
+       SET email = EXCLUDED.email,
+           source = EXCLUDED.source,
+           active = false,
+           verification_token_hash = EXCLUDED.verification_token_hash,
+           verification_expires_at = EXCLUDED.verification_expires_at,
+           confirmed_at = NULL,
+           updated_at = now()
+       WHERE newsletter_subscribers.active = false
        RETURNING id, email, active`,
-      [input.organizationId, input.email, input.source ?? 'site']
+      [
+        input.organizationId,
+        input.email,
+        input.source ?? 'site',
+        input.verificationTokenHash,
+        input.verificationExpiresAt
+      ]
     );
     // The pg query overload is erased by the narrowed client type here.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const row: { id: string; email: string; active: boolean } | undefined = result.rows[0];
     if (!row) {
       throw new ResourceConflictError('Ova email adresa je već prijavljena na newsletter.');
+    }
+    return row;
+  }
+
+  async confirmNewsletterSubscription(input: {
+    organizationId: string;
+    verificationTokenHash: string;
+  }): Promise<{ id: string; email: string }> {
+    const result = await this.client.query<{ id: string; email: string }>(
+      `UPDATE newsletter_subscribers
+       SET active = true,
+           confirmed_at = now(),
+           verification_token_hash = NULL,
+           verification_expires_at = NULL,
+           updated_at = now()
+       WHERE organization_id = $1
+         AND active = false
+         AND verification_token_hash = $2
+         AND verification_expires_at > now()
+       RETURNING id, email`,
+      [input.organizationId, input.verificationTokenHash]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new ValidationFailedError('Newsletter confirmation link is invalid or expired.');
     }
     return row;
   }
