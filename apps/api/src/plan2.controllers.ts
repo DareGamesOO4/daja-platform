@@ -455,9 +455,13 @@ export class StaffCatalogController {
     return (
       await this.database.pool.query(
         `SELECT audit.id,
-                audit.aggregate_type AS "aggregateType",
-                audit.aggregate_id AS "aggregateId",
-                audit.operation,
+                 audit.aggregate_type AS "aggregateType",
+                 audit.aggregate_id AS "aggregateId",
+                 CASE
+                   WHEN audit.aggregate_type = 'product' THEN audit.aggregate_id
+                   ELSE variant.product_id
+                 END AS "productId",
+                 audit.operation,
                 audit.before_payload AS "beforePayload",
                 audit.after_payload AS "afterPayload",
                 audit.reason,
