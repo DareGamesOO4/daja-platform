@@ -37,6 +37,7 @@ export class NewsletterEmailService {
     const verificationUrl = escapeHtml(input.verificationUrl);
     await this.sendEmail({
       recipient: input.recipient,
+      fromEmail: this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL,
       subject: 'Potvrdite email adresu za DajaShop nalog',
       text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink vazi 15 minuta.`,
       html:
@@ -61,6 +62,7 @@ export class NewsletterEmailService {
 
   private async sendEmail(input: {
     recipient: string;
+    fromEmail?: string;
     subject: string;
     text: string;
     html: string;
@@ -74,7 +76,7 @@ export class NewsletterEmailService {
     try {
       const response = await this.getClient().send(
         new SendEmailCommand({
-          FromEmailAddress: this.config.SES_FROM_EMAIL,
+          FromEmailAddress: input.fromEmail || this.config.SES_FROM_EMAIL,
           Destination: { ToAddresses: [input.recipient] },
           ReplyToAddresses: this.config.SES_REPLY_TO_EMAIL
             ? [this.config.SES_REPLY_TO_EMAIL]
