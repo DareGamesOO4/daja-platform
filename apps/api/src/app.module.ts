@@ -24,6 +24,7 @@ import { DevicePluginsController } from './device-plugins.controller.js';
 import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
+import { NewsletterEmailService } from './newsletter-email.service.js';
 import {
   CustomerAuthController,
   CustomerController,
@@ -73,6 +74,7 @@ const logger = createLogger(config, 'api');
     AuthService,
     CustomerAuthService,
     DesktopGoogleOAuthService,
+    NewsletterEmailService,
     RealtimeGateway,
     DevicePluginsService
   ]

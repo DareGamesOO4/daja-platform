@@ -44,6 +44,11 @@ const envSchema = z.object({
   GOOGLE_OAUTH_CLIENT_ID: optionalPreparedSecret,
   GOOGLE_OAUTH_CLIENT_SECRET: optionalPreparedSecret,
   OAUTH_FRONTEND_REDIRECT_URL: optionalPreparedSecret,
+  SES_REGION: z.string().trim().min(1).default('eu-north-1'),
+  SES_ACCESS_KEY_ID: optionalPreparedSecret,
+  SES_SECRET_ACCESS_KEY: optionalPreparedSecret,
+  SES_FROM_EMAIL: optionalPreparedSecret,
+  SES_REPLY_TO_EMAIL: optionalPreparedSecret,
   // Comma-separated email allowlist. These storefront customers may exchange a
   // verified customer session for a real staff/admin session.
   STOREFRONT_ADMIN_EMAILS: optionalPreparedSecret

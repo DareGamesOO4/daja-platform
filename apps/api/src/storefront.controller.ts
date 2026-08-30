@@ -21,6 +21,7 @@ import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
+import { NewsletterEmailService } from './newsletter-email.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -518,7 +519,8 @@ export class StorefrontContentController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService
+    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    @Inject(NewsletterEmailService) private readonly newsletterEmail: NewsletterEmailService
   ) {}
 
   @Get('products/:productId/reviews')
@@ -551,12 +553,14 @@ export class StorefrontContentController {
   }
 
   @Post('newsletter/subscribe')
-  subscribe(@Body() body: unknown) {
+  async subscribe(@Body() body: unknown) {
     const input = parseWithSchema(newsletterSchema, body);
-    return new StorefrontRepository(this.database.pool).subscribeNewsletter({
+    const subscriber = await new StorefrontRepository(this.database.pool).subscribeNewsletter({
       organizationId: publicOrganizationId(this.config),
       ...input
     });
+    await this.newsletterEmail.sendWelcomeEmail(subscriber.email);
+    return subscriber;
   }
 }
 
