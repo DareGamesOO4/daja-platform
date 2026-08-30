@@ -11,6 +11,7 @@ import type { Server, Socket } from 'socket.io';
 import { createRequestId } from '@daja/shared';
 import type { AppConfig } from '@daja/config';
 import { AuthService } from './auth.service.js';
+import { CustomerAuthService } from './customer-auth.service.js';
 import { CONFIG } from './tokens.js';
 
 type RealtimeEvent =
@@ -24,7 +25,8 @@ type RealtimeEvent =
   | 'reader.status'
   | 'sync.conflict'
   | 'orders.created'
-  | 'orders.updated';
+  | 'orders.updated'
+  | 'customer.email_verified';
 
 const allowedEvents: RealtimeEvent[] = [
   'product.updated',
@@ -37,7 +39,8 @@ const allowedEvents: RealtimeEvent[] = [
   'reader.status',
   'sync.conflict',
   'orders.created',
-  'orders.updated'
+  'orders.updated',
+  'customer.email_verified'
 ];
 
 @WebSocketGateway({
@@ -47,6 +50,7 @@ const allowedEvents: RealtimeEvent[] = [
 export class RealtimeGateway {
   constructor(
     @Inject(AuthService) private readonly authService: AuthService,
+    @Inject(CustomerAuthService) private readonly customerAuth: CustomerAuthService,
     @Inject(CONFIG) private readonly config: AppConfig
   ) {}
 
@@ -76,8 +80,17 @@ export class RealtimeGateway {
         }
         return;
       } catch {
-        deny(socket);
-        return;
+        try {
+          const customer = await this.customerAuth.authenticateAccessToken(token);
+          socket.data.organizationId = customer.organizationId;
+          socket.data.customerId = customer.customerId;
+          socket.data.customer = true;
+          void socket.join(customerRoom(customer.organizationId, customer.customerId));
+          return;
+        } catch {
+          deny(socket);
+          return;
+        }
       }
     }
 
@@ -158,6 +171,14 @@ export class RealtimeGateway {
       this.server.to(publicCatalogRoom(input.organizationId)).emit(input.event, envelope);
     }
   }
+
+  publishCustomerEmailVerified(input: { organizationId: string; customerId: string }): void {
+    this.server.to(customerRoom(input.organizationId, input.customerId)).emit('customer.email_verified', {
+      event: 'customer.email_verified',
+      data: { emailVerified: true },
+      serverTime: new Date().toISOString()
+    });
+  }
 }
 
 function sanitizePayload(event: RealtimeEvent, payload: Record<string, unknown>) {
@@ -181,6 +202,10 @@ function locationRoom(organizationId: string, locationId: string): string {
 
 function publicCatalogRoom(organizationId: string): string {
   return `public-catalog:${organizationId}`;
+}
+
+function customerRoom(organizationId: string, customerId: string): string {
+  return `customer:${organizationId}:${customerId}`;
 }
 
 function stringValue(value: unknown): string | undefined {

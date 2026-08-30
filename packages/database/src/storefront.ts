@@ -845,8 +845,14 @@ export class StorefrontRepository {
     return { email: row.email, alreadyVerified: false };
   }
 
-  async confirmCustomerEmailVerification(tokenHash: string): Promise<{ email: string }> {
-    const result = await this.client.query<{ email: string }>(
+  async confirmCustomerEmailVerification(
+    tokenHash: string
+  ): Promise<{ email: string; customerId: string; organizationId: string }> {
+    const result = await this.client.query<{
+      email: string;
+      customer_id: string;
+      organization_id: string;
+    }>(
       `WITH matched_token AS (
          UPDATE customer_email_verification_tokens
          SET used_at = now()
@@ -859,12 +865,12 @@ export class StorefrontRepository {
        WHERE c.organization_id = token.organization_id
          AND c.id = token.customer_id
          AND c.deleted_at IS NULL
-       RETURNING c.email`,
+       RETURNING c.email, c.id AS customer_id, c.organization_id`,
       [tokenHash]
     );
     const row = result.rows[0];
     if (!row?.email) throw new ValidationFailedError('Verification link is invalid or expired.');
-    return row;
+    return { email: row.email, customerId: row.customer_id, organizationId: row.organization_id };
   }
 
   private async createDisplayId(organizationId: string): Promise<string> {

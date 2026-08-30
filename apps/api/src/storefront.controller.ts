@@ -106,7 +106,8 @@ export class CustomerAuthController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(AuthService) private readonly staffAuth: AuthService,
-    @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService
+    @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService,
+    private readonly realtime: RealtimeGateway
   ) {}
 
   @Post('register')
@@ -153,6 +154,10 @@ export class CustomerAuthController {
     const confirmed = await this.auth.confirmEmailVerification(
       parseWithSchema(emailVerificationTokenSchema, token)
     );
+    this.realtime.publishCustomerEmailVerified({
+      organizationId: confirmed.organizationId,
+      customerId: confirmed.customerId
+    });
     return { status: 'verified', email: confirmed.email };
   }
 

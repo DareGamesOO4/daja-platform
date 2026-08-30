@@ -54,8 +54,10 @@ describe('storefront email subscriptions and verification', () => {
       tokenHash: 'valid-token-hash',
       expiresAt: new Date(Date.now() + 15 * 60 * 1000)
     });
-    await expect(repository.confirmCustomerEmailVerification('valid-token-hash')).resolves.toEqual({
-      email: 'customer@example.com'
+    await expect(repository.confirmCustomerEmailVerification('valid-token-hash')).resolves.toMatchObject({
+      email: 'customer@example.com',
+      customerId: customer.customerId,
+      organizationId
     });
     await expect(repository.confirmCustomerEmailVerification('valid-token-hash')).rejects.toMatchObject({
       code: ERROR_CODES.validationFailed
