@@ -91,6 +91,11 @@ const productPatchSchema = productCreateSchema.partial().extend({
   expectedVersion: z.coerce.number().int().positive().optional()
 });
 
+const catalogAuditQuerySchema = z.object({
+  productId: uuidSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional()
+});
+
 const optionalSkuSchema = z
   .string()
   .trim()
@@ -428,6 +433,68 @@ export class StaffCatalogController {
     return product;
   }
 
+  @Get('admin/catalog-audit')
+  async listCatalogAudit(
+    @Req() request: Request,
+    @Query() query: Record<string, string | undefined>
+  ) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const input = parseWithSchema(catalogAuditQuerySchema, query);
+    const values: unknown[] = [ctx.organizationId];
+    const productFilter = input.productId
+      ? `AND (
+           (audit.aggregate_type = 'product' AND audit.aggregate_id = $${values.push(input.productId)})
+           OR (
+             audit.aggregate_type = 'variant' AND variant.product_id = $${values.length}
+           )
+         )`
+      : '';
+    values.push(input.limit ?? 50);
+
+    return (
+      await this.database.pool.query(
+        `SELECT audit.id,
+                audit.aggregate_type AS "aggregateType",
+                audit.aggregate_id AS "aggregateId",
+                audit.operation,
+                audit.before_payload AS "beforePayload",
+                audit.after_payload AS "afterPayload",
+                audit.reason,
+                audit.occurred_at AS "occurredAt",
+                audit.actor_user_id AS "actorUserId",
+                COALESCE(actor.display_name, actor.email, 'Sistem') AS "actorName",
+                actor.email AS "actorEmail",
+                COALESCE(
+                  audit.after_payload ->> 'name',
+                  audit.before_payload ->> 'name',
+                  variant.name,
+                  product.name,
+                  'Artikal'
+                ) AS "productName"
+           FROM audit_events audit
+           LEFT JOIN users actor
+             ON actor.id = audit.actor_user_id
+           LEFT JOIN product_variants variant
+             ON audit.aggregate_type = 'variant'
+            AND variant.organization_id = audit.organization_id
+            AND variant.id = audit.aggregate_id
+           LEFT JOIN products product
+             ON product.organization_id = audit.organization_id
+            AND product.id = CASE
+              WHEN audit.aggregate_type = 'product' THEN audit.aggregate_id
+              ELSE variant.product_id
+            END
+          WHERE audit.organization_id = $1
+            AND audit.aggregate_type IN ('product', 'variant')
+            ${productFilter}
+          ORDER BY audit.occurred_at DESC, audit.id DESC
+          LIMIT $${values.length}`,
+        values
+      )
+    ).rows;
+  }
+
   @Patch('products/:id')
   async patchProduct(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
@@ -453,6 +520,14 @@ export class StaffCatalogController {
           { productId, previousSlug: before.slug, nextSlug: after.slug },
           () => new R2MediaStorageAdapter(this.config)
         );
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'product',
+          aggregateId: productId,
+          operation: 'update',
+          beforePayload: before,
+          afterPayload: after
+        });
         return { beforeSlug: before.slug, after, staleMediaKeys: relocated.sourceKeys };
       }
     );
@@ -468,18 +543,11 @@ export class StaffCatalogController {
         this.logger.warn({ err: error, productId }, 'Could not delete old product media keys');
       }
     }
-    // Audit/outbox/sync must never prevent a catalog administrator from
-    // saving a product. They run after the committed catalog change and are
-    // retried by their respective workers when infrastructure is available.
+    // Outbox/sync must never prevent a catalog administrator from saving a
+    // product. The audit record was already committed atomically with the
+    // catalog change above, so it can never be missing from a saved update.
     try {
       await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-        await new AuditRepository(client).append({
-          ctx,
-          aggregateType: 'product',
-          aggregateId: productId,
-          operation: 'update',
-          afterPayload: patched.after
-        });
         await new OutboxRepository(client).append({
           ctx,
           eventType: 'ProductUpdated',
@@ -514,15 +582,36 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(z.object({ active: z.boolean() }), body);
-    const result = await this.database.pool.query(
-      `UPDATE products SET active = $3, version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, slug, active, published`,
-      [ctx.organizationId, productId, input.active]
+    const changed = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) => {
+        const repository = new CatalogRepository(client);
+        const before = await repository.getProduct(ctx, productId);
+        const result = await client.query<{
+          id: string;
+          slug: string;
+          active: boolean;
+          published: boolean;
+        }>(
+          `UPDATE products SET active = $3, version = version + 1, updated_at = now()
+           WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+           RETURNING id, slug, active, published`,
+          [ctx.organizationId, productId, input.active]
+        );
+        const after = result.rows[0];
+        if (!after) throw new TenantAccessDeniedError();
+        await new AuditRepository(client).append({
+          ctx,
+          aggregateType: 'product',
+          aggregateId: productId,
+          operation: after.active ? 'publish' : 'unpublish',
+          beforePayload: before,
+          afterPayload: { ...before, ...after }
+        });
+        return after;
+      }
     );
-    if (!result.rowCount) throw new TenantAccessDeniedError();
-    await this.invalidateCatalog(ctx.organizationId, result.rows[0].slug);
-    return result.rows[0];
+    await this.invalidateCatalog(ctx.organizationId, changed.slug);
+    return changed;
   }
 
   @Delete('products/:id')
