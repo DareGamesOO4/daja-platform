@@ -22,6 +22,7 @@ import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NewsletterEmailService } from './newsletter-email.service.js';
+import { OrderEmailService } from './order-email.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -403,6 +404,7 @@ export class StorefrontOrdersController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    private readonly orderEmail: OrderEmailService,
     private readonly realtime: RealtimeGateway
   ) {}
 
@@ -441,6 +443,7 @@ export class StorefrontOrdersController {
       event: 'orders.created',
       payload: { orderId: order.id, displayId: order.displayId }
     });
+    await this.orderEmail.sendOrderCreated(order);
     return order;
   }
 
@@ -502,6 +505,7 @@ export class StorefrontOrdersController {
       event: 'orders.updated',
       payload: { orderId: order.id, status: order.status }
     });
+    await this.orderEmail.sendStatusUpdate(order);
     return order;
   }
 
