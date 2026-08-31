@@ -43,6 +43,7 @@ const envSchema = z.object({
   FIRESTORE_PROJECT_ID: optionalPreparedSecret,
   GOOGLE_OAUTH_CLIENT_ID: optionalPreparedSecret,
   GOOGLE_OAUTH_CLIENT_SECRET: optionalPreparedSecret,
+  GOOGLE_OAUTH_CALLBACK_BASE_URL: optionalPreparedSecret,
   OAUTH_FRONTEND_REDIRECT_URL: optionalPreparedSecret,
   SES_REGION: z.string().trim().min(1).default('eu-north-1'),
   SES_ACCESS_KEY_ID: optionalPreparedSecret,

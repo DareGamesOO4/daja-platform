@@ -498,7 +498,7 @@ export class CustomerAuthService {
   private googleCallbackUrl(): string {
     return new URL(
       '/api/v1/customer-auth/oauth/google/callback',
-      this.config.API_PUBLIC_BASE_URL
+      this.config.GOOGLE_OAUTH_CALLBACK_BASE_URL || this.config.API_PUBLIC_BASE_URL
     ).toString();
   }
 
