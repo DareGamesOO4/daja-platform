@@ -47,6 +47,7 @@ export class OrderEmailService {
     const shipping = shippingDetails(order);
     return {
       recipients: [recipient],
+      fromEmail: this.orderFromEmail(),
       subject: `Potvrda porudžbine #${order.displayId} | DajaShop`,
       text: [
         `Zdravo ${name},`,
@@ -80,10 +81,13 @@ export class OrderEmailService {
     const items = orderItems(order);
     const shipping = shippingDetails(order);
     const recipients = notificationRecipients(
-      this.config.ORDER_NOTIFICATION_EMAILS || this.config.SES_REPLY_TO_EMAIL
+      this.config.ORDER_NOTIFICATION_EMAILS ||
+        this.config.SES_REPLY_TO_EMAIL ||
+        this.config.STOREFRONT_ADMIN_EMAILS
     );
     return {
       recipients,
+      fromEmail: this.orderFromEmail(),
       subject: `Nova porudžbina #${order.displayId} — ${formatMoney(order.finalTotal, order.currency)}`,
       text: [
         `Nova porudžbina #${order.displayId}`,
@@ -120,6 +124,7 @@ export class OrderEmailService {
     const description = statusDescription(order.status);
     return {
       recipients: [recipient],
+      fromEmail: this.orderFromEmail(),
       subject: `Porudžbina #${order.displayId}: ${order.status} | DajaShop`,
       text: [
         `Zdravo ${name},`,
@@ -144,6 +149,11 @@ export class OrderEmailService {
       }),
       tag: 'order-status-update'
     };
+  }
+
+  private orderFromEmail(): string {
+    const address = rawEmailAddress(this.config.SES_FROM_EMAIL);
+    return address ? `DajaShop Porudžbine <${address}>` : this.config.SES_FROM_EMAIL;
   }
 }
 
@@ -244,7 +254,12 @@ function statusDescription(status: string): string {
 }
 
 function notificationRecipients(value: string): string[] {
-  return value.split(',').map((email) => email.trim()).filter(Boolean);
+  return value.split(',').map(rawEmailAddress).filter(Boolean);
+}
+
+function rawEmailAddress(value: string): string {
+  const match = /<([^>]+)>/.exec(value);
+  return (match?.[1] ?? value).trim();
 }
 
 function customerValue(customer: Record<string, unknown>, key: string): string {
