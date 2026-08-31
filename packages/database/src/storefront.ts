@@ -15,6 +15,8 @@ export interface CustomerPrincipal {
   phone: string | null;
   displayName: string;
   active: boolean;
+  hasPassword: boolean;
+  googleLinked: boolean;
   sessionFamilyId: string;
   sessionId?: string;
 }
@@ -27,6 +29,10 @@ export interface CustomerForLogin {
   displayName: string;
   passwordHash: string;
   active: boolean;
+}
+
+export interface CustomerPasswordIdentity {
+  passwordHash: string;
 }
 
 export interface CustomerSessionRecord {
@@ -143,6 +149,68 @@ export class StorefrontRepository {
       passwordHash: row.password_hash,
       active: row.active
     };
+  }
+
+  async findPasswordIdentity(input: {
+    organizationId: string;
+    customerId: string;
+  }): Promise<CustomerPasswordIdentity | null> {
+    const result = await this.client.query<{ password_hash: string | null }>(
+      `SELECT password_hash
+       FROM customer_identities
+       WHERE organization_id = $1
+         AND customer_id = $2
+         AND provider = 'password'
+         AND active
+       LIMIT 1`,
+      [input.organizationId, input.customerId]
+    );
+    const row = result.rows[0];
+    return row?.password_hash ? { passwordHash: row.password_hash } : null;
+  }
+
+  async savePasswordIdentity(input: {
+    organizationId: string;
+    customerId: string;
+    email: string | null;
+    phone: string | null;
+    passwordHash: string;
+  }): Promise<void> {
+    const providerSubject = normalizedIdentity(input.email ?? input.phone);
+    if (!providerSubject) {
+      throw new ValidationFailedError('Email or phone is required to add a password');
+    }
+
+    const existing = await this.client.query<{ id: string; customer_id: string }>(
+      `SELECT id, customer_id
+       FROM customer_identities
+       WHERE organization_id = $1
+         AND provider = 'password'
+         AND provider_subject = $2
+       LIMIT 1`,
+      [input.organizationId, providerSubject]
+    );
+    const identity = existing.rows[0];
+    if (identity && identity.customer_id !== input.customerId) {
+      throw new ResourceConflictError('This email or phone is already linked to another account');
+    }
+
+    if (identity) {
+      await this.client.query(
+        `UPDATE customer_identities
+         SET password_hash = $3, active = TRUE, updated_at = now()
+         WHERE id = $1 AND organization_id = $2`,
+        [identity.id, input.organizationId, input.passwordHash]
+      );
+      return;
+    }
+
+    await this.client.query(
+      `INSERT INTO customer_identities (
+         organization_id, customer_id, provider, provider_subject, password_hash
+       ) VALUES ($1, $2, 'password', $3, $4)`,
+      [input.organizationId, input.customerId, providerSubject, input.passwordHash]
+    );
   }
 
   async findOAuthCustomer(input: {
@@ -386,8 +454,24 @@ export class StorefrontRepository {
     sessionId?: string;
   }): Promise<CustomerPrincipal> {
     const result = await this.client.query<CustomerRow>(
-      `SELECT * FROM customers
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      `SELECT c.*,
+         EXISTS (
+           SELECT 1 FROM customer_identities ci
+           WHERE ci.organization_id = c.organization_id
+             AND ci.customer_id = c.id
+             AND ci.provider = 'password'
+             AND ci.active
+             AND ci.password_hash IS NOT NULL
+         ) AS has_password,
+         EXISTS (
+           SELECT 1 FROM customer_identities ci
+           WHERE ci.organization_id = c.organization_id
+             AND ci.customer_id = c.id
+             AND ci.provider = 'google'
+             AND ci.active
+         ) AS google_linked
+       FROM customers c
+       WHERE c.organization_id = $1 AND c.id = $2 AND c.deleted_at IS NULL`,
       [input.organizationId, input.customerId]
     );
     const row = result.rows[0];
@@ -918,6 +1002,8 @@ interface CustomerRow {
   phone_verified: boolean;
   created_at: Date;
   updated_at: Date;
+  has_password?: boolean;
+  google_linked?: boolean;
 }
 
 interface CustomerLoginRow extends CustomerRow {
@@ -1004,6 +1090,8 @@ function mapCustomerPrincipal(
     phone: row.phone,
     displayName: row.display_name,
     active: row.active,
+    hasPassword: Boolean(row.has_password),
+    googleLinked: Boolean(row.google_linked),
     sessionFamilyId,
     ...(sessionId ? { sessionId } : {})
   };

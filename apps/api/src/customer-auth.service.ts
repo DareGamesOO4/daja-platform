@@ -120,6 +120,42 @@ export class CustomerAuthService {
     });
   }
 
+  async setPassword(input: {
+    customer: CustomerPrincipal;
+    currentPassword?: string;
+    newPassword: string;
+  }): Promise<CustomerPrincipal> {
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      const passwordIdentity = await repo.findPasswordIdentity({
+        organizationId: input.customer.organizationId,
+        customerId: input.customer.customerId
+      });
+
+      if (
+        passwordIdentity &&
+        (!input.currentPassword || !(await verify(passwordIdentity.passwordHash, input.currentPassword)))
+      ) {
+        throw new InvalidCredentialsError();
+      }
+
+      await repo.savePasswordIdentity({
+        organizationId: input.customer.organizationId,
+        customerId: input.customer.customerId,
+        email: input.customer.email,
+        phone: input.customer.phone,
+        passwordHash: await hash(input.newPassword, { type: argon2id })
+      });
+
+      return repo.buildCustomerPrincipal({
+        organizationId: input.customer.organizationId,
+        customerId: input.customer.customerId,
+        sessionFamilyId: input.customer.sessionFamilyId,
+        ...(input.customer.sessionId ? { sessionId: input.customer.sessionId } : {})
+      });
+    });
+  }
+
   startGoogleOAuth(organizationId: string, returnTo?: string): string {
     this.assertGoogleOAuthConfigured();
     const state = signJwt(
@@ -534,6 +570,8 @@ export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
     phoneNumber: principal.phone,
     displayName: principal.displayName,
     active: principal.active,
+    hasPassword: principal.hasPassword,
+    googleLinked: principal.googleLinked,
     organizationId: principal.organizationId
   };
 }

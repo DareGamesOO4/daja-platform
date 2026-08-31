@@ -39,6 +39,10 @@ const loginSchema = z.object({
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+const passwordUpdateSchema = z.object({
+  currentPassword: z.string().min(1).max(240).optional(),
+  newPassword: z.string().min(8).max(240)
+});
 const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
 
@@ -137,6 +141,17 @@ export class CustomerAuthController {
   async me(@Req() request: Request) {
     return {
       user: serializeCustomerPrincipal(await this.auth.requireCustomer(bearerToken(request)))
+    };
+  }
+
+  @Post('password')
+  async setPassword(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(passwordUpdateSchema, body);
+    return {
+      user: serializeCustomerPrincipal(
+        await this.auth.setPassword({ customer, ...input })
+      )
     };
   }
 
