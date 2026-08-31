@@ -12,6 +12,7 @@ import {
   Req,
   Res
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
@@ -23,6 +24,7 @@ import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NewsletterEmailService } from './newsletter-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
+import { ProductAlertService } from './product-alert.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -88,6 +90,12 @@ const reviewSchema = z.object({
 const newsletterSchema = z.object({
   email: z.string().email(),
   source: z.string().trim().min(1).max(80).optional()
+});
+
+const productAlertSchema = z.object({
+  type: z.enum(['back_in_stock', 'price_change']),
+  variantId: uuidSchema,
+  email: z.string().trim().email().max(240).optional()
 });
 
 const statusSchema = z.object({
@@ -562,7 +570,8 @@ export class StorefrontContentController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
-    @Inject(NewsletterEmailService) private readonly newsletterEmail: NewsletterEmailService
+    @Inject(NewsletterEmailService) private readonly newsletterEmail: NewsletterEmailService,
+    private readonly productAlerts: ProductAlertService
   ) {}
 
   @Get('products/:productId/reviews')
@@ -591,6 +600,28 @@ export class StorefrontContentController {
       userName: input.userName ?? customer?.displayName ?? 'Kupac',
       rating: input.rating,
       comment: input.comment
+    });
+  }
+
+  @Post('products/:productId/alerts')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async subscribeProductAlert(
+    @Req() request: Request,
+  @Param('productId') productId: string,
+    @Body() body: unknown
+  ) {
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
+    const input = parseWithSchema(productAlertSchema, body);
+    const email = customer?.email ?? input.email;
+    if (!email) throw new ValidationFailedError('Unesite email adresu za obaveštenje.');
+    return this.productAlerts.subscribe({
+      organizationId: publicOrganizationId(this.config),
+      productId: parseWithSchema(uuidSchema, productId),
+      variantId: input.variantId,
+      ...(customer?.customerId ? { customerId: customer.customerId } : {}),
+      email,
+      type: input.type
     });
   }
 

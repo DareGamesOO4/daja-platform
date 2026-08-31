@@ -49,6 +49,7 @@ import { resolvePublicRequestContext, resolveRequestContext } from './runtime/re
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
+import { ProductAlertService } from './product-alert.service.js';
 
 const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -314,7 +315,8 @@ export class StaffCatalogController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection,
-    private readonly realtime: RealtimeGateway
+    private readonly realtime: RealtimeGateway,
+    private readonly productAlerts: ProductAlertService
   ) {}
 
   private publishCatalogTaxonomy(
@@ -765,10 +767,23 @@ export class StaffCatalogController {
           after.productId,
           variantId
         );
-        return { productSlug: product.slug, after };
+        return {
+          productSlug: product.slug,
+          after,
+          priceChanged,
+          previousPriceAmount: before.currentPriceAmount
+        };
       }
     );
     await this.invalidateCatalog(ctx.organizationId, patched.productSlug);
+    if (patched.priceChanged) {
+      await this.productAlerts.notifyPriceChanged({
+        organizationId: ctx.organizationId,
+        variantId,
+        previousPriceAmount: patched.previousPriceAmount,
+        currentPriceAmount: patched.after.currentPriceAmount
+      });
+    }
     return patched.after;
   }
 
@@ -1925,7 +1940,8 @@ export class RfidController {
 export class InventoryController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    private readonly productAlerts: ProductAlertService
   ) {}
 
   @Get('locations')
@@ -1988,7 +2004,7 @@ export class InventoryController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const item = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const item = await new InventoryRepository(client).createItem(ctx, input);
       await new AuditRepository(client).append({
         ctx,
@@ -2013,6 +2029,11 @@ export class InventoryController {
       await new OperationalSyncProjector(client).publishVariantChange(ctx, item.variantId);
       return item;
     });
+    await this.productAlerts.notifyBackInStock({
+      organizationId: ctx.organizationId,
+      variantId: item.variantId
+    });
+    return item;
   }
 
   @Post('adjustments')
@@ -2033,7 +2054,7 @@ export class InventoryController {
       }),
       body
     );
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const balance = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const balance = await new InventoryRepository(client).adjust(ctx, input);
       await new AuditRepository(client).append({
         ctx,
@@ -2060,6 +2081,13 @@ export class InventoryController {
       await new OperationalSyncProjector(client).publishVariantChange(ctx, input.variantId);
       return balance;
     });
+    if (input.quantityDelta > 0) {
+      await this.productAlerts.notifyBackInStock({
+        organizationId: ctx.organizationId,
+        variantId: input.variantId
+      });
+    }
+    return balance;
   }
 
   @Post('items/:id/move')

@@ -77,6 +77,25 @@ export interface CheckoutInput {
   paymentMethod: 'cod' | 'pickup';
 }
 
+export type ProductAlertType = 'back_in_stock' | 'price_change';
+
+export interface ProductAlertSubscription {
+  id: string;
+  email: string;
+  type: ProductAlertType;
+  active: boolean;
+}
+
+export interface ProductAlertNotification {
+  email: string;
+  productName: string;
+  brand: string | null;
+  slug: string;
+  currency: string;
+  currentPriceAmount: number;
+  previousPriceAmount: number | null;
+}
+
 export class StorefrontRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
 
@@ -879,6 +898,157 @@ export class StorefrontRepository {
     return serializeReview(requireRow(result));
   }
 
+  async subscribeProductAlert(input: {
+    organizationId: string;
+    productId: string;
+    variantId: string;
+    customerId?: string | null;
+    email: string;
+    type: ProductAlertType;
+  }): Promise<ProductAlertSubscription> {
+    const product = await this.client.query<{
+      current_price_amount: number;
+      available_quantity: number;
+    }>(
+      `SELECT v.current_price_amount,
+              COALESCE(SUM(balance.quantity), 0)::int AS available_quantity
+       FROM products p
+       JOIN product_variants v
+         ON v.id = $3
+        AND v.product_id = p.id
+        AND v.organization_id = p.organization_id
+        AND v.deleted_at IS NULL
+        AND v.active
+        AND v.published
+       LEFT JOIN inventory_balances balance
+         ON balance.organization_id = v.organization_id
+        AND balance.variant_id = v.id
+       WHERE p.organization_id = $1
+         AND p.id = $2
+         AND p.deleted_at IS NULL
+         AND p.active
+         AND p.published
+       GROUP BY v.current_price_amount`,
+      [input.organizationId, input.productId, input.variantId]
+    );
+    const current = product.rows[0];
+    if (!current) throw new ResourceNotFoundError('product variant');
+    if (input.type === 'back_in_stock' && current.available_quantity > 0) {
+      throw new ResourceConflictError('Ovaj proizvod je već na stanju.');
+    }
+
+    const result = await this.client.query<{
+      id: string;
+      email: string;
+      alert_type: ProductAlertType;
+      active: boolean;
+    }>(
+      `INSERT INTO product_alert_subscriptions (
+         organization_id, product_id, variant_id, customer_id, email, alert_type, requested_price_amount
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (organization_id, variant_id, normalized_email, alert_type) DO UPDATE
+       SET customer_id = COALESCE(EXCLUDED.customer_id, product_alert_subscriptions.customer_id),
+           active = TRUE,
+           requested_price_amount = EXCLUDED.requested_price_amount,
+           notified_at = NULL,
+           updated_at = now()
+       RETURNING id, email, alert_type, active`,
+      [
+        input.organizationId,
+        input.productId,
+        input.variantId,
+        input.customerId ?? null,
+        input.email.trim().toLowerCase(),
+        input.type,
+        input.type === 'price_change' ? current.current_price_amount : null
+      ]
+    );
+    const row = requireRow(result);
+    return { id: row.id, email: row.email, type: row.alert_type, active: row.active };
+  }
+
+  async claimBackInStockProductAlerts(input: {
+    organizationId: string;
+    variantId: string;
+  }): Promise<ProductAlertNotification[]> {
+    const result = await this.client.query<ProductAlertNotificationRow>(
+      `WITH inventory AS (
+         SELECT COALESCE(SUM(quantity), 0)::int AS available_quantity
+         FROM inventory_balances
+         WHERE organization_id = $1 AND variant_id = $2
+       )
+       UPDATE product_alert_subscriptions alert
+       SET active = FALSE, notified_at = now(), updated_at = now()
+       FROM product_variants variant
+       JOIN products product
+         ON product.id = variant.product_id
+        AND product.organization_id = variant.organization_id
+       LEFT JOIN brands brand
+         ON brand.id = product.brand_id
+        AND brand.organization_id = product.organization_id
+       CROSS JOIN inventory
+       WHERE alert.organization_id = $1
+         AND alert.variant_id = $2
+         AND alert.alert_type = 'back_in_stock'
+         AND alert.active
+         AND variant.id = alert.variant_id
+         AND variant.organization_id = alert.organization_id
+         AND variant.deleted_at IS NULL
+         AND variant.active
+         AND variant.published
+         AND product.deleted_at IS NULL
+         AND product.active
+         AND product.published
+         AND inventory.available_quantity > 0
+       RETURNING alert.email, product.name AS product_name, brand.name AS brand,
+                 product.slug, variant.currency, variant.current_price_amount,
+                 NULL::integer AS previous_price_amount`,
+      [input.organizationId, input.variantId]
+    );
+    return result.rows.map(mapProductAlertNotification);
+  }
+
+  async claimPriceChangeProductAlerts(input: {
+    organizationId: string;
+    variantId: string;
+    previousPriceAmount: number;
+    currentPriceAmount: number;
+  }): Promise<ProductAlertNotification[]> {
+    const result = await this.client.query<ProductAlertNotificationRow>(
+      `UPDATE product_alert_subscriptions alert
+       SET active = FALSE, notified_at = now(), updated_at = now()
+       FROM product_variants variant
+       JOIN products product
+         ON product.id = variant.product_id
+        AND product.organization_id = variant.organization_id
+       LEFT JOIN brands brand
+         ON brand.id = product.brand_id
+        AND brand.organization_id = product.organization_id
+       WHERE alert.organization_id = $1
+         AND alert.variant_id = $2
+         AND alert.alert_type = 'price_change'
+         AND alert.active
+         AND variant.id = alert.variant_id
+         AND variant.organization_id = alert.organization_id
+         AND variant.deleted_at IS NULL
+         AND variant.active
+         AND variant.published
+         AND product.deleted_at IS NULL
+         AND product.active
+         AND product.published
+       RETURNING alert.email, product.name AS product_name, brand.name AS brand,
+                 product.slug, variant.currency, $3::integer AS previous_price_amount,
+                 $4::integer AS current_price_amount`,
+      [
+        input.organizationId,
+        input.variantId,
+        input.previousPriceAmount,
+        input.currentPriceAmount
+      ]
+    );
+    return result.rows.map(mapProductAlertNotification);
+  }
+
   async subscribeNewsletter(input: {
     organizationId: string;
     email: string;
@@ -1078,6 +1248,16 @@ interface ReviewRow {
   created_at: Date;
 }
 
+interface ProductAlertNotificationRow {
+  email: string;
+  product_name: string;
+  brand: string | null;
+  slug: string;
+  currency: string;
+  current_price_amount: number;
+  previous_price_amount: number | null;
+}
+
 function mapCustomerPrincipal(
   row: CustomerRow,
   sessionFamilyId: string,
@@ -1174,6 +1354,18 @@ function serializeReview(row: ReviewRow) {
     rating: row.rating,
     comment: row.comment,
     createdAt: row.created_at
+  };
+}
+
+function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductAlertNotification {
+  return {
+    email: row.email,
+    productName: row.product_name,
+    brand: row.brand,
+    slug: row.slug,
+    currency: row.currency,
+    currentPriceAmount: row.current_price_amount,
+    previousPriceAmount: row.previous_price_amount
   };
 }
 
