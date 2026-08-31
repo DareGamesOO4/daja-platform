@@ -122,7 +122,7 @@ export class CustomerAuthService {
 
   async setPassword(input: {
     customer: CustomerPrincipal;
-    currentPassword?: string;
+    currentPassword?: string | undefined;
     newPassword: string;
   }): Promise<CustomerPrincipal> {
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {

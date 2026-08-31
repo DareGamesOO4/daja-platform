@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
-import type { CustomerPrincipal, Database } from '@daja/database';
+import { StorefrontRepository, type CustomerPrincipal, type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { InvalidTokenError, PermissionDeniedError, ValidationFailedError } from '@daja/security';
 import { AuthService } from './auth.service.js';
@@ -181,22 +181,11 @@ export class DesktopGoogleOAuthService {
   }
 
   private async customer(organizationId: string, customerId: string): Promise<CustomerPrincipal> {
-    const result = await this.database.pool.query<CustomerRow>(
-      `SELECT id, organization_id, email, phone, display_name, active
-       FROM customers WHERE id = $1 AND organization_id = $2`,
-      [customerId, organizationId]
-    );
-    const row = result.rows[0];
-    if (!row) throw new InvalidTokenError();
-    return {
-      customerId: row.id,
-      organizationId: row.organization_id,
-      email: row.email,
-      phone: row.phone,
-      displayName: row.display_name,
-      active: row.active,
+    return new StorefrontRepository(this.database.pool).buildCustomerPrincipal({
+      organizationId,
+      customerId,
       sessionFamilyId: randomUUID()
-    };
+    });
   }
 
   private redirect(
@@ -245,13 +234,4 @@ interface DesktopGrantRow {
   provider_state_hash: string;
   expires_at: Date;
   consumed_at: Date | null;
-}
-
-interface CustomerRow {
-  id: string;
-  organization_id: string;
-  email: string | null;
-  phone: string | null;
-  display_name: string;
-  active: boolean;
 }
