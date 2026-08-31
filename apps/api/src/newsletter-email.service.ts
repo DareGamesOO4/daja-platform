@@ -34,7 +34,7 @@ export class NewsletterEmailService {
     const verificationUrl = escapeHtml(input.verificationUrl);
     await this.sendEmail({
       recipient: input.recipient,
-      fromEmail: this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL,
+      fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
       subject: 'Potvrdite email adresu za DajaShop nalog',
       text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink vazi 15 minuta.`,
       html:
@@ -87,4 +87,12 @@ function escapeHtml(value: string): string {
     };
     return entities[character] ?? character;
   });
+}
+
+function dajaShopSender(configuredSender: string): string {
+  const match = configuredSender.match(/<([^>]+)>/);
+  const address = (match?.[1] || configuredSender).trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)
+    ? `DajaShop <${address}>`
+    : configuredSender;
 }

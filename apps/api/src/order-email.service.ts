@@ -154,7 +154,7 @@ export class OrderEmailService {
   private orderFromEmail(): string {
     const configuredSender = this.config.SES_ORDER_FROM_EMAIL || this.config.SES_FROM_EMAIL;
     const address = rawEmailAddress(configuredSender);
-    return address ? `DajaShop Porudžbine <${address}>` : configuredSender;
+    return address ? `DajaShop <${address}>` : configuredSender;
   }
 }
 
