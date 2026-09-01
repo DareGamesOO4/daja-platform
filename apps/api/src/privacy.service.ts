@@ -413,12 +413,44 @@ export class PrivacyService {
             variant_id: string;
             alert_type: 'back_in_stock' | 'price_change';
             created_at: Date;
+            product_name: string;
+            product_slug: string;
+            brand_name: string | null;
+            price: number | null;
+            currency: string | null;
+            image_url: string | null;
           }>(
-            `SELECT id, product_id, variant_id, alert_type, created_at
-             FROM product_alert_subscriptions
-             WHERE organization_id = $1 AND active
-               AND (customer_id = $2 OR normalized_email = lower($3))
-             ORDER BY created_at DESC`,
+            `SELECT alert.id, alert.product_id, alert.variant_id, alert.alert_type, alert.created_at,
+                    product.name AS product_name, product.slug AS product_slug, brand.name AS brand_name,
+                    COALESCE(active_sale.amount_minor, variant.current_price_amount)::double precision / 100 AS price,
+                    variant.currency, product_image.public_url AS image_url
+             FROM product_alert_subscriptions alert
+             JOIN products product
+               ON product.id = alert.product_id AND product.organization_id = alert.organization_id
+             JOIN product_variants variant
+               ON variant.id = alert.variant_id AND variant.organization_id = alert.organization_id
+             LEFT JOIN brands brand
+               ON brand.id = product.brand_id AND brand.organization_id = product.organization_id
+             LEFT JOIN LATERAL (
+               SELECT price.amount_minor
+               FROM variant_prices price
+               WHERE price.organization_id = variant.organization_id AND price.variant_id = variant.id
+                 AND price.price_type = 'sale' AND price.valid_from <= now()
+                 AND (price.valid_until IS NULL OR price.valid_until > now())
+               ORDER BY price.valid_from DESC, price.created_at DESC
+               LIMIT 1
+             ) active_sale ON true
+             LEFT JOIN LATERAL (
+               SELECT media.public_url
+               FROM product_media link
+               JOIN media_assets media ON media.id = link.media_asset_id AND media.status = 'ready'
+               WHERE link.organization_id = product.organization_id AND link.product_id = product.id
+               ORDER BY link.is_primary DESC, link.position ASC, link.id
+               LIMIT 1
+             ) product_image ON true
+             WHERE alert.organization_id = $1 AND alert.active
+               AND (alert.customer_id = $2 OR alert.normalized_email = lower($3))
+             ORDER BY alert.created_at DESC`,
             [input.organizationId, input.customerId, input.email]
           )
         : Promise.resolve({ rows: [] as Array<never> })
@@ -430,7 +462,13 @@ export class PrivacyService {
         productId: row.product_id,
         variantId: row.variant_id,
         type: row.alert_type,
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        name: row.product_name,
+        slug: row.product_slug,
+        brand: row.brand_name,
+        price: row.price,
+        currency: row.currency,
+        image: row.image_url
       }))
     };
   }
