@@ -102,10 +102,7 @@ export class ProductAlertService {
   }
 
   private fromEmail(): string {
-    const configured =
-      this.config.SES_ALERTS_FROM_EMAIL ||
-      this.config.SES_ORDER_FROM_EMAIL ||
-      this.config.SES_FROM_EMAIL;
+    const configured = this.config.SES_FROM_EMAIL;
     const address = rawEmailAddress(configured);
     return address ? `DajaShop <${address}>` : configured;
   }
