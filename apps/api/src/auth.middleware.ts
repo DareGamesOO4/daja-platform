@@ -43,6 +43,7 @@ function isCustomerRoute(path: string): boolean {
     normalized.startsWith('/customers/me') ||
     normalized.startsWith('/orders') ||
     /^\/products\/[^/]+\/reviews$/.test(normalized) ||
+    /^\/products\/[^/]+\/alerts$/.test(normalized) ||
     normalized.startsWith('/newsletter/subscribe') ||
     normalized.startsWith('/newsletter/confirm')
   );
