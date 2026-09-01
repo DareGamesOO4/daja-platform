@@ -158,7 +158,14 @@ export class InventoryRepository {
            version = inventory_balances.version + 1, updated_at = now()`,
       [ctx.organizationId, input.locationId, input.variantId, zoneId, binId, next]
     );
-    return { variantId: input.variantId, locationId: input.locationId, zoneId, binId, quantity: next };
+    return {
+      variantId: input.variantId,
+      locationId: input.locationId,
+      zoneId,
+      binId,
+      previousQuantity: current,
+      quantity: next
+    };
   }
 
   async moveItem(

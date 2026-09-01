@@ -449,7 +449,8 @@ export class StaffCatalogController {
       ? `AND (
            (audit.aggregate_type = 'product' AND audit.aggregate_id = $${values.push(input.productId)})
            OR (
-             audit.aggregate_type = 'variant' AND variant.product_id = $${values.length}
+             audit.aggregate_type IN ('variant', 'inventory_balance')
+             AND variant.product_id = $${values.length}
            )
          )`
       : '';
@@ -483,7 +484,7 @@ export class StaffCatalogController {
            LEFT JOIN users actor
              ON actor.id = audit.actor_user_id
            LEFT JOIN product_variants variant
-             ON audit.aggregate_type = 'variant'
+             ON audit.aggregate_type IN ('variant', 'inventory_balance')
             AND variant.organization_id = audit.organization_id
             AND variant.id = audit.aggregate_id
            LEFT JOIN products product
@@ -493,7 +494,7 @@ export class StaffCatalogController {
               ELSE variant.product_id
             END
           WHERE audit.organization_id = $1
-            AND audit.aggregate_type IN ('product', 'variant')
+            AND audit.aggregate_type IN ('product', 'variant', 'inventory_balance')
             ${productFilter}
           ORDER BY audit.occurred_at DESC, audit.id DESC
           LIMIT $${values.length}`,
@@ -2098,7 +2099,16 @@ export class InventoryController {
         aggregateType: 'inventory_balance',
         aggregateId: input.variantId,
         operation: 'adjust',
-        afterPayload: balance,
+        beforePayload: {
+          ...balance,
+          quantity: balance.previousQuantity
+        },
+        afterPayload: {
+          ...balance,
+          quantityDelta: input.quantityDelta,
+          sourceType: input.sourceType,
+          metadata: input.metadata ?? {}
+        },
         reason: input.sourceType
       });
       await new OutboxRepository(client).append({
