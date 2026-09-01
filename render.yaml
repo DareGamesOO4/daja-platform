@@ -44,9 +44,6 @@ services:
         sync: false
       - key: MEDIA_PUBLIC_BASE_URL
         sync: false
-      - key: SES_ALERTS_FROM_EMAIL
-        sync: false
-
   - type: worker
     name: daja-platform-worker
     runtime: docker
