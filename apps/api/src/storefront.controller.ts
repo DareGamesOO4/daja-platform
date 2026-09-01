@@ -98,6 +98,10 @@ const productAlertSchema = z.object({
   email: z.string().trim().email().max(240).optional(),
   acceptedTerms: z.literal(true).optional()
 });
+const productAlertStatusQuerySchema = z.object({
+  variantId: uuidSchema,
+  email: z.string().trim().email().max(240)
+});
 
 const statusSchema = z.object({
   status: z.string().trim().min(1).max(80)
@@ -628,6 +632,19 @@ export class StorefrontContentController {
       email,
       type: input.type
     });
+  }
+
+  @Post('products/:productId/alerts/status')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async productAlertStatus(@Param('productId') productId: string, @Body() body: unknown) {
+    const input = parseWithSchema(productAlertStatusQuerySchema, body);
+    const types = await new StorefrontRepository(this.database.pool).listActiveProductAlertTypes({
+      organizationId: publicOrganizationId(this.config),
+      productId: parseWithSchema(uuidSchema, productId),
+      variantId: input.variantId,
+      email: input.email
+    });
+    return { types };
   }
 
   @Post('newsletter/subscribe')

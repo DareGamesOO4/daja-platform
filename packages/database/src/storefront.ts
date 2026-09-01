@@ -1098,6 +1098,26 @@ export class StorefrontRepository {
     return { id: row.id, email: row.email, type: row.alert_type, active: row.active };
   }
 
+  async listActiveProductAlertTypes(input: {
+    organizationId: string;
+    productId: string;
+    variantId: string;
+    email: string;
+  }): Promise<ProductAlertType[]> {
+    const result = await this.client.query<{ alert_type: ProductAlertType }>(
+      `SELECT alert_type
+       FROM product_alert_subscriptions
+       WHERE organization_id = $1
+         AND product_id = $2
+         AND variant_id = $3
+         AND normalized_email = lower($4)
+         AND active = TRUE
+       ORDER BY alert_type`,
+      [input.organizationId, input.productId, input.variantId, input.email]
+    );
+    return result.rows.map((row) => row.alert_type);
+  }
+
   async claimBackInStockProductAlerts(input: {
     organizationId: string;
     variantId: string;
