@@ -3,7 +3,7 @@
  * deployment-safe draft scaffold only; it must be replaced with the reviewed
  * company data before a production publication is marked as ready.
  */
-export const LEGAL_POLICY_VERSION = '2026-09-01-draft';
+export const LEGAL_POLICY_VERSION = '2026-09-01-analytics-draft';
 
 export type LegalDocumentKind = 'privacy' | 'cookies' | 'terms';
 
@@ -49,7 +49,8 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
         body: [
           'Neophodno: dokaz izbora, prijava i funkcije koje korisnik izričito koristi, poput korpe.',
           'Podešavanja: tema, zapamćena prijava, pozicija skrola i prikaz newsletter ponude.',
-          'Spoljne usluge: Google Maps i Google Places, samo nakon posebne ili potpune dozvole.'
+          'Spoljne usluge: Google Maps i Google Places, samo nakon posebne ili potpune dozvole.',
+          'Analitika: Cloudflare Web Analytics, samo nakon izričitog pristanka korisnika.'
         ]
       }
     ]

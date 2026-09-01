@@ -16,6 +16,7 @@ const MARKETING_PROOF_RETENTION_YEARS = 3;
 export interface ConsentCategories {
   preferences: boolean;
   externalGoogle: boolean;
+  analytics: boolean;
 }
 
 export interface AlertContact {
@@ -50,7 +51,9 @@ export class PrivacyService {
     const publication = result.rows[0];
     return {
       version: publication?.version ?? LEGAL_POLICY_VERSION,
-      material: publication?.material ?? false,
+      // Analytics is a new optional category. Existing receipts must be
+      // refreshed instead of being interpreted as analytics consent.
+      material: publication?.material ?? true,
       changeSummary: publication?.change_summary ?? '',
       effectiveAt: publication?.effective_at?.toISOString() ?? '2026-09-01T00:00:00.000Z',
       ready: LEGAL_DOCUMENTS.every((document) => document.ready),
@@ -79,13 +82,14 @@ export class PrivacyService {
     const action = input.action ?? 'granted';
     const categories = {
       preferences: Boolean(input.categories.preferences),
-      externalGoogle: Boolean(input.categories.externalGoogle)
+      externalGoogle: Boolean(input.categories.externalGoogle),
+      analytics: Boolean(input.categories.analytics)
     };
     await this.database.pool.query(
       `INSERT INTO privacy_consent_events (
          organization_id, receipt_hash, customer_id, policy_version,
-         preferences_allowed, external_google_allowed, action, source, retain_until
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + interval '5 years')`,
+         preferences_allowed, external_google_allowed, analytics_allowed, action, source, retain_until
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + interval '5 years')`,
       [
         input.organizationId,
         sha256(receipt),
@@ -93,6 +97,7 @@ export class PrivacyService {
         policy.version,
         categories.preferences,
         categories.externalGoogle,
+        categories.analytics,
         action,
         input.source ?? 'storefront_web'
       ]

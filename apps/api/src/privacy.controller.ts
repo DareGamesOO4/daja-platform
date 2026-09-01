@@ -26,7 +26,8 @@ const consentSchema = z.object({
   policyVersion: z.string().trim().min(1).max(120).optional(),
   categories: z.object({
     preferences: z.boolean().default(false),
-    externalGoogle: z.boolean().default(false)
+    externalGoogle: z.boolean().default(false),
+    analytics: z.boolean().default(false)
   }),
   action: z.enum(['granted', 'updated', 'revoked', 'policy_reset']).optional()
 });
