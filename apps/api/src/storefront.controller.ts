@@ -25,6 +25,7 @@ import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NewsletterEmailService } from './newsletter-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
+import { PrivacyService } from './privacy.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -88,24 +89,32 @@ const reviewSchema = z.object({
 });
 
 const newsletterSchema = z.object({
-  email: z.string().email(),
-  source: z.string().trim().min(1).max(80).optional()
+  email: z.string().email().optional(),
+  managementToken: z.string().trim().min(24).max(160).optional(),
+  source: z.string().trim().min(1).max(80).optional(),
+  acceptedMarketing: z.literal(true),
+  policyVersion: z.string().trim().min(1).max(120).optional()
+}).refine((value) => Boolean(value.email || value.managementToken), {
+  message: 'Unesite email adresu ili koristite sačuvani kontakt.',
+  path: ['email']
 });
 
 const productAlertSchema = z.object({
   type: z.enum(['back_in_stock', 'price_change']),
   variantId: uuidSchema,
   email: z.string().trim().email().max(240).optional(),
-  acceptedTerms: z.literal(true).optional()
+  managementToken: z.string().trim().min(24).max(160).optional(),
+  acceptedTerms: z.literal(true),
+  policyVersion: z.string().trim().min(1).max(120).optional()
 });
 const productAlertStatusQuerySchema = z.object({
   variantId: uuidSchema,
-  email: z.string().trim().email().max(240)
+  managementToken: z.string().trim().min(24).max(160).optional()
 });
 const productAlertUnsubscribeSchema = z.object({
   type: z.enum(['back_in_stock', 'price_change']),
   variantId: uuidSchema,
-  email: z.string().trim().email().max(240).optional()
+  managementToken: z.string().trim().min(24).max(160).optional()
 });
 
 const statusSchema = z.object({
@@ -294,7 +303,8 @@ export class CustomerAuthController {
 export class CustomerController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService
+    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    private readonly privacy: PrivacyService
   ) {}
 
   @Get()
@@ -408,12 +418,24 @@ export class CustomerController {
   @Delete('wishlist/:productId')
   async removeWishlist(@Req() request: Request, @Param('productId') productId: string) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
-    return new StorefrontRepository(this.database.pool).removeWishlistItem({
+    const result = await new StorefrontRepository(this.database.pool).removeWishlistItem({
       organizationId: customer.organizationId,
       customerId: customer.customerId,
       email: customer.email,
       productId: parseWithSchema(uuidSchema, productId)
     });
+    await Promise.all(
+      result.alertIds.map((subscriptionId) =>
+        this.privacy.revokeProductAlertSubscription({
+          organizationId: customer.organizationId,
+          subscriptionId,
+          customerId: customer.customerId,
+          customerEmail: customer.email,
+          source: 'wishlist_removed'
+        })
+      )
+    );
+    return result.wishlist;
   }
 }
 
@@ -582,7 +604,8 @@ export class StorefrontContentController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(NewsletterEmailService) private readonly newsletterEmail: NewsletterEmailService,
-    private readonly productAlerts: ProductAlertService
+    private readonly productAlerts: ProductAlertService,
+    private readonly privacy: PrivacyService
   ) {}
 
   @Get('products/:productId/reviews')
@@ -624,17 +647,16 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertSchema, body);
-    if (!customer && input.acceptedTerms !== true) {
-      throw new ValidationFailedError('Potvrdite saglasnost sa uslovima korišćenja.');
-    }
     const email = customer?.email ?? input.email;
-    if (!email) throw new ValidationFailedError('Unesite email adresu za obaveštenje.');
     return this.productAlerts.subscribe({
       organizationId: publicOrganizationId(this.config),
       productId: parseWithSchema(uuidSchema, productId),
       variantId: input.variantId,
       ...(customer?.customerId ? { customerId: customer.customerId } : {}),
       email,
+      managementToken: input.managementToken,
+      acceptedTerms: input.acceptedTerms,
+      policyVersion: input.policyVersion,
       type: input.type
     });
   }
@@ -649,40 +671,64 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertUnsubscribeSchema, body);
-    const email = customer?.email ?? input.email;
-    if (!email) throw new ValidationFailedError('Unesite email adresu za obaveštenje.');
-    await new StorefrontRepository(this.database.pool).unsubscribeProductAlert({
+    const unsubscribed = await this.productAlerts.unsubscribe({
       organizationId: publicOrganizationId(this.config),
       productId: parseWithSchema(uuidSchema, productId),
       variantId: input.variantId,
       ...(customer?.customerId ? { customerId: customer.customerId } : {}),
-      email,
+      email: customer?.email,
+      managementToken: input.managementToken,
       type: input.type
     });
-    return { ok: true };
+    return { ok: true, unsubscribed };
   }
 
   @Post('products/:productId/alerts/status')
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  async productAlertStatus(@Param('productId') productId: string, @Body() body: unknown) {
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async productAlertStatus(
+    @Req() request: Request,
+    @Param('productId') productId: string,
+    @Body() body: unknown
+  ) {
     const input = parseWithSchema(productAlertStatusQuerySchema, body);
-    const types = await new StorefrontRepository(this.database.pool).listActiveProductAlertTypes({
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
+    return this.productAlerts.activeTypes({
       organizationId: publicOrganizationId(this.config),
       productId: parseWithSchema(uuidSchema, productId),
       variantId: input.variantId,
-      email: input.email
+      ...(customer?.customerId ? { customerId: customer.customerId } : {}),
+      email: customer?.email,
+      managementToken: input.managementToken
     });
-    return { types };
   }
 
   @Post('newsletter/subscribe')
-  async subscribe(@Body() body: unknown) {
+  async subscribe(@Req() request: Request, @Body() body: unknown) {
     const input = parseWithSchema(newsletterSchema, body);
-    const subscriber = await new StorefrontRepository(this.database.pool).subscribeNewsletter({
-      organizationId: publicOrganizationId(this.config),
-      ...input
+    const organizationId = publicOrganizationId(this.config);
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
+    const alertContact = input.managementToken
+      ? await this.privacy.alertContactByToken(organizationId, input.managementToken)
+      : null;
+    const email = input.email ?? alertContact?.email ?? customer?.email;
+    if (!email) throw new ValidationFailedError('Email adresa nije dostupna.');
+    const subscriber = await this.privacy.subscribeNewsletter({
+      organizationId,
+      email,
+      source: input.source ?? 'site',
+      policyVersion: input.policyVersion,
+      ...(customer?.email?.toLowerCase() === email.toLowerCase()
+        ? { customerId: customer.customerId }
+        : {})
     });
-    await this.newsletterEmail.sendWelcomeEmail(subscriber.email);
+    if (!subscriber.alreadySubscribed) {
+      await this.newsletterEmail.sendWelcomeEmail({
+        recipient: subscriber.email,
+        unsubscribeUrl: subscriber.unsubscribeUrl
+      });
+    }
     return subscriber;
   }
 }

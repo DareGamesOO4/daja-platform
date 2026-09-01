@@ -3,7 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '@daja/config';
 import { createDatabase, createRedisConnection } from '@daja/database';
 import { createLogger } from '@daja/observability';
-import { createPlatformWorkers, FOUNDATION_QUEUE_NAME } from './worker.js';
+import {
+  createPlatformWorkers,
+  FOUNDATION_QUEUE_NAME,
+  POLICY_NOTIFICATION_QUEUE_NAME
+} from './worker.js';
 
 loadEnvironment({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
@@ -36,4 +40,7 @@ process.on('unhandledRejection', (reason) => {
   process.exitCode = 1;
 });
 
-logger.info({ queueNames: [FOUNDATION_QUEUE_NAME, 'media-processing'] }, 'DAJA worker listening');
+logger.info(
+  { queueNames: [FOUNDATION_QUEUE_NAME, 'media-processing', POLICY_NOTIFICATION_QUEUE_NAME] },
+  'DAJA worker listening'
+);

@@ -45,7 +45,12 @@ function isCustomerRoute(path: string): boolean {
     /^\/products\/[^/]+\/reviews$/.test(normalized) ||
     /^\/products\/[^/]+\/alerts$/.test(normalized) ||
     normalized.startsWith('/newsletter/subscribe') ||
-    normalized.startsWith('/newsletter/confirm')
+    normalized.startsWith('/newsletter/confirm') ||
+    normalized.startsWith('/privacy/current') ||
+    normalized.startsWith('/privacy/documents') ||
+    normalized.startsWith('/privacy/consents') ||
+    normalized.startsWith('/privacy/me') ||
+    normalized.startsWith('/privacy/unsubscribe')
   );
 }
 

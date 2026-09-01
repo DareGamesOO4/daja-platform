@@ -28,6 +28,9 @@ import { NewsletterEmailService } from './newsletter-email.service.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
+import { PrivacyService } from './privacy.service.js';
+import { PrivacyController } from './privacy.controller.js';
+import { PolicyPublicationService } from './policy-publication.service.js';
 import {
   CustomerAuthController,
   CustomerController,
@@ -55,6 +58,7 @@ const logger = createLogger(config, 'api');
     StorefrontOrdersController,
     StorefrontContentController,
     StorefrontMediaController,
+    PrivacyController,
     HealthController,
     OrganizationsController,
     PublicCatalogController,
@@ -81,6 +85,8 @@ const logger = createLogger(config, 'api');
     NewsletterEmailService,
     OrderEmailService,
     ProductAlertService,
+    PrivacyService,
+    PolicyPublicationService,
     RealtimeGateway,
     DevicePluginsService
   ]

@@ -24,6 +24,18 @@ services:
         sync: false
       - key: JWT_REFRESH_SECRET
         sync: false
+      - key: PRIVACY_TOKEN_SECRET
+        sync: false
+      - key: SES_REGION
+        sync: false
+      - key: SES_ACCESS_KEY_ID
+        sync: false
+      - key: SES_SECRET_ACCESS_KEY
+        sync: false
+      - key: SES_FROM_EMAIL
+        sync: false
+      - key: SES_REPLY_TO_EMAIL
+        sync: false
       - key: GOOGLE_OAUTH_CLIENT_ID
         sync: false
       - key: GOOGLE_OAUTH_CLIENT_SECRET
@@ -67,6 +79,18 @@ services:
       - key: JWT_ACCESS_SECRET
         sync: false
       - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: PRIVACY_TOKEN_SECRET
+        sync: false
+      - key: SES_REGION
+        sync: false
+      - key: SES_ACCESS_KEY_ID
+        sync: false
+      - key: SES_SECRET_ACCESS_KEY
+        sync: false
+      - key: SES_FROM_EMAIL
+        sync: false
+      - key: SES_REPLY_TO_EMAIL
         sync: false
       - key: R2_ACCOUNT_ID
         sync: false

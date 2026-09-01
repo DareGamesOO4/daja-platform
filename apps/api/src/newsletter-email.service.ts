@@ -45,14 +45,18 @@ export class NewsletterEmailService {
     });
   }
 
-  async sendWelcomeEmail(recipient: string): Promise<void> {
+  async sendWelcomeEmail(input: { recipient: string; unsubscribeUrl: string }): Promise<void> {
+    const unsubscribeUrl = escapeHtml(input.unsubscribeUrl);
     await this.sendEmail({
-      recipient,
+      recipient: input.recipient,
       subject: 'Dobro dosli u DajaShop newsletter',
       text:
-        'Hvala sto ste potvrdili prijavu na DajaShop newsletter. Kod DOBRODOSLI10 donosi 10% popusta na prvu porudzbinu.',
+        'Hvala što ste se prijavili na DajaShop newsletter. Kod DOBRODOSLI10 donosi 10% popusta na prvu porudžbinu.\n\nOdjava: ' +
+        input.unsubscribeUrl,
       html:
-        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Dobro dosli u DajaShop</h1><p style="font-size:16px;line-height:1.6">Hvala sto ste potvrdili prijavu na nas newsletter.</p><p style="font-size:16px;line-height:1.6">Za prvu porudzbinu iskoristite kod <strong>DOBRODOSLI10</strong> i ostvarite 10% popusta.</p><p style="margin:28px 0 0;font-size:14px;color:#666">DajaShop</p></main></body></html>',
+        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Dobro došli u DajaShop</h1><p style="font-size:16px;line-height:1.6">Hvala što ste se prijavili na naš newsletter.</p><p style="font-size:16px;line-height:1.6">Za prvu porudžbinu iskoristite kod <strong>DOBRODOSLI10</strong> i ostvarite 10% popusta.</p><p style="margin:28px 0 0;font-size:14px;color:#666">Ne želite više newsletter? <a href="' +
+        unsubscribeUrl +
+        '">Odjavite se jednim klikom</a>.</p><p style="margin:16px 0 0;font-size:14px;color:#666">DajaShop</p></main></body></html>',
       tag: 'newsletter-welcome'
     });
   }

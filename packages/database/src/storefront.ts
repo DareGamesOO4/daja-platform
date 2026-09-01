@@ -84,9 +84,11 @@ export interface ProductAlertSubscription {
   email: string;
   type: ProductAlertType;
   active: boolean;
+  contactId: string | null;
 }
 
 export interface ProductAlertNotification {
+  subscriptionId: string;
   email: string;
   productName: string;
   brand: string | null;
@@ -705,22 +707,27 @@ export class StorefrontRepository {
     email?: string | null;
     productId: string;
   }) {
-    await this.client.query(
+    const removedAlerts = await this.client.query<{ id: string }>(
       `WITH removed_wishlist_item AS (
          DELETE FROM customer_wishlist_items
          WHERE organization_id = $1 AND customer_id = $2 AND product_id = $3
          RETURNING product_id
        )
-       DELETE FROM product_alert_subscriptions alert
-       USING removed_wishlist_item removed
+       SELECT alert.id
+       FROM product_alert_subscriptions alert
+       JOIN removed_wishlist_item removed ON alert.product_id = removed.product_id
        WHERE alert.organization_id = $1 AND alert.product_id = removed.product_id
+         AND alert.active
          AND (
            alert.customer_id = $2
            OR ($4::text IS NOT NULL AND alert.normalized_email = lower($4))
          )`,
       [input.organizationId, input.customerId, input.productId, input.email ?? null]
     );
-    return this.listWishlist(input);
+    return {
+      wishlist: await this.listWishlist(input),
+      alertIds: removedAlerts.rows.map((row) => row.id)
+    };
   }
 
   /**
@@ -1034,6 +1041,7 @@ export class StorefrontRepository {
     productId: string;
     variantId: string;
     customerId?: string | null;
+    contactId?: string | null;
     email: string;
     type: ProductAlertType;
   }): Promise<ProductAlertSubscription> {
@@ -1073,29 +1081,43 @@ export class StorefrontRepository {
       email: string;
       alert_type: ProductAlertType;
       active: boolean;
+      contact_id: string | null;
     }>(
       `INSERT INTO product_alert_subscriptions (
-         organization_id, product_id, variant_id, customer_id, email, alert_type, requested_price_amount
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         organization_id, product_id, variant_id, customer_id, contact_id, email, alert_type, requested_price_amount
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (organization_id, variant_id, normalized_email, alert_type) DO UPDATE
        SET customer_id = COALESCE(EXCLUDED.customer_id, product_alert_subscriptions.customer_id),
+           contact_id = COALESCE(EXCLUDED.contact_id, product_alert_subscriptions.contact_id),
            active = TRUE,
+           revoked_at = NULL,
+           consent_status = CASE
+             WHEN EXCLUDED.contact_id IS NOT NULL THEN 'explicit'
+             ELSE product_alert_subscriptions.consent_status
+           END,
            requested_price_amount = EXCLUDED.requested_price_amount,
            notified_at = NULL,
            updated_at = now()
-       RETURNING id, email, alert_type, active`,
+       RETURNING id, email, alert_type, active, contact_id`,
       [
         input.organizationId,
         input.productId,
         input.variantId,
         input.customerId ?? null,
+        input.contactId ?? null,
         input.email.trim().toLowerCase(),
         input.type,
         input.type === 'price_change' ? current.current_price_amount : null
       ]
     );
     const row = requireRow(result);
-    return { id: row.id, email: row.email, type: row.alert_type, active: row.active };
+    return {
+      id: row.id,
+      email: row.email,
+      type: row.alert_type,
+      active: row.active,
+      contactId: row.contact_id
+    };
   }
 
   async listActiveProductAlertTypes(input: {
@@ -1181,7 +1203,7 @@ export class StorefrontRepository {
          AND product.active
          AND product.published
          AND inventory.available_quantity > 0
-       RETURNING alert.email, product.name AS product_name, brand.name AS brand,
+       RETURNING alert.id AS subscription_id, alert.email, product.name AS product_name, brand.name AS brand,
                  product.slug, variant.currency, variant.current_price_amount,
                  NULL::integer AS previous_price_amount`,
       [input.organizationId, input.variantId]
@@ -1217,7 +1239,7 @@ export class StorefrontRepository {
          AND product.deleted_at IS NULL
          AND product.active
          AND product.published
-       RETURNING alert.email, product.name AS product_name, brand.name AS brand,
+       RETURNING alert.id AS subscription_id, alert.email, product.name AS product_name, brand.name AS brand,
                  product.slug, variant.currency, $3::integer AS previous_price_amount,
                  $4::integer AS current_price_amount`,
       [
@@ -1441,6 +1463,7 @@ interface ReviewRow {
 }
 
 interface ProductAlertNotificationRow {
+  subscription_id: string;
   email: string;
   product_name: string;
   brand: string | null;
@@ -1551,6 +1574,7 @@ function serializeReview(row: ReviewRow) {
 
 function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductAlertNotification {
   return {
+    subscriptionId: row.subscription_id,
     email: row.email,
     productName: row.product_name,
     brand: row.brand,

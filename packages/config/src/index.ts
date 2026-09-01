@@ -53,6 +53,7 @@ const envSchema = z.object({
   SES_ORDER_FROM_EMAIL: optionalPreparedSecret,
   SES_REPLY_TO_EMAIL: optionalPreparedSecret,
   ORDER_NOTIFICATION_EMAILS: optionalPreparedSecret,
+  PRIVACY_TOKEN_SECRET: optionalPreparedSecret,
   STOREFRONT_PUBLIC_BASE_URL: z.string().url().default('https://dajashop.rs'),
   // Comma-separated email allowlist. These storefront customers may exchange a
   // verified customer session for a real staff/admin session.
