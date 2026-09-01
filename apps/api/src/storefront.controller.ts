@@ -95,7 +95,8 @@ const newsletterSchema = z.object({
 const productAlertSchema = z.object({
   type: z.enum(['back_in_stock', 'price_change']),
   variantId: uuidSchema,
-  email: z.string().trim().email().max(240).optional()
+  email: z.string().trim().email().max(240).optional(),
+  acceptedTerms: z.literal(true).optional()
 });
 
 const statusSchema = z.object({
@@ -614,6 +615,9 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertSchema, body);
+    if (!customer && input.acceptedTerms !== true) {
+      throw new ValidationFailedError('Potvrdite saglasnost sa uslovima korišćenja.');
+    }
     const email = customer?.email ?? input.email;
     if (!email) throw new ValidationFailedError('Unesite email adresu za obaveštenje.');
     return this.productAlerts.subscribe({
