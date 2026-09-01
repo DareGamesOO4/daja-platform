@@ -401,6 +401,7 @@ export class CustomerController {
     return new StorefrontRepository(this.database.pool).removeWishlistItem({
       organizationId: customer.organizationId,
       customerId: customer.customerId,
+      email: customer.email,
       productId: parseWithSchema(uuidSchema, productId)
     });
   }

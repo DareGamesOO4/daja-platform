@@ -659,6 +659,10 @@ export class StaffCatalogController {
           organizationId: ctx.organizationId,
           productId
         });
+        await new StorefrontRepository(client).removeProductAlerts({
+          organizationId: ctx.organizationId,
+          productId
+        });
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'product',

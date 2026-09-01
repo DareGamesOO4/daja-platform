@@ -702,12 +702,23 @@ export class StorefrontRepository {
   async removeWishlistItem(input: {
     organizationId: string;
     customerId: string;
+    email?: string | null;
     productId: string;
   }) {
     await this.client.query(
-      `DELETE FROM customer_wishlist_items
-       WHERE organization_id = $1 AND customer_id = $2 AND product_id = $3`,
-      [input.organizationId, input.customerId, input.productId]
+      `WITH removed_wishlist_item AS (
+         DELETE FROM customer_wishlist_items
+         WHERE organization_id = $1 AND customer_id = $2 AND product_id = $3
+         RETURNING product_id
+       )
+       DELETE FROM product_alert_subscriptions alert
+       USING removed_wishlist_item removed
+       WHERE alert.organization_id = $1 AND alert.product_id = removed.product_id
+         AND (
+           alert.customer_id = $2
+           OR ($4::text IS NOT NULL AND alert.normalized_email = lower($4))
+         )`,
+      [input.organizationId, input.customerId, input.productId, input.email ?? null]
     );
     return this.listWishlist(input);
   }
@@ -729,6 +740,30 @@ export class StorefrontRepository {
       `DELETE FROM customer_wishlist_items
        WHERE organization_id = $1 AND product_id = $2`,
       [input.organizationId, input.productId]
+    );
+  }
+
+  /** Remove alert subscriptions for one customer or for a deleted product. */
+  async removeProductAlerts(input: {
+    organizationId: string;
+    productId: string;
+    customerId?: string;
+    email?: string | null;
+  }): Promise<void> {
+    await this.client.query(
+      `DELETE FROM product_alert_subscriptions
+       WHERE organization_id = $1 AND product_id = $2
+         AND (
+           ($3::uuid IS NULL AND $4::text IS NULL)
+           OR customer_id = $3
+           OR ($4::text IS NOT NULL AND normalized_email = lower($4))
+         )`,
+      [
+        input.organizationId,
+        input.productId,
+        input.customerId ?? null,
+        input.email ?? null
+      ]
     );
   }
 
