@@ -102,7 +102,12 @@ export class ProductAlertService {
   }
 
   private fromEmail(): string {
-    return 'DajaShop <novosti@dajashop.rs>';
+    const configured =
+      this.config.SES_ALERTS_FROM_EMAIL ||
+      this.config.SES_ORDER_FROM_EMAIL ||
+      this.config.SES_FROM_EMAIL;
+    const address = rawEmailAddress(configured);
+    return address ? `DajaShop <${address}>` : configured;
   }
 }
 
@@ -141,6 +146,12 @@ function formatMoney(amountMinor: number, currency: string): string {
     currency: currency || 'RSD',
     maximumFractionDigits: 2
   }).format(amountMinor / 100);
+}
+
+function rawEmailAddress(value: string | undefined): string {
+  const match = /<([^>]+)>/.exec(value ?? '');
+  const address = (match?.[1] ?? value ?? '').trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) ? address : '';
 }
 
 function escapeHtml(value: string): string {

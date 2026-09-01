@@ -50,6 +50,7 @@ const envSchema = z.object({
   SES_SECRET_ACCESS_KEY: optionalPreparedSecret,
   SES_FROM_EMAIL: optionalPreparedSecret,
   SES_ACCOUNT_FROM_EMAIL: optionalPreparedSecret,
+  SES_ALERTS_FROM_EMAIL: optionalPreparedSecret,
   SES_ORDER_FROM_EMAIL: optionalPreparedSecret,
   SES_REPLY_TO_EMAIL: optionalPreparedSecret,
   ORDER_NOTIFICATION_EMAILS: optionalPreparedSecret,
