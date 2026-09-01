@@ -513,7 +513,7 @@ export class StaffCatalogController {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
         const after = await repository.patchProduct(ctx, productId, input);
-        await new StorefrontRepository(client).removeProductFromCustomerLists({
+        await new StorefrontRepository(client).refreshProductSnapshots({
           organizationId: ctx.organizationId,
           productId
         });
@@ -610,7 +610,7 @@ export class StaffCatalogController {
         );
         const after = result.rows[0];
         if (!after) throw new TenantAccessDeniedError();
-        await new StorefrontRepository(client).removeProductFromCustomerLists({
+        await new StorefrontRepository(client).refreshProductSnapshots({
           organizationId: ctx.organizationId,
           productId
         });
@@ -737,7 +737,7 @@ export class StaffCatalogController {
           variantId,
           variantInput
         );
-        await new StorefrontRepository(client).removeProductFromCustomerLists({
+        await new StorefrontRepository(client).refreshProductSnapshots({
           organizationId: ctx.organizationId,
           productId: after.productId
         });
@@ -990,6 +990,10 @@ export class StaffCatalogController {
         input.altText ?? null
       ]
     );
+    await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
+      organizationId: ctx.organizationId,
+      productId
+    });
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return result.rows[0];
@@ -1052,6 +1056,10 @@ export class StaffCatalogController {
       ]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
+      organizationId: ctx.organizationId,
+      productId
+    });
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return result.rows[0];
@@ -1086,6 +1094,10 @@ export class StaffCatalogController {
       }
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
+      organizationId: ctx.organizationId,
+      productId
+    });
     await this.publishProductSnapshots(ctx, productId);
     await this.invalidateCatalog(ctx.organizationId, product.slug);
     return { deleted: true };
@@ -1134,6 +1146,10 @@ export class StaffCatalogController {
       ctx,
       variant.productId
     );
+    await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
+      organizationId: ctx.organizationId,
+      productId: product.id
+    });
     await new OperationalSyncProjector(this.database.pool).publishProductChange(
       ctx,
       product.id,

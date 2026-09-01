@@ -714,8 +714,7 @@ export class StorefrontRepository {
 
   /**
    * Cart and wishlist entries keep a display snapshot of a product. Remove
-   * those snapshots when the catalog product changes so customers can never
-   * continue with stale product data.
+   * those snapshots only when the catalog product is deleted.
    */
   async removeProductFromCustomerLists(input: {
     organizationId: string;
@@ -730,6 +729,82 @@ export class StorefrontRepository {
       `DELETE FROM customer_wishlist_items
        WHERE organization_id = $1 AND product_id = $2`,
       [input.organizationId, input.productId]
+    );
+  }
+
+  /** Keep the product snapshots shown in carts and wishlists current. */
+  async refreshProductSnapshots(input: {
+    organizationId: string;
+    productId: string;
+  }): Promise<void> {
+    const snapshotResult = await this.client.query<CustomerListProductSnapshotRow>(
+      `SELECT p.id AS product_id, p.name, p.slug, b.name AS brand,
+              variant.id AS variant_id,
+              COALESCE(active_sale.amount_minor, variant.current_price_amount)::double precision / 100 AS price,
+              primary_asset.public_url AS image, thumb.public_url AS thumb
+       FROM products p
+       LEFT JOIN LATERAL (
+         SELECT pv.id, pv.current_price_amount
+         FROM product_variants pv
+         WHERE pv.organization_id = p.organization_id
+           AND pv.product_id = p.id AND pv.deleted_at IS NULL
+         ORDER BY pv.current_price_amount, pv.id
+         LIMIT 1
+       ) variant ON true
+       LEFT JOIN LATERAL (
+         SELECT vp.amount_minor
+         FROM variant_prices vp
+         WHERE vp.organization_id = p.organization_id AND vp.variant_id = variant.id
+           AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND (vp.valid_until IS NULL OR vp.valid_until > now())
+         ORDER BY vp.valid_from DESC, vp.created_at DESC
+         LIMIT 1
+       ) active_sale ON true
+       LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
+       LEFT JOIN LATERAL (
+         SELECT ma.public_url
+         FROM product_media pm
+         JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
+         LIMIT 1
+       ) primary_asset ON true
+       LEFT JOIN LATERAL (
+         SELECT md.public_url
+         FROM product_media pm
+         JOIN media_derivatives md ON md.media_asset_id = pm.media_asset_id
+         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ORDER BY pm.is_primary DESC, pm.position ASC, md.width ASC
+         LIMIT 1
+       ) thumb ON true
+       WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
+      [input.organizationId, input.productId]
+    );
+    const snapshot = snapshotResult.rows[0];
+    if (!snapshot) return;
+
+    const itemSnapshot = JSON.stringify({
+      id: snapshot.product_id,
+      productId: snapshot.product_id,
+      variantId: snapshot.variant_id,
+      name: snapshot.name,
+      brand: snapshot.brand,
+      slug: snapshot.slug,
+      image: snapshot.image,
+      thumb: snapshot.thumb,
+      price: snapshot.price
+    });
+    await this.client.query(
+      `UPDATE customer_cart_items
+       SET variant_id = $3, item_snapshot = item_snapshot || $4::jsonb, updated_at = now()
+       WHERE organization_id = $1 AND product_id = $2`,
+      [input.organizationId, input.productId, snapshot.variant_id, itemSnapshot]
+    );
+    await this.client.query(
+      `UPDATE customer_wishlist_items
+       SET item_snapshot = item_snapshot || $3::jsonb
+       WHERE organization_id = $1 AND product_id = $2`,
+      [input.organizationId, input.productId, itemSnapshot]
     );
   }
 
@@ -1234,6 +1309,17 @@ interface CartItemRow {
 
 interface WishlistItemRow {
   item_snapshot: StorefrontItemSnapshot;
+}
+
+interface CustomerListProductSnapshotRow {
+  product_id: string;
+  variant_id: string | null;
+  name: string;
+  slug: string;
+  brand: string | null;
+  price: number | null;
+  image: string | null;
+  thumb: string | null;
 }
 
 interface OrderRow {
