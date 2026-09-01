@@ -102,6 +102,11 @@ const productAlertStatusQuerySchema = z.object({
   variantId: uuidSchema,
   email: z.string().trim().email().max(240)
 });
+const productAlertUnsubscribeSchema = z.object({
+  type: z.enum(['back_in_stock', 'price_change']),
+  variantId: uuidSchema,
+  email: z.string().trim().email().max(240).optional()
+});
 
 const statusSchema = z.object({
   status: z.string().trim().min(1).max(80)
@@ -632,6 +637,29 @@ export class StorefrontContentController {
       email,
       type: input.type
     });
+  }
+
+  @Delete('products/:productId/alerts')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async unsubscribeProductAlert(
+    @Req() request: Request,
+    @Param('productId') productId: string,
+    @Body() body: unknown
+  ) {
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
+    const input = parseWithSchema(productAlertUnsubscribeSchema, body);
+    const email = customer?.email ?? input.email;
+    if (!email) throw new ValidationFailedError('Unesite email adresu za obaveštenje.');
+    await new StorefrontRepository(this.database.pool).unsubscribeProductAlert({
+      organizationId: publicOrganizationId(this.config),
+      productId: parseWithSchema(uuidSchema, productId),
+      variantId: input.variantId,
+      ...(customer?.customerId ? { customerId: customer.customerId } : {}),
+      email,
+      type: input.type
+    });
+    return { ok: true };
   }
 
   @Post('products/:productId/alerts/status')

@@ -1118,6 +1118,36 @@ export class StorefrontRepository {
     return result.rows.map((row) => row.alert_type);
   }
 
+  /** Remove one alert type without touching another alert for the same product. */
+  async unsubscribeProductAlert(input: {
+    organizationId: string;
+    productId: string;
+    variantId: string;
+    customerId?: string | null;
+    email: string;
+    type: ProductAlertType;
+  }): Promise<void> {
+    await this.client.query(
+      `DELETE FROM product_alert_subscriptions
+       WHERE organization_id = $1
+         AND product_id = $2
+         AND variant_id = $3
+         AND alert_type = $4
+         AND (
+           customer_id = $5
+           OR normalized_email = lower($6)
+         )`,
+      [
+        input.organizationId,
+        input.productId,
+        input.variantId,
+        input.type,
+        input.customerId ?? null,
+        input.email
+      ]
+    );
+  }
+
   async claimBackInStockProductAlerts(input: {
     organizationId: string;
     variantId: string;
