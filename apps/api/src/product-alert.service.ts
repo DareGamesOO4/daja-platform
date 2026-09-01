@@ -102,7 +102,7 @@ export class ProductAlertService {
   }
 
   private fromEmail(): string {
-    return 'DajaShop novosti <novosti@dajashop.rs>';
+    return 'DajaShop <novosti@dajashop.rs>';
   }
 }
 
