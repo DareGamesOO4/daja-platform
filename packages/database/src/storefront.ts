@@ -1147,7 +1147,7 @@ export class StorefrontRepository {
   }): Promise<ProductAlertNotification[]> {
     const result = await this.client.query<ProductAlertNotificationRow>(
       `UPDATE product_alert_subscriptions alert
-       SET active = FALSE, notified_at = now(), updated_at = now()
+       SET notified_at = now(), updated_at = now()
        FROM product_variants variant
        JOIN products product
          ON product.id = variant.product_id
