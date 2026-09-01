@@ -30,6 +30,7 @@ import {
   R2MediaStorageAdapter,
   type RedisConnection,
   RfidRepository,
+  StorefrontRepository,
   TransactionManager,
   type Database
 } from '@daja/database';
@@ -512,6 +513,10 @@ export class StaffCatalogController {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
         const after = await repository.patchProduct(ctx, productId, input);
+        await new StorefrontRepository(client).removeProductFromCustomerLists({
+          organizationId: ctx.organizationId,
+          productId
+        });
         if (before.slug !== after.slug) {
           await client.query(
             `INSERT INTO product_slug_redirects (organization_id, product_id, old_slug)
@@ -605,6 +610,10 @@ export class StaffCatalogController {
         );
         const after = result.rows[0];
         if (!after) throw new TenantAccessDeniedError();
+        await new StorefrontRepository(client).removeProductFromCustomerLists({
+          organizationId: ctx.organizationId,
+          productId
+        });
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'product',
@@ -646,6 +655,10 @@ export class StaffCatalogController {
           await mediaRepository.discardUnreferenced(ctx, mediaId, storage);
         }
         await repository.softDeleteProduct(ctx, productId);
+        await new StorefrontRepository(client).removeProductFromCustomerLists({
+          organizationId: ctx.organizationId,
+          productId
+        });
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'product',
@@ -724,6 +737,10 @@ export class StaffCatalogController {
           variantId,
           variantInput
         );
+        await new StorefrontRepository(client).removeProductFromCustomerLists({
+          organizationId: ctx.organizationId,
+          productId: after.productId
+        });
         // The EPC field lives in rfid_tags, not product_variants. A deliberate
         // null sent from the admin form must therefore clear every tag relation
         // for this variant in the same Save operation.

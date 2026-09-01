@@ -712,6 +712,27 @@ export class StorefrontRepository {
     return this.listWishlist(input);
   }
 
+  /**
+   * Cart and wishlist entries keep a display snapshot of a product. Remove
+   * those snapshots when the catalog product changes so customers can never
+   * continue with stale product data.
+   */
+  async removeProductFromCustomerLists(input: {
+    organizationId: string;
+    productId: string;
+  }): Promise<void> {
+    await this.client.query(
+      `DELETE FROM customer_cart_items
+       WHERE organization_id = $1 AND product_id = $2`,
+      [input.organizationId, input.productId]
+    );
+    await this.client.query(
+      `DELETE FROM customer_wishlist_items
+       WHERE organization_id = $1 AND product_id = $2`,
+      [input.organizationId, input.productId]
+    );
+  }
+
   async createOrder(organizationId: string, input: CheckoutInput) {
     const displayId = await this.createDisplayId(organizationId);
     const customer = input.customer;
