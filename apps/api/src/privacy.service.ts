@@ -55,7 +55,7 @@ export class PrivacyService {
       // refreshed instead of being interpreted as analytics consent.
       material: publication?.material ?? true,
       changeSummary: publication?.change_summary ?? '',
-      effectiveAt: publication?.effective_at?.toISOString() ?? '2026-09-01T00:00:00.000Z',
+      effectiveAt: publication?.effective_at?.toISOString() ?? '2026-09-02T00:00:00.000Z',
       ready: LEGAL_DOCUMENTS.every((document) => document.ready),
       documents: LEGAL_DOCUMENTS
     };

@@ -1,9 +1,9 @@
 /**
- * Legal copy is intentionally source-controlled.  The current document is a
- * deployment-safe draft scaffold only; it must be replaced with the reviewed
+ * Legal copy is intentionally source-controlled. The current document is a
+ * deployment-safe draft scaffold only; it must be replaced with reviewed
  * company data before a production publication is marked as ready.
  */
-export const LEGAL_POLICY_VERSION = '2026-09-01-analytics-draft';
+export const LEGAL_POLICY_VERSION = '2026-09-02-functional-services-draft';
 
 export type LegalDocumentKind = 'privacy' | 'cookies' | 'terms';
 
@@ -24,7 +24,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
   {
     kind: 'privacy',
     title: 'Politika privatnosti',
-    updatedAt: '2026-09-01',
+    updatedAt: '2026-09-02',
     ready: false,
     sections: [
       { title: 'Status dokumenta', body: sharedNotice },
@@ -40,17 +40,24 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
   {
     kind: 'cookies',
     title: 'Politika kolačića i lokalne memorije',
-    updatedAt: '2026-09-01',
+    updatedAt: '2026-09-02',
     ready: false,
     sections: [
       { title: 'Status dokumenta', body: sharedNotice },
       {
         title: 'Kategorije koje aplikacija podržava',
         body: [
-          'Neophodno: dokaz izbora, prijava i funkcije koje korisnik izričito koristi, poput korpe.',
-          'Podešavanja: tema, zapamćena prijava, pozicija skrola i prikaz newsletter ponude.',
-          'Spoljne usluge: Google Maps i Google Places, samo nakon posebne ili potpune dozvole.',
+          'Neophodno: dokaz izbora, prijava i funkcije koje korisnik izričito koristi, poput korpe i liste želja.',
+          'Funkcionalni kolačići: tema sajta, zapamćena prijava, prikaz newsletter ponude i pamćenje pozicije u katalogu. Ova kategorija je podrazumevano isključena.',
+          'Google funkcionalnosti: Google Maps prikazuje našu lokaciju, a Google Places nudi predlog adrese. Usluga se učitava samo nakon zasebne dozvole; korisnik može nastaviti bez mape i ručno uneti adresu. Google pri korišćenju može obraditi tehničke podatke pregledača i adresu koju korisnik unese.',
           'Analitika: Cloudflare Web Analytics, samo nakon izričitog pristanka korisnika.'
+        ]
+      },
+      {
+        title: 'Upravljanje izborom',
+        body: [
+          'Korisnik može prihvatiti samo neophodne kolačiće, dozvoliti pojedinačne funkcionalne opcije ili kasnije promeniti izbor u podešavanjima privatnosti.',
+          'Promena naziva kategorije u „funkcionalni” ne menja činjenicu da su te opcije dobrovoljne i da nisu potrebne za završetak kupovine.'
         ]
       }
     ]
@@ -58,7 +65,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
   {
     kind: 'terms',
     title: 'Uslovi korišćenja',
-    updatedAt: '2026-09-01',
+    updatedAt: '2026-09-02',
     ready: false,
     sections: [
       { title: 'Status dokumenta', body: sharedNotice },
