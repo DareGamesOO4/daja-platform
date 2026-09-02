@@ -3,7 +3,7 @@
  * deployment-safe draft scaffold only; it must be replaced with reviewed
  * company data before a production publication is marked as ready.
  */
-export const LEGAL_POLICY_VERSION = '2026-09-02-functional-services-draft';
+export const LEGAL_POLICY_VERSION = '2026-09-02-cookie-category-groups-draft';
 
 export type LegalDocumentKind = 'privacy' | 'cookies' | 'terms';
 
@@ -48,15 +48,16 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
         title: 'Kategorije koje aplikacija podržava',
         body: [
           'Neophodno: dokaz izbora, prijava i funkcije koje korisnik izričito koristi, poput korpe i liste želja.',
-          'Funkcionalni kolačići: tema sajta, zapamćena prijava, prikaz newsletter ponude i pamćenje pozicije u katalogu. Ova kategorija je podrazumevano isključena.',
-          'Google funkcionalnosti: Google Maps prikazuje našu lokaciju, a Google Places nudi predlog adrese. Usluga se učitava samo nakon zasebne dozvole; korisnik može nastaviti bez mape i ručno uneti adresu. Google pri korišćenju može obraditi tehničke podatke pregledača i adresu koju korisnik unese.',
-          'Analitika: Cloudflare Web Analytics, samo nakon izričitog pristanka korisnika.'
+          'Funkcionalni: pamćenje teme, prijave, prikaza newsletter ponude i pozicije u katalogu, Google Maps za prikaz naše lokacije i Google Places za predlog adrese. Kategorija je podrazumevano isključena; korisnik može nastaviti bez mape i ručno uneti adresu. Google pri korišćenju može obraditi tehničke podatke pregledača i adresu koju korisnik unese.',
+          'Analitika: Cloudflare Web Analytics, samo nakon izričitog pristanka korisnika.',
+          'Marketing: trenutno ne koristimo marketinške kolačiće niti personalizovano oglašavanje.',
+          'Neklasifikovani: trenutno nema kolačića koji nisu svrstani u neku od navedenih kategorija.'
         ]
       },
       {
         title: 'Upravljanje izborom',
         body: [
-          'Korisnik može prihvatiti samo neophodne kolačiće, dozvoliti pojedinačne funkcionalne opcije ili kasnije promeniti izbor u podešavanjima privatnosti.',
+          'Korisnik može prihvatiti samo neophodne kolačiće, dozvoliti funkcionalnu kategoriju ili analitiku, ili kasnije promeniti izbor u podešavanjima privatnosti.',
           'Promena naziva kategorije u „funkcionalni” ne menja činjenicu da su te opcije dobrovoljne i da nisu potrebne za završetak kupovine.'
         ]
       }
