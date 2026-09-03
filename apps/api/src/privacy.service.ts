@@ -111,7 +111,14 @@ export class PrivacyService {
     source: string;
     policyVersion?: string | undefined;
     customerId?: string | null | undefined;
-  }): Promise<{ id: string; email: string; active: boolean; alreadySubscribed: boolean; unsubscribeUrl: string }> {
+  }): Promise<{
+    id: string;
+    email: string;
+    active: boolean;
+    alreadySubscribed: boolean;
+    isFirstSubscription: boolean;
+    unsubscribeUrl: string;
+  }> {
     const normalizedEmail = normalizeEmail(input.email);
     const existing = await this.database.pool.query<{
       id: string;
@@ -150,6 +157,7 @@ export class PrivacyService {
         email: row.email,
         active: true,
         alreadySubscribed: true,
+        isFirstSubscription: false,
         unsubscribeUrl: this.newsletterUnsubscribeUrl(row.id)
       };
     }
@@ -187,8 +195,30 @@ export class PrivacyService {
       email: subscriber.email,
       active: subscriber.active,
       alreadySubscribed: false,
+      isFirstSubscription: !row,
       unsubscribeUrl: this.newsletterUnsubscribeUrl(subscriber.id)
     };
+  }
+
+  async hasNoOrders(input: {
+    organizationId: string;
+    email: string;
+    customerId?: string | null | undefined;
+  }): Promise<boolean> {
+    const result = await this.database.pool.query<{ has_orders: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM orders
+         WHERE organization_id = $1
+           AND deleted_at IS NULL
+           AND (
+             lower(customer_email) = $2
+             OR ($3::uuid IS NOT NULL AND customer_id = $3::uuid)
+           )
+       ) AS has_orders`,
+      [input.organizationId, normalizeEmail(input.email), input.customerId ?? null]
+    );
+    return result.rows[0]?.has_orders !== true;
   }
 
   async newsletterStatus(input: { organizationId: string; email: string | null | undefined }) {

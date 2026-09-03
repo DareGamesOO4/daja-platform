@@ -51,6 +51,7 @@ const passwordUpdateSchema = z.object({
 });
 const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
+const NEWSLETTER_WELCOME_PROMO_CODE = 'DOBRODOSLI10';
 
 const addressSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
@@ -729,13 +730,27 @@ export class StorefrontContentController {
         ? { customerId: customer.customerId }
         : {})
     });
-    if (!subscriber.alreadySubscribed) {
+    const matchingCustomerId =
+      customer?.email?.toLowerCase() === email.toLowerCase() ? customer.customerId : undefined;
+    const welcomeOfferEligible =
+      subscriber.isFirstSubscription &&
+      (await this.privacy.hasNoOrders({
+        organizationId,
+        email: subscriber.email,
+        ...(matchingCustomerId ? { customerId: matchingCustomerId } : {})
+      }));
+    if (welcomeOfferEligible) {
       await this.newsletterEmail.sendWelcomeEmail({
         recipient: subscriber.email,
-        unsubscribeUrl: subscriber.unsubscribeUrl
+        unsubscribeUrl: subscriber.unsubscribeUrl,
+        promotionCode: NEWSLETTER_WELCOME_PROMO_CODE
       });
     }
-    return subscriber;
+    return {
+      ...subscriber,
+      welcomeOfferEligible,
+      ...(welcomeOfferEligible ? { welcomePromoCode: NEWSLETTER_WELCOME_PROMO_CODE } : {})
+    };
   }
 }
 
