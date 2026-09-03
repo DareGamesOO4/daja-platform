@@ -731,20 +731,45 @@ async function canonicalCartLines(
   organizationId: string,
   items: Array<Record<string, unknown>>
 ): Promise<CanonicalCartLine[]> {
-  const quantities = new Map<string, number>();
+  const variantQuantities = new Map<string, number>();
+  const legacyProductQuantities = new Map<string, number>();
   for (const item of items) {
     const variantId = typeof item.variantId === 'string' ? item.variantId : null;
+    const productId =
+      typeof item.productId === 'string'
+        ? item.productId
+        : typeof item.id === 'string'
+          ? item.id
+          : null;
     const quantity = Number(item.qty ?? item.quantity ?? 1);
-    if (!variantId || !isUuid(variantId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 200) {
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 200) {
       throw new ValidationFailedError('Korpa sadrži neispravan proizvod ili količinu.');
     }
-    quantities.set(variantId, (quantities.get(variantId) ?? 0) + quantity);
+    if (variantId && isUuid(variantId)) {
+      variantQuantities.set(variantId, (variantQuantities.get(variantId) ?? 0) + quantity);
+      continue;
+    }
+    // Older carts saved only the product id. Resolve those items to the same
+    // lowest-priced published variant used by the public catalog, so a valid
+    // promotion never fails solely because a visitor has an older cart.
+    if (productId && isUuid(productId)) {
+      legacyProductQuantities.set(
+        productId,
+        (legacyProductQuantities.get(productId) ?? 0) + quantity
+      );
+      continue;
+    }
+    throw new ValidationFailedError('Korpa sadrži neispravan proizvod ili količinu.');
   }
-  if (!quantities.size) throw new ValidationFailedError('Korpa je prazna.');
-  const variantIds = [...quantities.keys()];
+  if (!variantQuantities.size && !legacyProductQuantities.size) {
+    throw new ValidationFailedError('Korpa je prazna.');
+  }
+  const variantIds = [...variantQuantities.keys()];
+  const legacyProductIds = [...legacyProductQuantities.keys()];
   const result = await client.query<{
     product_id: string;
     variant_id: string;
+    legacy_product_id: string | null;
     category_id: string | null;
     brand_id: string | null;
     department_id: string | null;
@@ -752,15 +777,43 @@ async function canonicalCartLines(
     attributes: Record<string, unknown>;
     specification_values: Record<string, unknown>;
   }>(
-    `SELECT p.id AS product_id,
+    `WITH requested_variants AS (
+       SELECT unnest($2::uuid[]) AS variant_id
+     ),
+     requested_legacy_products AS (
+       SELECT unnest($3::uuid[]) AS product_id
+     ),
+     selected_variants AS (
+       SELECT requested_variants.variant_id, NULL::uuid AS legacy_product_id
+       FROM requested_variants
+       UNION ALL
+       SELECT fallback_variant.id AS variant_id, requested_legacy_products.product_id AS legacy_product_id
+       FROM requested_legacy_products
+       JOIN products fallback_product
+         ON fallback_product.id = requested_legacy_products.product_id
+        AND fallback_product.organization_id = $1
+       JOIN LATERAL (
+         SELECT pv.id
+         FROM product_variants pv
+         WHERE pv.organization_id = fallback_product.organization_id
+           AND pv.product_id = fallback_product.id
+           AND pv.deleted_at IS NULL AND pv.active AND pv.published
+         ORDER BY pv.current_price_amount, pv.id
+         LIMIT 1
+       ) fallback_variant ON true
+     )
+     SELECT p.id AS product_id,
             v.id AS variant_id,
+            selected_variants.legacy_product_id,
             p.primary_category_id AS category_id,
             p.brand_id AS brand_id,
             p.department_id AS department_id,
             COALESCE(active_sale.amount_minor, v.current_price_amount) AS price_minor,
             v.attributes,
             COALESCE(specifications.values, '{}'::jsonb) AS specification_values
-     FROM product_variants v
+     FROM selected_variants
+     JOIN product_variants v
+       ON v.id = selected_variants.variant_id AND v.organization_id = $1
      JOIN products p
        ON p.id = v.product_id AND p.organization_id = v.organization_id
      LEFT JOIN LATERAL (
@@ -778,26 +831,36 @@ async function canonicalCartLines(
        FROM variant_specification_values
        WHERE organization_id = v.organization_id AND variant_id = v.id
      ) specifications ON true
-     WHERE v.organization_id = $1
-       AND v.id = ANY($2::uuid[])
-       AND v.deleted_at IS NULL AND v.active AND v.published
+     WHERE v.deleted_at IS NULL AND v.active AND v.published
        AND p.deleted_at IS NULL AND p.active AND p.published`,
-    [organizationId, variantIds]
+    [organizationId, variantIds, legacyProductIds]
   );
-  if (result.rows.length !== variantIds.length) {
+  if (result.rows.length !== variantIds.length + legacyProductIds.length) {
     throw new ValidationFailedError('Jedan ili više proizvoda iz korpe više nisu dostupni.');
   }
-  return result.rows.map((row) => ({
-    productId: row.product_id,
-    variantId: row.variant_id,
-    categoryId: row.category_id,
-    brandId: row.brand_id,
-    departmentId: row.department_id,
-    priceMinor: Number(row.price_minor),
-    quantity: quantities.get(row.variant_id) ?? 0,
-    attributes: asObject(row.attributes),
-    specificationValues: asObject(row.specification_values)
-  }));
+  const lines = new Map<string, CanonicalCartLine>();
+  result.rows.forEach((row) => {
+    const quantity = row.legacy_product_id
+      ? legacyProductQuantities.get(row.legacy_product_id)
+      : variantQuantities.get(row.variant_id);
+    const existing = lines.get(row.variant_id);
+    if (existing) {
+      existing.quantity += quantity ?? 0;
+      return;
+    }
+    lines.set(row.variant_id, {
+      productId: row.product_id,
+      variantId: row.variant_id,
+      categoryId: row.category_id,
+      brandId: row.brand_id,
+      departmentId: row.department_id,
+      priceMinor: Number(row.price_minor),
+      quantity: quantity ?? 0,
+      attributes: asObject(row.attributes),
+      specificationValues: asObject(row.specification_values)
+    });
+  });
+  return [...lines.values()];
 }
 
 function isEligible(line: CanonicalCartLine, rules: { include: PromotionScope; exclude: PromotionScope }) {
