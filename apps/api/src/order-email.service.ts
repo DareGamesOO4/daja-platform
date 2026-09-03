@@ -189,7 +189,7 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
             ' po komadu</p>'
           : '';
       return (
-        '<tr class="item-row"><td style="padding:15px 0;border-bottom:1px solid #e4e4e7">' +
+        '<tr class="item-row"><td colspan="2" style="padding:15px 0;border-bottom:1px solid #e4e4e7">' +
         '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>' +
         '<td width="72" valign="top" style="width:72px;padding-right:14px">' +
         '<table class="product-frame" role="presentation" width="64" height="64" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)"><tr><td bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)">' +
@@ -261,14 +261,14 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
 
 function productImageHtml(item: OrderItem): string {
   if (!item.image) {
-    return '<div class="product-image" style="width:64px;height:64px;background:#f4f4f5;color:#71717a;font-size:12px;line-height:64px;text-align:center">D</div>';
+    return '<div class="product-image" style="width:64px;height:64px;color:#71717a;font-size:12px;line-height:64px;text-align:center">D</div>';
   }
   return (
     '<img class="product-image" src="' +
     escapeHtml(item.image) +
     '" alt="' +
     escapeHtml(item.name) +
-    '" width="64" height="64" style="display:block;width:64px;height:64px;border:0;border-radius:3px;object-fit:cover;background:#f4f4f5" />'
+    '" width="64" height="64" style="display:block;width:64px;height:64px;border:0;border-radius:3px;object-fit:cover" />'
   );
 }
 
