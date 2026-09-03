@@ -38,9 +38,6 @@ interface StatusPresentation {
   title: string;
   description: string;
   color: string;
-  border: string;
-  background: string;
-  step: number | null;
 }
 
 @Injectable()
@@ -66,7 +63,7 @@ export class OrderEmailService {
   }
 
   private customerConfirmationEmail(order: OrderEmailPayload, recipient: string): TransactionalEmail {
-    const name = customerName(order.customer);
+    const name = customerGreetingName(order.customer);
     const items = orderItems(order);
     const shipping = shippingDetails(order);
     return {
@@ -89,9 +86,9 @@ export class OrderEmailService {
           escapeHtml(name) +
           ', hvala na poverenju. Pripremićemo porudžbinu i obavestiti vas o svakoj promeni statusa.',
         content:
+          orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
-          orderDetailsHtml(order, shipping) +
-          orderSummaryHtml(order, items),
+          orderDetailsHtml(order, shipping),
         footer:
           'Sačuvajte ovaj email kao potvrdu porudžbine. Za sva pitanja odgovorite direktno na ovu poruku.'
       }),
@@ -127,9 +124,9 @@ export class OrderEmailService {
           escapeHtml(name) +
           '</strong> je upravo poslao porudžbinu. Ispod su svi podaci potrebni za obradu.',
         content:
-          adminCustomerHtml(order, shipping, { name, email, phone }) +
+          orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
-          orderSummaryHtml(order, items),
+          adminCustomerHtml(order, shipping, { name, email, phone }),
         footer: 'Porudžbinu možeš pregledati i ažurirati u Admin → Porudžbine.'
       }),
       tag: 'new-order-notification'
@@ -137,7 +134,7 @@ export class OrderEmailService {
   }
 
   private customerStatusEmail(order: OrderEmailPayload, recipient: string): TransactionalEmail {
-    const name = customerName(order.customer);
+    const name = customerGreetingName(order.customer);
     const items = orderItems(order);
     const shipping = shippingDetails(order);
     return {
@@ -161,9 +158,9 @@ export class OrderEmailService {
           escapeHtml(name) +
           ', status vaše porudžbine je promenjen. Ispod možete videti trenutno stanje i kompletan pregled porudžbine.',
         content:
+          orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
-          orderDetailsHtml(order, shipping) +
-          orderSummaryHtml(order, items),
+          orderDetailsHtml(order, shipping),
         footer: 'Ako imate pitanje u vezi porudžbine, odgovorite direktno na ovaj email.'
       }),
       tag: 'order-status-update'
@@ -216,7 +213,7 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
     .join('');
   const hasPromotion = Boolean(order.promoCode) || order.discountAmount > 0;
   const promotionLabel = order.promoCode
-    ? '<code style="border:1px solid #bbf7d0;border-radius:5px;background:#f0fdf4;padding:3px 6px;color:#166534;font-family:Arial,sans-serif;font-size:12px;font-weight:700">' +
+    ? '<code style="border:1px solid #bbf7d0;background:#f0fdf4;padding:3px 6px;color:#166534;font-family:Arial,sans-serif;font-size:12px;font-weight:700">' +
       escapeHtml(order.promoCode) +
       '</code>'
     : 'Popust';
@@ -237,8 +234,8 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
   const shippingValue =
     order.shippingCost === 0 ? 'Besplatna' : escapeHtml(formatMoney(order.shippingCost, order.currency));
   return (
-    '<section style="margin:24px 0;border:1px solid #e4e4e7;border-radius:14px;background:#ffffff;padding:22px">' +
-    '<p style="margin:0 0 14px;color:#18181b;font-size:16px;font-weight:700">Artikli u porudžbini</p>' +
+    '<section style="margin:28px 0">' +
+    '<p style="margin:0 0 10px;color:#18181b;font-size:15px;font-weight:700">Artikli u porudžbini</p>' +
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tbody>' +
     itemRows +
@@ -262,77 +259,47 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
 
 function productImageHtml(item: OrderItem): string {
   if (!item.image) {
-    return '<div class="product-image" style="width:64px;height:64px;border-radius:10px;background:#f4f4f5;color:#71717a;font-size:12px;line-height:64px;text-align:center">D</div>';
+    return '<div class="product-image" style="width:64px;height:64px;background:#f4f4f5;color:#71717a;font-size:12px;line-height:64px;text-align:center">D</div>';
   }
   return (
     '<img class="product-image" src="' +
     escapeHtml(item.image) +
     '" alt="' +
     escapeHtml(item.name) +
-    '" width="64" height="64" style="display:block;width:64px;height:64px;border:0;border-radius:10px;object-fit:cover;background:#f4f4f5" />'
+    '" width="64" height="64" style="display:block;width:64px;height:64px;border:0;border-radius:3px;object-fit:cover;background:#f4f4f5" />'
   );
 }
 
 function orderStatusHtml(order: OrderEmailPayload): string {
   const status = statusPresentation(order.status);
-  const progress = status.step === null ? '' : statusProgressHtml(status.step, status.color);
   return (
-    '<section style="margin:24px 0;padding:20px;border:1px solid ' +
-    status.border +
-    ';border-radius:14px;background:' +
-    status.background +
+    '<section style="margin:28px 0;padding:2px 0 2px 16px;border-left:3px solid ' +
+    status.color +
     '">' +
-    '<p style="margin:0 0 8px;color:' +
+    '<p style="margin:0 0 5px;color:' +
     status.color +
     ';font-size:11px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">Trenutni status</p>' +
-    '<p style="margin:0;color:#18181b;font-size:22px;line-height:1.25;font-weight:800">' +
-    escapeHtml(order.status) +
+    '<p style="margin:0;color:#18181b;font-size:18px;line-height:1.3;font-weight:700">' +
+    escapeHtml(status.title) +
     '</p>' +
-    '<p style="margin:8px 0 0;color:#3f3f46;font-size:14px;line-height:1.55">' +
+    '<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.55">' +
     escapeHtml(status.description) +
-    '</p>' +
-    progress +
     '</section>'
-  );
-}
-
-function statusProgressHtml(currentStep: number, color: string): string {
-  const steps = ['Primljena', 'Obrada', 'Poslata', 'Isporučena'];
-  const dots = steps
-    .map((label, index) => {
-      const active = index <= currentStep;
-      const dotColor = active ? color : '#d4d4d8';
-      const labelColor = active ? '#3f3f46' : '#a1a1aa';
-      return (
-        '<td align="center" style="width:25%;padding:0 2px">' +
-        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' +
-        dotColor +
-        ';font-size:0;line-height:0">&nbsp;</span>' +
-        '<p style="margin:5px 0 0;color:' +
-        labelColor +
-        ';font-size:10px;line-height:1.2">' +
-        label +
-        '</p></td>'
-      );
-    })
-    .join('');
-  return (
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:18px;border-top:1px solid rgba(24,24,27,0.1);padding-top:14px"><tr>' +
-    dots +
-    '</tr></table>'
   );
 }
 
 function orderDetailsHtml(order: OrderEmailPayload, shipping: ShippingDetails): string {
   return (
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;border-collapse:separate;border-spacing:8px">' +
+    '<section style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
+    '<p style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Detalji porudžbine</p>' +
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tr>' +
     detailCell('Broj porudžbine', '#' + order.displayId) +
     detailCell('Datum', formatOrderDate(order.createdAt)) +
     '</tr><tr>' +
     detailCell('Isporuka', shipping.text) +
     detailCell('Plaćanje', paymentLabel(order.paymentMethod)) +
-    '</tr></table>'
+    '</tr></table></section>'
   );
 }
 
@@ -348,9 +315,9 @@ function adminCustomerHtml(
       ? '<br><span style="color:#52525b">' + escapeHtml(customer.phone) + '</span>'
       : '');
   return (
-    '<section style="margin:24px 0;border:1px solid #e4e4e7;border-radius:14px;background:#ffffff;padding:22px">' +
-    '<p style="margin:0 0 14px;color:#18181b;font-size:16px;font-weight:700">Podaci za obradu</p>' +
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:separate;border-spacing:0 8px">' +
+    '<section style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
+    '<p style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Podaci za obradu</p>' +
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tr>' +
     detailCell('Kupac', customer.name) +
     detailCell('Kontakt', contact, true) +
@@ -366,7 +333,7 @@ function adminCustomerHtml(
 
 function detailCell(label: string, value: string, valueIsHtml = false): string {
   return (
-    '<td class="mobile-block" valign="top" style="width:50%;padding:12px 14px;background:#f8f8fa;border-radius:10px">' +
+    '<td class="mobile-block" valign="top" style="width:50%;padding:12px 14px 12px 0;border-top:1px solid #f0f0f1">' +
     '<p style="margin:0 0 5px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.07em;text-transform:uppercase">' +
     escapeHtml(label) +
     '</p><p style="margin:0;color:#27272a;font-size:13px;line-height:1.45;font-weight:600">' +
@@ -384,17 +351,17 @@ function emailPage(input: {
 }): string {
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-    '<style>@media only screen and (max-width:640px){.email-shell{width:100% !important;border-radius:0 !important}.email-outer{padding:0 !important}.email-header{padding:26px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}</style>' +
+    '<style>@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}</style>' +
     '</head><body style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
-    '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff;border:1px solid #e4e4e7;border-radius:18px;overflow:hidden">' +
-    '<tr><td class="email-header" style="padding:30px 44px;background:#18181b;color:#ffffff">' +
-    '<p style="margin:0;color:#d4d4d8;font-size:12px;font-weight:700;letter-spacing:0.13em;text-transform:uppercase">DajaShop</p>' +
-    '<p style="margin:10px 0 0;color:#ffffff;font-size:14px;font-weight:700;letter-spacing:0.08em">' +
+    '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
+    '<tr><td class="email-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
+    '<p style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
+    '<p style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">' +
     input.eyebrow +
     '</p></td></tr>' +
     '<tr><td class="email-padding" style="padding:38px 44px">' +
-    '<h1 style="margin:0 0 12px;color:#18181b;font-size:28px;line-height:1.2;font-weight:800">' +
+    '<h1 style="margin:0 0 12px;color:#18181b;font-size:25px;line-height:1.25;font-weight:700">' +
     input.title +
     '</h1>' +
     '<p style="margin:0;color:#52525b;font-size:16px;line-height:1.6">' +
@@ -404,7 +371,7 @@ function emailPage(input: {
     '<p style="margin:28px 0 0;color:#71717a;font-size:13px;line-height:1.6">' +
     input.footer +
     '</p></td></tr>' +
-    '<tr><td style="padding:20px 44px;border-top:1px solid #e4e4e7;background:#fafafa;color:#71717a;font-size:12px;line-height:1.5">' +
+    '<tr><td style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.5">' +
     'DajaShop · Automatska poruka o vašoj porudžbini' +
     '</td></tr></table></td></tr></table></body></html>'
   );
@@ -532,55 +499,37 @@ function statusPresentation(status: string): StatusPresentation {
       return {
         title: 'Porudžbina je primljena',
         description: 'Primili smo porudžbinu i uskoro prelazimo na njenu obradu.',
-        color: '#b45309',
-        border: '#fde68a',
-        background: '#fffbeb',
-        step: 0
+        color: '#b45309'
       };
     case 'U obradi':
       return {
         title: 'Pripremamo porudžbinu',
         description: 'Artikli se proveravaju i porudžbina se pažljivo priprema za slanje.',
-        color: '#2563eb',
-        border: '#bfdbfe',
-        background: '#eff6ff',
-        step: 1
+        color: '#2563eb'
       };
     case 'Poslato':
       return {
         title: 'Porudžbina je poslata',
         description: 'Porudžbina je predata kurirskoj službi i uskoro je na putu do vas.',
-        color: '#7c3aed',
-        border: '#ddd6fe',
-        background: '#f5f3ff',
-        step: 2
+        color: '#7c3aed'
       };
     case 'Isporučeno':
       return {
         title: 'Porudžbina je isporučena',
         description: 'Porudžbina je uspešno isporučena. Hvala što kupujete u DajaShop-u.',
-        color: '#15803d',
-        border: '#bbf7d0',
-        background: '#f0fdf4',
-        step: 3
+        color: '#15803d'
       };
     case 'Otkazano':
       return {
         title: 'Porudžbina je otkazana',
         description: 'Porudžbina je otkazana. Za dodatne informacije odgovorite direktno na ovaj email.',
-        color: '#b91c1c',
-        border: '#fecaca',
-        background: '#fef2f2',
-        step: null
+        color: '#b91c1c'
       };
     default:
       return {
         title: 'Status porudžbine je ažuriran',
         description: 'Status porudžbine je ažuriran. Za dodatne informacije odgovorite direktno na ovaj email.',
-        color: '#52525b',
-        border: '#e4e4e7',
-        background: '#fafafa',
-        step: null
+        color: '#52525b'
       };
   }
 }
@@ -614,11 +563,38 @@ function rawEmailAddress(value: string): string {
   return (match?.[1] ?? value).trim();
 }
 
+function customerGreetingName(customer: Record<string, unknown>): string {
+  const firstName = customerValue(customer, 'name').split(/\s+/)[0];
+  return firstName ? serbianVocative(firstName) : 'kupče';
+}
+
+function serbianVocative(name: string): string {
+  const normalized = name.toLocaleLowerCase('sr-RS');
+  const specialForms: Record<string, string> = {
+    aleksandar: 'Aleksandre',
+    petar: 'Petre',
+    vuk: 'Vuče'
+  };
+  if (specialForms[normalized]) return specialForms[normalized];
+
+  // Most female and hypocoristic names ending in a retain their nominative
+  // form. The common -ica pattern is the reliable exception: Milica → Milice.
+  if (normalized.endsWith('ica')) return name.slice(0, -1) + 'e';
+  if (/[aeiou]$/u.test(normalized)) return name;
+
+  // These names are normally addressed unchanged despite ending in a consonant.
+  if (new Set(['ines', 'doris', 'iris', 'nives']).has(normalized)) return name;
+
+  // The standard masculine-consonant form covers Dejan → Dejane, Milan →
+  // Milane and similar names, while the exceptions above prevent false forms.
+  return name + 'e';
+}
+
 function customerName(customer: Record<string, unknown>): string {
   return (
     [customerValue(customer, 'name'), customerValue(customer, 'surname')]
       .filter(Boolean)
-      .join(' ') || 'kupče'
+      .join(' ') || 'Kupac'
   );
 }
 
