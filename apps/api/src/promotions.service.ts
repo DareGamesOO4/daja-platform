@@ -352,11 +352,6 @@ export class PromotionsService {
 
     const lines = await canonicalCartLines(client, input.organizationId, input.items);
     const subtotalMinor = lines.reduce((sum, item) => sum + item.priceMinor * item.quantity, 0);
-    if (subtotalMinor < promotion.min_order_amount) {
-      throw new ValidationFailedError(
-        `Promo kod važi za porudžbine od najmanje ${formatRsd(promotion.min_order_amount)}.`
-      );
-    }
     const rules = parseProductRules(promotion.product_rules);
     const eligible = lines.filter((line) => isEligible(line, rules));
     const eligibleQuantity = eligible.reduce((sum, item) => sum + item.quantity, 0);
@@ -367,6 +362,18 @@ export class PromotionsService {
       (sum, item) => sum + item.priceMinor * item.quantity,
       0
     );
+    const hasProductScope = scopeHasRules(rules.include) || scopeHasRules(rules.exclude);
+    // A threshold for a product-scoped promotion must be met by the scoped
+    // items themselves. An unrelated item can never make a Daniel Klein,
+    // category, variant, or specification promotion eligible.
+    const qualifyingSubtotalMinor = hasProductScope ? eligibleSubtotalMinor : subtotalMinor;
+    if (qualifyingSubtotalMinor < promotion.min_order_amount) {
+      throw new ValidationFailedError(
+        hasProductScope
+          ? `Odgovarajući artikli za promo kod moraju imati zbir od najmanje ${formatRsd(promotion.min_order_amount)}.`
+          : `Promo kod važi za porudžbine od najmanje ${formatRsd(promotion.min_order_amount)}.`
+      );
+    }
     const discountBaseMinor =
       promotion.applies_to === 'order' ? subtotalMinor : eligibleSubtotalMinor;
     let discountAmountMinor = 0;
