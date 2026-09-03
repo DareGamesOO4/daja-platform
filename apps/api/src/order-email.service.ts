@@ -192,7 +192,7 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
         '<tr class="item-row"><td colspan="2" style="padding:15px 0;border-bottom:1px solid #e4e4e7">' +
         '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>' +
         '<td width="72" valign="top" style="width:72px;padding-right:14px">' +
-        '<table class="product-frame" role="presentation" width="64" height="64" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)"><tr><td bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)">' +
+        '<table class="product-frame" role="presentation" width="64" height="64" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:64px;height:64px;min-width:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)"><tr><td width="64" height="64" align="center" valign="middle" bgcolor="#ffffff" style="width:64px;height:64px;text-align:center;vertical-align:middle;font-size:0;line-height:0;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)">' +
         productImageHtml(item) +
         '</td></tr></table>' +
         '</td>' +
@@ -268,7 +268,7 @@ function productImageHtml(item: OrderItem): string {
     escapeHtml(item.image) +
     '" alt="' +
     escapeHtml(item.name) +
-    '" width="64" height="64" style="display:block;width:64px;height:64px;border:0;border-radius:3px;object-fit:cover" />'
+    '" width="64" height="64" style="display:block;width:64px;height:64px;margin:0 auto;border:0;border-radius:3px;object-fit:cover" />'
   );
 }
 
@@ -353,7 +353,7 @@ function emailPage(input: {
 }): string {
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.detail-label{color:#c7c7cc !important}.item-row td,.detail-cell,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td{background-color:#ffffff !important;background-image:linear-gradient(#ffffff,#ffffff) !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-padding h1,.email-padding p,.email-padding td,.email-padding a,.email-padding strong,.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.detail-label{color:#c7c7cc !important}.item-row td,.detail-cell,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}}</style>' +
     '</head><body class="email-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<table class="email-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
     '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
