@@ -53,9 +53,7 @@ export class NewsletterEmailService {
     await this.sendEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_FROM_EMAIL),
-      subject: input.promotionCode
-        ? 'Dobro došli u DajaShop — vaš kod za popust'
-        : 'Dobro došli u DajaShop newsletter',
+      subject: 'Stigli ste na pravo vreme.',
       text: newsletterWelcomeText({
         shopUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
         unsubscribeUrl: input.unsubscribeUrl,
