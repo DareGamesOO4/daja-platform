@@ -515,14 +515,24 @@ export class StorefrontOrdersController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(promotionSchema, body);
-    return this.promotions.resolve({
-      organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
-      customer,
-      code: input.code,
-      items: input.items,
-      shippingMethod: input.shippingMethod,
-      paymentMethod: input.paymentMethod
-    });
+    try {
+      const promotion = await this.promotions.resolve({
+        organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
+        customer,
+        code: input.code,
+        items: input.items,
+        shippingMethod: input.shippingMethod,
+        paymentMethod: input.paymentMethod
+      });
+      return { valid: true, ...promotion };
+    } catch (error) {
+      // A rejected promo code is an expected checkout result, not a failed
+      // request. Keep actual infrastructure and programming failures visible.
+      if (error instanceof ValidationFailedError) {
+        return { valid: false, message: error.message };
+      }
+      throw error;
+    }
   }
 
   @Get('orders/me')
