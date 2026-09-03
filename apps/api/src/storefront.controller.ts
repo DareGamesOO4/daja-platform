@@ -16,7 +16,8 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
-import { StorefrontRepository, type Database } from '@daja/database';
+import { StorefrontRepository, TransactionManager, type Database } from '@daja/database';
+import type { Logger } from '@daja/observability';
 import { requirePermission, ValidationFailedError } from '@daja/security';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
@@ -26,10 +27,11 @@ import { NewsletterEmailService } from './newsletter-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
-import { CONFIG, DATABASE } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
+import { PromotionsService } from './promotions.service.js';
 
 const registerSchema = z.object({
   identity: z.string().trim().min(3).max(240),
@@ -123,7 +125,9 @@ const statusSchema = z.object({
 
 const promotionSchema = z.object({
   code: z.string().trim().min(1).max(80),
-  subtotal: z.coerce.number().min(0)
+  items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
+  shippingMethod: z.enum(['courier', 'pickup']).optional(),
+  paymentMethod: z.enum(['cod', 'pickup']).optional()
 });
 
 const remoteImageSchema = z.object({
@@ -445,8 +449,10 @@ export class StorefrontOrdersController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    @Inject(LOGGER) private readonly logger: Logger,
     private readonly orderEmail: OrderEmailService,
-    private readonly realtime: RealtimeGateway
+    private readonly realtime: RealtimeGateway,
+    private readonly promotions: PromotionsService
   ) {}
 
   @Post('orders')
@@ -456,29 +462,45 @@ export class StorefrontOrdersController {
       ? await this.auth.authenticateAccessToken(token).catch(() => null)
       : null;
     const input = parseWithSchema(orderSchema, body);
-    const promotion = await this.resolveNewsletterPromotion(
-      publicOrganizationId(this.config),
-      customer,
-      input.promoCode,
-      input.subtotal
-    );
-    const order = await new StorefrontRepository(this.database.pool).createOrder(
-      publicOrganizationId(this.config),
-      {
+    const organizationId = publicOrganizationId(this.config);
+    const order = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const promotion = await this.promotions.resolve(
+        {
+          organizationId,
+          customer,
+          code: input.promoCode,
+          items: input.items,
+          shippingMethod: input.shippingMethod,
+          paymentMethod: input.paymentMethod
+        },
+        client,
+        true
+      );
+      const subtotal = promotion.subtotalAmount ?? input.subtotal;
+      const shippingCost = promotion.freeShipping ? 0 : input.shippingCost;
+      const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
         items: input.items,
-        subtotalAmount: amountMinor(input.subtotal),
+        subtotalAmount: amountMinor(subtotal),
         discountAmount: amountMinor(promotion.discountAmount),
-        shippingAmount: amountMinor(input.shippingCost),
-        totalAmount: amountMinor(
-          Math.max(0, input.subtotal - promotion.discountAmount + input.shippingCost)
-        ),
+        shippingAmount: amountMinor(shippingCost),
+        totalAmount: amountMinor(Math.max(0, subtotal - promotion.discountAmount + shippingCost)),
         promoCode: promotion.code,
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
-      }
-    );
+      });
+      await this.promotions.consume(
+        {
+          organizationId,
+          resolution: promotion,
+          customer,
+          orderId: created.docId
+        },
+        client
+      );
+      return created;
+    });
     this.realtime.publish({
       organizationId: publicOrganizationId(this.config),
       event: 'orders.created',
@@ -490,14 +512,17 @@ export class StorefrontOrdersController {
 
   @Post('promotions/validate')
   async validatePromotion(@Req() request: Request, @Body() body: unknown) {
-    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(promotionSchema, body);
-    return this.resolveNewsletterPromotion(
-      customer.organizationId,
+    return this.promotions.resolve({
+      organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
       customer,
-      input.code,
-      input.subtotal
-    );
+      code: input.code,
+      items: input.items,
+      shippingMethod: input.shippingMethod,
+      paymentMethod: input.paymentMethod
+    });
   }
 
   @Get('orders/me')
@@ -566,35 +591,6 @@ export class StorefrontOrdersController {
     return order;
   }
 
-  private async resolveNewsletterPromotion(
-    organizationId: string,
-    customer: { customerId: string; email: string | null } | null,
-    rawCode: string | null | undefined,
-    subtotal: number
-  ): Promise<{ code: string | null; discountAmount: number }> {
-    if (!rawCode) return { code: null, discountAmount: 0 };
-    if (rawCode.trim().toUpperCase() !== 'DOBRODOSLI10') {
-      throw new ValidationFailedError('Promo code is not valid');
-    }
-    if (!customer?.email)
-      throw new ValidationFailedError(
-        'Login with a verified email is required for this promo code'
-      );
-    const subscribed = await this.database.pool.query(
-      `SELECT 1 FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = lower($2) AND active LIMIT 1`,
-      [organizationId, customer.email]
-    );
-    if (!subscribed.rowCount)
-      throw new ValidationFailedError('Newsletter subscription is required for this promo code');
-    const previous = await this.database.pool.query(
-      `SELECT 1 FROM orders WHERE organization_id = $1 AND deleted_at IS NULL
-       AND (customer_id = $2 OR lower(customer_email) = lower($3)) LIMIT 1`,
-      [organizationId, customer.customerId, customer.email]
-    );
-    if (previous.rowCount)
-      throw new ValidationFailedError('This promo code is valid only for the first order');
-    return { code: 'DOBRODOSLI10', discountAmount: Math.round(subtotal * 0.1 * 100) / 100 };
-  }
 }
 
 @Controller()

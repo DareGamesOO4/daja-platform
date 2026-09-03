@@ -31,6 +31,8 @@ import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { PrivacyController } from './privacy.controller.js';
 import { PolicyPublicationService } from './policy-publication.service.js';
+import { PromotionsService } from './promotions.service.js';
+import { PromotionsAdminController } from './promotions.controller.js';
 import {
   CustomerAuthController,
   CustomerController,
@@ -58,6 +60,7 @@ const logger = createLogger(config, 'api');
     StorefrontOrdersController,
     StorefrontContentController,
     StorefrontMediaController,
+    PromotionsAdminController,
     PrivacyController,
     HealthController,
     OrganizationsController,
@@ -87,6 +90,7 @@ const logger = createLogger(config, 'api');
     ProductAlertService,
     PrivacyService,
     PolicyPublicationService,
+    PromotionsService,
     RealtimeGateway,
     DevicePluginsService
   ]
