@@ -17,10 +17,10 @@ export class NewsletterEmailService {
     const confirmationUrl = escapeHtml(input.confirmationUrl);
     await this.sendEmail({
       recipient: input.recipient,
-      subject: 'Potvrdite prijavu na DajaShop newsletter',
-      text: `Potvrdite prijavu na DajaShop newsletter otvaranjem ovog linka: ${input.confirmationUrl}`,
+      subject: 'Potvrdite prijavu za DajaShop obaveštenja',
+      text: `Potvrdite prijavu za DajaShop obaveštenja otvaranjem ovog linka: ${input.confirmationUrl}`,
       html:
-        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite prijavu</h1><p style="font-size:16px;line-height:1.6">Jos samo jedan korak vas deli od DajaShop newslettera.</p><p style="margin:28px 0"><a href="' +
+        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite prijavu</h1><p style="font-size:16px;line-height:1.6">Još samo jedan korak vas deli od DajaShop obaveštenja.</p><p style="margin:28px 0"><a href="' +
         confirmationUrl +
         '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdite email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link vazi 24 sata. Ako niste vi zatrazili prijavu, slobodno zanemarite ovu poruku.</p></main></body></html>',
       tag: 'newsletter-confirmation'
@@ -110,12 +110,12 @@ function newsletterWelcomeText(input: {
   return [
     'Dobro došli u DajaShop!',
     '',
-    'Hvala što ste se prijavili na newsletter.',
+    'Hvala što želite da ostanemo u kontaktu.',
     '',
     ...promotionInstructions,
-    'U newsletteru možete očekivati novitete, pažljivo odabrane ponude, informacije o dostupnosti i korisne savete za izbor i održavanje sata.',
+    'Od nas možete očekivati novitete, pažljivo odabrane ponude, informacije o dostupnosti i korisne savete za izbor i održavanje sata.',
     '',
-    'Odjava sa newslettera: ' + input.unsubscribeUrl
+    'Odjava od ovakvih poruka: ' + input.unsubscribeUrl
   ].join('\n');
 }
 
@@ -151,7 +151,7 @@ function newsletterWelcomeHtml(input: {
     '<table class="welcome-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
     '<tr><td class="welcome-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
     '<p class="welcome-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
-    '<p class="welcome-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">NEWSLETTER · DOBRO DOŠLI</p>' +
+    '<p class="welcome-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">DOBRO DOŠLI</p>' +
     '</td></tr><tr><td class="welcome-content" style="padding:38px 44px">' +
     '<h1 style="margin:0 0 12px;color:#18181b;font-size:26px;line-height:1.25;font-weight:700">Dobro došli u DajaShop.</h1>' +
     promotionSection +
@@ -163,7 +163,7 @@ function newsletterWelcomeHtml(input: {
     '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:14px;line-height:1.65">Novitete iz ponude, pažljivo odabrane akcije, informacije o dostupnosti i korisne savete za izbor i održavanje sata.</p>' +
     '</section>' +
     '</td></tr><tr><td class="welcome-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.55">' +
-    'Ne želite više newsletter? <a href="' +
+    'Ne želite više ovakve poruke? <a href="' +
     unsubscribeUrl +
     '" style="color:#52525b;text-decoration:underline">Odjavite se jednim klikom</a>.<br>DajaShop' +
     '</td></tr></table></td></tr></table></body></html>'
