@@ -4,71 +4,71 @@ import { CONFIG } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 
 @Injectable()
-export class NewsletterEmailService {
+export class NovostiEmailService {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     private readonly delivery: EmailDeliveryService
   ) {}
 
-  async sendNewsletterConfirmationEmail(input: {
+  async posaljiPotvrduPrijave(input: {
     recipient: string;
     confirmationUrl: string;
   }): Promise<void> {
     const confirmationUrl = escapeHtml(input.confirmationUrl);
-    await this.sendEmail({
+    await this.posaljiEmail({
       recipient: input.recipient,
-      subject: 'Potvrdite prijavu za DajaShop obaveštenja',
-      text: `Potvrdite prijavu za DajaShop obaveštenja otvaranjem ovog linka: ${input.confirmationUrl}`,
+      subject: 'Potvrdite prijavu za DajaShop novosti',
+      text: `Potvrdite prijavu za DajaShop novosti otvaranjem ovog linka: ${input.confirmationUrl}`,
       html:
-        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite prijavu</h1><p style="font-size:16px;line-height:1.6">Još samo jedan korak vas deli od DajaShop obaveštenja.</p><p style="margin:28px 0"><a href="' +
+        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite prijavu</h1><p style="font-size:16px;line-height:1.6">Još samo jedan korak vas deli od DajaShop novosti.</p><p style="margin:28px 0"><a href="' +
         confirmationUrl +
-        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdite email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link vazi 24 sata. Ako niste vi zatrazili prijavu, slobodno zanemarite ovu poruku.</p></main></body></html>',
-      tag: 'newsletter-confirmation'
+        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdite email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link važi 24 sata. Ako niste vi zatražili prijavu, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      tag: 'novosti-potvrda'
     });
   }
 
-  async sendAccountVerificationEmail(input: {
+  async posaljiPotvrduEmailAdrese(input: {
     recipient: string;
     verificationUrl: string;
   }): Promise<void> {
     const verificationUrl = escapeHtml(input.verificationUrl);
-    await this.sendEmail({
+    await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
       subject: 'Potvrdite email adresu za DajaShop nalog',
-      text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink vazi 15 minuta.`,
+      text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink važi 15 minuta.`,
       html:
         '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite email adresu</h1><p style="font-size:16px;line-height:1.6">Otvorite dugme ispod da potvrdite email adresu svog DajaShop naloga.</p><p style="margin:28px 0"><a href="' +
         verificationUrl +
-        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdi email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link vazi 15 minuta i moze da se iskoristi samo jednom. Ako niste vi zatrazili verifikaciju, slobodno zanemarite ovu poruku.</p></main></body></html>',
-      tag: 'account-email-verification'
+        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdi email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link važi 15 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili verifikaciju, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      tag: 'potvrda-email-adrese'
     });
   }
 
-  async sendWelcomeEmail(input: {
+  async posaljiPorukuDobrodoslice(input: {
     recipient: string;
-    unsubscribeUrl: string;
-    promotionCode?: string;
+    odjavaUrl: string;
+    kodDobrodoslice?: string;
   }): Promise<void> {
-    await this.sendEmail({
+    await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_FROM_EMAIL),
       subject: 'Stigli ste na pravo vreme.',
-      text: newsletterWelcomeText({
+      text: tekstDobrodoslice({
         shopUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
-        unsubscribeUrl: input.unsubscribeUrl,
-        ...(input.promotionCode ? { promotionCode: input.promotionCode } : {})
+        odjavaUrl: input.odjavaUrl,
+        ...(input.kodDobrodoslice ? { kodDobrodoslice: input.kodDobrodoslice } : {})
       }),
-      html: newsletterWelcomeHtml({
+      html: htmlDobrodoslice({
         shopUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
-        unsubscribeUrl: input.unsubscribeUrl,
-        ...(input.promotionCode ? { promotionCode: input.promotionCode } : {})
+        odjavaUrl: input.odjavaUrl,
+        ...(input.kodDobrodoslice ? { kodDobrodoslice: input.kodDobrodoslice } : {})
       }),
-      tag: 'newsletter-welcome'
+      tag: 'poruka-dobrodoslice'
     });
   }
 
-  private async sendEmail(input: {
+  private async posaljiEmail(input: {
     recipient: string;
     fromEmail?: string;
     subject: string;
@@ -87,23 +87,20 @@ export class NewsletterEmailService {
   }
 }
 
-function newsletterWelcomeText(input: {
-  promotionCode?: string;
+function tekstDobrodoslice(input: {
+  kodDobrodoslice?: string;
   shopUrl: string;
-  unsubscribeUrl: string;
+  odjavaUrl: string;
 }): string {
-  const promotionInstructions = input.promotionCode
+  const uputstvoZaKod = input.kodDobrodoslice
     ? [
-        'Kao dobrodošlicu, za prvu porudžbinu možete iskoristiti kod: ' +
-          input.promotionCode,
+        'Za prvu porudžbinu pripremili smo vaš kod dobrodošlice: ' + input.kodDobrodoslice,
         '',
         'Kako se koristi:',
         '1. Otvorite ' + input.shopUrl + ' i dodajte artikle u korpu.',
         '2. Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka.',
-        '3. Kod se može automatski primeniti pri otvaranju korpe. Ako se ne prikaže, ručno unesite ' +
-          input.promotionCode +
-          ' u polje „Promo kod”.',
-        '4. Popust se proverava ponovo pri završetku porudžbine.',
+        '3. Kod se može automatski primeniti pri otvaranju korpe. Ako se ne prikaže, unesite ga ručno u polje „Kod”.',
+        '4. Uslovi koda se proveravaju ponovo pri završetku porudžbine.',
         ''
       ]
     : ['Otvorite ' + input.shopUrl + ' i upoznajte našu ponudu.', ''];
@@ -112,37 +109,37 @@ function newsletterWelcomeText(input: {
     '',
     'Hvala što želite da ostanemo u kontaktu.',
     '',
-    ...promotionInstructions,
-    'Od nas možete očekivati novitete, pažljivo odabrane ponude, informacije o dostupnosti i korisne savete za izbor i održavanje sata.',
+    ...uputstvoZaKod,
+    'Od nas možete očekivati novitete, informacije o dostupnosti i korisne savete za izbor i održavanje sata.',
     '',
-    'Odjava od ovakvih poruka: ' + input.unsubscribeUrl
+    'Odjava od ovakvih poruka: ' + input.odjavaUrl
   ].join('\n');
 }
 
-function newsletterWelcomeHtml(input: {
-  promotionCode?: string;
+function htmlDobrodoslice(input: {
+  kodDobrodoslice?: string;
   shopUrl: string;
-  unsubscribeUrl: string;
+  odjavaUrl: string;
 }): string {
-  const promotionCode = input.promotionCode ? escapeHtml(input.promotionCode) : '';
+  const kodDobrodoslice = input.kodDobrodoslice ? escapeHtml(input.kodDobrodoslice) : '';
   const shopUrl = escapeHtml(input.shopUrl);
-  const unsubscribeUrl = escapeHtml(input.unsubscribeUrl);
-  const promotionSection = input.promotionCode
-    ? '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Kao dobrodošlicu, spremili smo vam kod za popust na prvu porudžbinu.</p>' +
+  const odjavaUrl = escapeHtml(input.odjavaUrl);
+  const deoSaKodom = input.kodDobrodoslice
+    ? '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Za prvu porudžbinu pripremili smo vam kod dobrodošlice.</p>' +
       '<table class="welcome-code-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;margin:24px 0;background-color:#f4f4f5;border:1px solid #e4e4e7"><tr><td align="center" bgcolor="#f4f4f5" style="padding:20px;background-color:#f4f4f5">' +
-      '<p style="margin:0 0 7px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase">VAŠ KOD ZA PRVU PORUDŽBINU</p>' +
+      '<p style="margin:0 0 7px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase">KOD DOBRODOŠLICE</p>' +
       '<p style="margin:0;color:#18181b;font-family:Arial,Helvetica,sans-serif;font-size:24px;letter-spacing:0.12em;font-weight:800">' +
-      promotionCode +
+      kodDobrodoslice +
       '</p></td></tr></table>' +
       '<section class="welcome-section" style="margin:28px 0;padding-top:20px;border-top:1px solid #e4e4e7">' +
       '<h2 style="margin:0 0 10px;color:#18181b;font-size:16px;line-height:1.35;font-weight:700">Kako se koristi kod</h2>' +
       '<table class="welcome-steps" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5">' +
-      welcomeStepHtml('1', 'Dodajte željene artikle u korpu.') +
-      welcomeStepHtml('2', 'Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka.') +
-      welcomeStepHtml('3', 'Kod se može automatski primeniti pri ulasku u korpu. Ako se ne prikaže, unesite ga ručno u polje „Promo kod”.') +
-      welcomeStepHtml('4', 'Uslovi koda se proveravaju ponovo pri završetku porudžbine.') +
+      korakHtml('1', 'Dodajte željene artikle u korpu.') +
+      korakHtml('2', 'Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka.') +
+      korakHtml('3', 'Kod se može automatski primeniti pri ulasku u korpu. Ako se ne prikaže, unesite ga ručno u polje „Kod”.') +
+      korakHtml('4', 'Uslovi koda se proveravaju ponovo pri završetku porudžbine.') +
       '</table></section>'
-    : '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Drago nam je što ste sa nama. Pratićemo vas kroz novitete, odabrane ponude i korisne savete.</p>';
+    : '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Drago nam je što ste sa nama. Pratićemo vas kroz novitete, informacije o dostupnosti i korisne savete.</p>';
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
     '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.welcome-shell{width:100% !important}.welcome-outer{padding:0 !important}.welcome-header{padding:24px 20px !important}.welcome-content{padding:28px 20px !important}.welcome-footer{padding:20px !important}.welcome-step-number{width:28px !important}}@media (prefers-color-scheme:dark){.welcome-body,.welcome-page,.welcome-outer,.welcome-shell,.welcome-header,.welcome-footer{background:#2c2c2e !important}.welcome-header,.welcome-footer,.welcome-section{border-color:#48484a !important}.welcome-content h1,.welcome-content h2,.welcome-content p,.welcome-content td,.welcome-content a,.welcome-brand{color:#fafafa !important}.welcome-copy,.welcome-footer,.welcome-eyebrow,.welcome-step-number{color:#c7c7cc !important}.welcome-code-card,.welcome-code-card td,.welcome-steps,.welcome-steps td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.welcome-code-card,.welcome-steps td{border-color:#48484a !important}.welcome-button{background:#fafafa !important;color:#2c2c2e !important}}</style>' +
@@ -154,23 +151,23 @@ function newsletterWelcomeHtml(input: {
     '<p class="welcome-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">DOBRO DOŠLI</p>' +
     '</td></tr><tr><td class="welcome-content" style="padding:38px 44px">' +
     '<h1 style="margin:0 0 12px;color:#18181b;font-size:26px;line-height:1.25;font-weight:700">Dobro došli u DajaShop.</h1>' +
-    promotionSection +
+    deoSaKodom +
     '<p style="margin:0 0 16px"><a class="welcome-button" href="' +
     shopUrl +
     '" style="display:inline-block;background:#18181b;color:#ffffff;padding:13px 18px;text-decoration:none;font-size:14px;font-weight:700">Otvori prodavnicu</a></p>' +
     '<section class="welcome-section" style="margin:28px 0 0;padding-top:20px;border-top:1px solid #e4e4e7">' +
     '<h2 style="margin:0 0 8px;color:#18181b;font-size:16px;line-height:1.35;font-weight:700">Šta možete da očekujete</h2>' +
-    '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:14px;line-height:1.65">Novitete iz ponude, pažljivo odabrane akcije, informacije o dostupnosti i korisne savete za izbor i održavanje sata.</p>' +
+    '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:14px;line-height:1.65">Novitete iz ponude, informacije o dostupnosti i korisne savete za izbor i održavanje sata.</p>' +
     '</section>' +
     '</td></tr><tr><td class="welcome-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.55">' +
     'Ne želite više ovakve poruke? <a href="' +
-    unsubscribeUrl +
+    odjavaUrl +
     '" style="color:#52525b;text-decoration:underline">Odjavite se jednim klikom</a>.<br>DajaShop' +
     '</td></tr></table></td></tr></table></body></html>'
   );
 }
 
-function welcomeStepHtml(number: string, text: string): string {
+function korakHtml(number: string, text: string): string {
   return (
     '<tr><td class="welcome-step-number" width="36" valign="top" bgcolor="#f4f4f5" style="width:36px;padding:12px 0 12px 14px;background-color:#f4f4f5;color:#71717a;font-size:13px;font-weight:800">' +
     number +

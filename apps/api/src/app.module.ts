@@ -24,7 +24,7 @@ import { DevicePluginsController } from './device-plugins.controller.js';
 import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
-import { NewsletterEmailService } from './newsletter-email.service.js';
+import { NovostiEmailService } from './novosti-email.service.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
@@ -85,7 +85,7 @@ const logger = createLogger(config, 'api');
     CustomerAuthService,
     DesktopGoogleOAuthService,
     EmailDeliveryService,
-    NewsletterEmailService,
+    NovostiEmailService,
     OrderEmailService,
     ProductAlertService,
     PrivacyService,

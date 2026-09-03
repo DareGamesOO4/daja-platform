@@ -19,7 +19,7 @@ import {
   verifyJwt
 } from '@daja/security';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
-import { NewsletterEmailService } from './newsletter-email.service.js';
+import { NovostiEmailService } from './novosti-email.service.js';
 
 export interface CustomerTokenPair {
   accessToken: string;
@@ -35,7 +35,7 @@ export class CustomerAuthService {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(NewsletterEmailService) private readonly email: NewsletterEmailService
+    @Inject(NovostiEmailService) private readonly email: NovostiEmailService
   ) {}
 
   async requestEmailVerification(input: { organizationId: string; customerId: string }) {
@@ -52,7 +52,7 @@ export class CustomerAuthService {
 
     const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
     verificationUrl.searchParams.set('token', token);
-    await this.email.sendAccountVerificationEmail({
+    await this.email.posaljiPotvrduEmailAdrese({
       recipient: verification.email,
       verificationUrl: verificationUrl.toString()
     });

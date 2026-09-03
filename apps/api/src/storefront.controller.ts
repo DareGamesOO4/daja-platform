@@ -23,7 +23,7 @@ import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
-import { NewsletterEmailService } from './newsletter-email.service.js';
+import { NovostiEmailService } from './novosti-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
@@ -51,7 +51,7 @@ const passwordUpdateSchema = z.object({
 });
 const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
-const NEWSLETTER_WELCOME_PROMO_CODE = 'DOBRODOSLI10';
+const KOD_DOBRODOSLICE = 'DOBRODOSLI10';
 
 const addressSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
@@ -610,7 +610,7 @@ export class StorefrontContentController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
-    @Inject(NewsletterEmailService) private readonly newsletterEmail: NewsletterEmailService,
+    @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
     private readonly productAlerts: ProductAlertService,
     private readonly privacy: PrivacyService
   ) {}
@@ -732,26 +732,26 @@ export class StorefrontContentController {
     });
     const matchingCustomerId =
       customer?.email?.toLowerCase() === email.toLowerCase() ? customer.customerId : undefined;
-    const welcomeOfferEligible =
+    const imaPravoNaKodDobrodoslice =
       subscriber.isFirstSubscription &&
-      (await this.privacy.hasNoOrders({
+      (await this.privacy.nemaPrethodnihPorudzbina({
         organizationId,
         email: subscriber.email,
         ...(matchingCustomerId ? { customerId: matchingCustomerId } : {})
       }));
-    const welcomeEmailSent = subscriber.isFirstSubscription;
-    if (welcomeEmailSent) {
-      await this.newsletterEmail.sendWelcomeEmail({
+    const poslatMailDobrodoslice = subscriber.isFirstSubscription;
+    if (poslatMailDobrodoslice) {
+      await this.novostiEmail.posaljiPorukuDobrodoslice({
         recipient: subscriber.email,
-        unsubscribeUrl: subscriber.unsubscribeUrl,
-        ...(welcomeOfferEligible ? { promotionCode: NEWSLETTER_WELCOME_PROMO_CODE } : {})
+        odjavaUrl: subscriber.odjavaUrl,
+        ...(imaPravoNaKodDobrodoslice ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {})
       });
     }
     return {
       ...subscriber,
-      welcomeEmailSent,
-      welcomeOfferEligible,
-      ...(welcomeOfferEligible ? { welcomePromoCode: NEWSLETTER_WELCOME_PROMO_CODE } : {})
+      poslatMailDobrodoslice,
+      imaPravoNaKodDobrodoslice,
+      ...(imaPravoNaKodDobrodoslice ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {})
     };
   }
 }

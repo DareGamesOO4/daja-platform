@@ -117,7 +117,7 @@ export class PrivacyService {
     active: boolean;
     alreadySubscribed: boolean;
     isFirstSubscription: boolean;
-    unsubscribeUrl: string;
+    odjavaUrl: string;
   }> {
     const normalizedEmail = normalizeEmail(input.email);
     const existing = await this.database.pool.query<{
@@ -158,7 +158,7 @@ export class PrivacyService {
         active: true,
         alreadySubscribed: true,
         isFirstSubscription: false,
-        unsubscribeUrl: this.newsletterUnsubscribeUrl(row.id)
+        odjavaUrl: this.odjavaUrlNovosti(row.id)
       };
     }
 
@@ -196,11 +196,11 @@ export class PrivacyService {
       active: subscriber.active,
       alreadySubscribed: false,
       isFirstSubscription: !row,
-      unsubscribeUrl: this.newsletterUnsubscribeUrl(subscriber.id)
+      odjavaUrl: this.odjavaUrlNovosti(subscriber.id)
     };
   }
 
-  async hasNoOrders(input: {
+  async nemaPrethodnihPorudzbina(input: {
     organizationId: string;
     email: string;
     customerId?: string | null | undefined;
@@ -503,7 +503,7 @@ export class PrivacyService {
     };
   }
 
-  newsletterUnsubscribeUrl(subscriberId: string): string {
+  odjavaUrlNovosti(subscriberId: string): string {
     return `${this.apiBase()}/privacy/unsubscribe/newsletter?token=${encodeURIComponent(
       this.signedToken('newsletter', subscriberId)
     )}`;
