@@ -178,33 +178,35 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
   const itemRows = items
     .map((item) => {
       const brand = item.brand
-        ? '<p style="margin:0 0 3px;color:#71717a;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">' +
+        ? '<p class="item-muted" style="margin:0 0 3px;color:#71717a;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">' +
           escapeHtml(item.brand) +
           '</p>'
         : '';
       const unitPrice =
         item.quantity > 1
-          ? '<p style="margin:4px 0 0;color:#71717a;font-size:12px">' +
+          ? '<p class="item-muted" style="margin:4px 0 0;color:#71717a;font-size:12px">' +
             escapeHtml(formatMoney(item.price, order.currency)) +
             ' po komadu</p>'
           : '';
       return (
-        '<tr><td style="padding:15px 0;border-bottom:1px solid #e4e4e7">' +
+        '<tr class="item-row"><td style="padding:15px 0;border-bottom:1px solid #e4e4e7">' +
         '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>' +
         '<td width="72" valign="top" style="width:72px;padding-right:14px">' +
+        '<table class="product-frame" role="presentation" width="64" height="64" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)"><tr><td bgcolor="#ffffff" style="width:64px;height:64px;background-color:#ffffff;background-image:linear-gradient(#ffffff,#ffffff)">' +
         productImageHtml(item) +
+        '</td></tr></table>' +
         '</td>' +
         '<td valign="top" style="padding-right:10px">' +
         brand +
-        '<p style="margin:0;color:#18181b;font-size:14px;line-height:1.4;font-weight:700">' +
+        '<p class="item-name" style="margin:0;color:#18181b;font-size:14px;line-height:1.4;font-weight:700">' +
         escapeHtml(item.name) +
         '</p>' +
-        '<p style="margin:4px 0 0;color:#52525b;font-size:13px">Količina: ' +
+        '<p class="item-copy" style="margin:4px 0 0;color:#52525b;font-size:13px">Količina: ' +
         escapeHtml(String(item.quantity)) +
         '</p>' +
         unitPrice +
         '</td>' +
-        '<td valign="top" align="right" style="white-space:nowrap;color:#18181b;font-size:14px;font-weight:700">' +
+        '<td class="item-total" valign="top" align="right" style="white-space:nowrap;color:#18181b;font-size:14px;font-weight:700">' +
         escapeHtml(formatMoney(item.total, order.currency)) +
         '</td>' +
         '</tr></table></td></tr>'
@@ -223,10 +225,10 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
       : 'Besplatna dostava';
   const promotionRow = hasPromotion
     ? '<tr>' +
-      '<td style="padding:9px 0;color:#166534;font-size:14px">Promo kod: ' +
+      '<td class="promotion-label" style="padding:9px 0;color:#166534;font-size:14px">Promo kod: ' +
       promotionLabel +
       '</td>' +
-      '<td align="right" style="padding:9px 0;color:#166534;font-size:14px;font-weight:700">' +
+      '<td class="promotion-value" align="right" style="padding:9px 0;color:#166534;font-size:14px;font-weight:700">' +
       promotionValue +
       '</td>' +
       '</tr>'
@@ -235,22 +237,22 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
     order.shippingCost === 0 ? 'Besplatna' : escapeHtml(formatMoney(order.shippingCost, order.currency));
   return (
     '<section style="margin:28px 0">' +
-    '<p style="margin:0 0 10px;color:#18181b;font-size:15px;font-weight:700">Artikli u porudžbini</p>' +
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
+    '<p class="summary-heading" style="margin:0 0 10px;color:#18181b;font-size:15px;font-weight:700">Artikli u porudžbini</p>' +
+    '<table class="summary-table" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tbody>' +
     itemRows +
     '</tbody><tfoot>' +
-    '<tr><td style="padding:16px 0 8px;color:#71717a;font-size:14px">Međuzbir</td>' +
-    '<td align="right" style="padding:16px 0 8px;color:#18181b;font-size:14px;font-weight:700">' +
+    '<tr><td class="summary-label" style="padding:16px 0 8px;color:#71717a;font-size:14px">Međuzbir</td>' +
+    '<td class="summary-value" align="right" style="padding:16px 0 8px;color:#18181b;font-size:14px;font-weight:700">' +
     escapeHtml(formatMoney(order.subtotal, order.currency)) +
     '</td></tr>' +
-    '<tr><td style="padding:8px 0;color:#71717a;font-size:14px">Dostava</td>' +
-    '<td align="right" style="padding:8px 0;color:#18181b;font-size:14px;font-weight:700">' +
+    '<tr><td class="summary-label" style="padding:8px 0;color:#71717a;font-size:14px">Dostava</td>' +
+    '<td class="summary-value" align="right" style="padding:8px 0;color:#18181b;font-size:14px;font-weight:700">' +
     shippingValue +
     '</td></tr>' +
     promotionRow +
-    '<tr><td style="padding:16px 0 0;border-top:1px solid #d4d4d8;color:#18181b;font-size:18px;font-weight:800">Ukupno</td>' +
-    '<td align="right" style="padding:16px 0 0;border-top:1px solid #d4d4d8;color:#18181b;font-size:18px;font-weight:800">' +
+    '<tr><td class="summary-total" style="padding:16px 0 0;border-top:1px solid #d4d4d8;color:#18181b;font-size:18px;font-weight:800">Ukupno</td>' +
+    '<td class="summary-total" align="right" style="padding:16px 0 0;border-top:1px solid #d4d4d8;color:#18181b;font-size:18px;font-weight:800">' +
     escapeHtml(formatMoney(order.finalTotal, order.currency)) +
     '</td></tr>' +
     '</tfoot></table></section>'
@@ -273,16 +275,16 @@ function productImageHtml(item: OrderItem): string {
 function orderStatusHtml(order: OrderEmailPayload): string {
   const status = statusPresentation(order.status);
   return (
-    '<section style="margin:28px 0;padding:2px 0 2px 16px;border-left:3px solid ' +
+    '<section class="status-block" style="margin:28px 0;padding:2px 0 2px 16px;border-left:3px solid ' +
     status.color +
     '">' +
     '<p style="margin:0 0 5px;color:' +
     status.color +
     ';font-size:11px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">Trenutni status</p>' +
-    '<p style="margin:0;color:#18181b;font-size:18px;line-height:1.3;font-weight:700">' +
+    '<p class="status-title" style="margin:0;color:#18181b;font-size:18px;line-height:1.3;font-weight:700">' +
     escapeHtml(status.title) +
     '</p>' +
-    '<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.55">' +
+    '<p class="status-copy" style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.55">' +
     escapeHtml(status.description) +
     '</section>'
   );
@@ -290,8 +292,8 @@ function orderStatusHtml(order: OrderEmailPayload): string {
 
 function orderDetailsHtml(order: OrderEmailPayload, shipping: ShippingDetails): string {
   return (
-    '<section style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
-    '<p style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Detalji porudžbine</p>' +
+    '<section class="details-block" style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
+    '<p class="details-heading" style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Detalji porudžbine</p>' +
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tr>' +
     detailCell('Broj porudžbine', '#' + order.displayId) +
@@ -315,8 +317,8 @@ function adminCustomerHtml(
       ? '<br><span style="color:#52525b">' + escapeHtml(customer.phone) + '</span>'
       : '');
   return (
-    '<section style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
-    '<p style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Podaci za obradu</p>' +
+    '<section class="details-block" style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
+    '<p class="details-heading" style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Podaci za obradu</p>' +
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
     '<tr>' +
     detailCell('Kupac', customer.name) +
@@ -333,10 +335,10 @@ function adminCustomerHtml(
 
 function detailCell(label: string, value: string, valueIsHtml = false): string {
   return (
-    '<td class="mobile-block" valign="top" style="width:50%;padding:12px 14px 12px 0;border-top:1px solid #f0f0f1">' +
-    '<p style="margin:0 0 5px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.07em;text-transform:uppercase">' +
+    '<td class="mobile-block detail-cell" valign="top" style="width:50%;padding:12px 14px 12px 0;border-top:1px solid #f0f0f1">' +
+    '<p class="detail-label" style="margin:0 0 5px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.07em;text-transform:uppercase">' +
     escapeHtml(label) +
-    '</p><p style="margin:0;color:#27272a;font-size:13px;line-height:1.45;font-weight:600">' +
+    '</p><p class="detail-value" style="margin:0;color:#27272a;font-size:13px;line-height:1.45;font-weight:600">' +
     (valueIsHtml ? value : escapeHtml(value)) +
     '</p></td>'
   );
@@ -350,28 +352,28 @@ function emailPage(input: {
   footer: string;
 }): string {
   return (
-    '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-    '<style>@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}</style>' +
-    '</head><body style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
+    '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer{background:#111113 !important}.email-shell,.email-header,.email-footer{background:#18181b !important}.email-header,.email-footer,.details-block{border-color:#3f3f46 !important}.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.detail-label{color:#c4c4cc !important}.item-row td,.detail-cell,.summary-total{border-color:#3f3f46 !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td{background-color:#ffffff !important;background-image:linear-gradient(#ffffff,#ffffff) !important}}</style>' +
+    '</head><body class="email-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
+    '<table class="email-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
     '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
     '<tr><td class="email-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
-    '<p style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
-    '<p style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">' +
+    '<p class="email-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
+    '<p class="email-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">' +
     input.eyebrow +
     '</p></td></tr>' +
     '<tr><td class="email-padding" style="padding:38px 44px">' +
-    '<h1 style="margin:0 0 12px;color:#18181b;font-size:25px;line-height:1.25;font-weight:700">' +
+    '<h1 class="email-title" style="margin:0 0 12px;color:#18181b;font-size:25px;line-height:1.25;font-weight:700">' +
     input.title +
     '</h1>' +
-    '<p style="margin:0;color:#52525b;font-size:16px;line-height:1.6">' +
+    '<p class="email-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">' +
     input.introduction +
     '</p>' +
     input.content +
     '<p style="margin:28px 0 0;color:#71717a;font-size:13px;line-height:1.6">' +
     input.footer +
     '</p></td></tr>' +
-    '<tr><td style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.5">' +
+    '<tr><td class="email-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.5">' +
     'DajaShop · Automatska poruka o vašoj porudžbini' +
     '</td></tr></table></td></tr></table></body></html>'
   );
