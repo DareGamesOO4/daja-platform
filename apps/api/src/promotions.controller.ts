@@ -14,6 +14,14 @@ const specificationRuleSchema = z.object({
   value: z.string().trim().min(1).max(240),
   operator: z.enum(['equals', 'contains']).default('equals')
 });
+const emptyScopeDefault = {
+  productIds: [],
+  variantIds: [],
+  categoryIds: [],
+  brandIds: [],
+  departmentIds: [],
+  specifications: []
+};
 const scopeSchema = z.object({
   productIds: idListSchema,
   variantIds: idListSchema,
@@ -48,13 +56,13 @@ const promotionInputSchema = z.object({
   allowedShippingMethods: z.array(z.enum(['courier', 'pickup'])).max(2).default([]),
   allowedPaymentMethods: z.array(z.enum(['cod', 'pickup'])).max(2).default([]),
   productRules: z.object({
-    include: scopeSchema.default({}),
-    exclude: scopeSchema.default({})
-  }).default({}),
+    include: scopeSchema.default(emptyScopeDefault),
+    exclude: scopeSchema.default(emptyScopeDefault)
+  }).default({ include: emptyScopeDefault, exclude: emptyScopeDefault }),
   customerTargets: z.object({
     include: idListSchema,
     exclude: idListSchema
-  }).default({})
+  }).default({ include: [], exclude: [] })
 });
 
 const audienceQuerySchema = z.object({

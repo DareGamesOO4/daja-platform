@@ -16,8 +16,8 @@ export interface PromotionScope {
   departmentIds: string[];
   specifications: Array<{
     specKeyId: string;
-    specKeySlug?: string;
-    specKeyName?: string;
+    specKeySlug?: string | undefined;
+    specKeyName?: string | undefined;
     value: string;
     operator: 'equals' | 'contains';
   }>;
@@ -26,30 +26,30 @@ export interface PromotionScope {
 export interface PromotionInput {
   code: string;
   name: string;
-  description?: string | null;
-  internalNote?: string | null;
-  active?: boolean;
+  description?: string | null | undefined;
+  internalNote?: string | null | undefined;
+  active?: boolean | undefined;
   discountType: DiscountType;
   discountValue: number;
-  maxDiscountAmount?: number | null;
-  appliesTo?: 'eligible_items' | 'order';
-  minOrderAmount?: number | null;
-  minEligibleQuantity?: number | null;
-  startsAt?: string | null;
-  endsAt?: string | null;
-  totalUsageLimit?: number | null;
-  perCustomerUsageLimit?: number | null;
-  loginRequirement?: 'any' | 'authenticated' | 'guest';
-  requiresVerifiedEmail?: boolean;
-  requiresNewsletter?: boolean;
-  firstOrderOnly?: boolean;
-  minCustomerOrderCount?: number | null;
-  maxCustomerOrderCount?: number | null;
-  minCustomerLifetimeSpend?: number | null;
-  allowedShippingMethods?: Array<'courier' | 'pickup'>;
-  allowedPaymentMethods?: Array<'cod' | 'pickup'>;
-  productRules?: { include?: Partial<PromotionScope>; exclude?: Partial<PromotionScope> };
-  customerTargets?: { include?: string[]; exclude?: string[] };
+  maxDiscountAmount?: number | null | undefined;
+  appliesTo?: 'eligible_items' | 'order' | undefined;
+  minOrderAmount?: number | null | undefined;
+  minEligibleQuantity?: number | null | undefined;
+  startsAt?: string | null | undefined;
+  endsAt?: string | null | undefined;
+  totalUsageLimit?: number | null | undefined;
+  perCustomerUsageLimit?: number | null | undefined;
+  loginRequirement?: 'any' | 'authenticated' | 'guest' | undefined;
+  requiresVerifiedEmail?: boolean | undefined;
+  requiresNewsletter?: boolean | undefined;
+  firstOrderOnly?: boolean | undefined;
+  minCustomerOrderCount?: number | null | undefined;
+  maxCustomerOrderCount?: number | null | undefined;
+  minCustomerLifetimeSpend?: number | null | undefined;
+  allowedShippingMethods?: Array<'courier' | 'pickup'> | undefined;
+  allowedPaymentMethods?: Array<'cod' | 'pickup'> | undefined;
+  productRules?: { include?: Partial<PromotionScope>; exclude?: Partial<PromotionScope> } | undefined;
+  customerTargets?: { include?: string[]; exclude?: string[] } | undefined;
 }
 
 interface PromotionRow {
@@ -387,7 +387,7 @@ export class PromotionsService {
       discountAmountMinor,
       freeShipping: promotion.discount_type === 'free_shipping',
       subtotalAmount: subtotalMinor / 100,
-      subtotalAmountMinor,
+      subtotalAmountMinor: subtotalMinor,
       eligibleSubtotalAmount: eligibleSubtotalMinor / 100,
       eligibleSubtotalAmountMinor: eligibleSubtotalMinor
     };
@@ -833,13 +833,7 @@ function matchesScope(line: CanonicalCartLine, scope: PromotionScope) {
 
 function specificationMatches(
   line: CanonicalCartLine,
-  rule: {
-    specKeyId: string;
-    specKeySlug?: string;
-    specKeyName?: string;
-    value: string;
-    operator: 'equals' | 'contains';
-  }
+  rule: PromotionScope['specifications'][number]
 ) {
   const raw =
     line.specificationValues[rule.specKeyId] ??
@@ -860,7 +854,7 @@ function normalizeProductRules(input: PromotionInput['productRules']) {
 }
 
 function normalizeScope(scope: Partial<PromotionScope> | undefined): PromotionScope {
-  const specifications = (scope?.specifications ?? []).map((rule) => {
+  const specifications: PromotionScope['specifications'] = (scope?.specifications ?? []).map((rule) => {
     if (!isUuid(rule.specKeyId) || !String(rule.value ?? '').trim()) {
       throw new ValidationFailedError('Pravilo specifikacije nije ispravno.');
     }
@@ -873,7 +867,7 @@ function normalizeScope(scope: Partial<PromotionScope> | undefined): PromotionSc
         ? { specKeyName: rule.specKeyName.trim().slice(0, 240) }
         : {}),
       value: String(rule.value).trim().slice(0, 240),
-      operator: rule.operator === 'contains' ? 'contains' : 'equals'
+      operator: rule.operator === 'contains' ? ('contains' as const) : ('equals' as const)
     };
   });
   return {
