@@ -122,8 +122,9 @@ export class CatalogRepository {
               active_sale.amount_minor AS sale_price,
               active_sale.valid_until AS sale_valid_until, v.currency,
               COALESCE(inv.quantity, 0) AS available_quantity,
-              primary_asset.public_url AS primary_image_url,
-              thumb.public_url AS thumbnail_url,
+              COALESCE(media.items, '[]'::jsonb) AS images,
+              media.primary_image_url,
+              media.thumbnail_url,
               p.updated_at
        FROM products p
        JOIN LATERAL (
@@ -152,21 +153,31 @@ export class CatalogRepository {
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inv ON true
        LEFT JOIN LATERAL (
-         SELECT ma.public_url
+         SELECT
+           jsonb_agg(
+             jsonb_build_object(
+               'url', ma.public_url,
+               'thumb', thumb.public_url,
+               'role', pm.role,
+               'position', pm.position,
+               'isPrimary', pm.is_primary,
+               'altText', pm.alt_text
+             )
+             ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
+           ) FILTER (WHERE ma.id IS NOT NULL) AS items,
+           (array_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS primary_image_url,
+           (array_agg(thumb.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         LEFT JOIN LATERAL (
+           SELECT md.public_url
+           FROM media_derivatives md
+           WHERE md.media_asset_id = pm.media_asset_id
+           ORDER BY md.width ASC
+           LIMIT 1
+         ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
-         ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
-         LIMIT 1
-       ) primary_asset ON true
-       LEFT JOIN LATERAL (
-         SELECT md.public_url
-         FROM product_media pm
-         JOIN media_derivatives md ON md.media_asset_id = pm.media_asset_id
-         WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
-         ORDER BY pm.is_primary DESC, pm.position ASC, md.width ASC
-         LIMIT 1
-       ) thumb ON true
+       ) media ON true
        WHERE ${where.join(' AND ')}
        ORDER BY p.updated_at DESC, p.id DESC
        LIMIT $2`,
@@ -644,8 +655,18 @@ export interface PublicProductCard {
   saleValidUntil: string | null;
   currency: string;
   availability: { inStock: boolean; availableQuantity: number };
+  images: PublicProductImage[];
   primaryImageUrl: string | null;
   thumbnailUrl: string | null;
+}
+
+export interface PublicProductImage {
+  url: string;
+  thumb: string | null;
+  role: string;
+  position: number;
+  isPrimary: boolean;
+  altText: string | null;
 }
 
 interface PublicProductRow {
@@ -665,6 +686,7 @@ interface PublicProductRow {
   sale_valid_until: Date | null;
   currency: string;
   available_quantity: number | null;
+  images: PublicProductImage[];
   primary_image_url: string | null;
   thumbnail_url: string | null;
   updated_at: Date;
@@ -782,6 +804,7 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     saleValidUntil: row.sale_valid_until?.toISOString() ?? null,
     currency: row.currency,
     availability: { inStock: availableQuantity > 0, availableQuantity },
+    images: row.images,
     primaryImageUrl: row.primary_image_url,
     thumbnailUrl: row.thumbnail_url
   };
