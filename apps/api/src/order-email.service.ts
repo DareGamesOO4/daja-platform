@@ -291,17 +291,20 @@ function orderStatusHtml(order: OrderEmailPayload): string {
 }
 
 function orderDetailsHtml(order: OrderEmailPayload, shipping: ShippingDetails): string {
+  const email = customerValue(order.customer, 'email') || 'Nije unet';
+  const phone = customerValue(order.customer, 'phone') || 'Nije unet';
   return (
-    '<section class="details-block" style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
-    '<p class="details-heading" style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Detalji porudžbine</p>' +
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
-    '<tr>' +
-    detailCell('Broj porudžbine', '#' + order.displayId) +
-    detailCell('Datum', formatOrderDate(order.createdAt)) +
-    '</tr><tr>' +
-    detailCell('Isporuka', shipping.text) +
-    detailCell('Plaćanje', paymentLabel(order.paymentMethod)) +
-    '</tr></table></section>'
+    '<section class="details-block" style="margin:28px 0">' +
+    '<p class="details-heading" style="margin:0 0 10px;color:#18181b;font-size:15px;font-weight:700">Detalji porudžbine</p>' +
+    detailsCardHtml([
+      { label: 'Broj porudžbine', value: '#' + order.displayId },
+      { label: 'Datum', value: formatOrderDate(order.createdAt) },
+      { label: 'Email', value: emailLink(email), valueIsHtml: true },
+      { label: 'Telefon', value: phone },
+      { label: 'Adresa', value: shipping.address || shipping.method },
+      { label: 'Plaćanje', value: paymentLabel(order.paymentMethod) }
+    ]) +
+    '</section>'
   );
 }
 
@@ -311,36 +314,52 @@ function adminCustomerHtml(
   customer: { name: string; email: string; phone: string }
 ): string {
   const safeEmail = emailLink(customer.email);
-  const contact =
-    safeEmail +
-    (customer.phone && customer.phone !== 'Nije unet'
-      ? '<br><span style="color:#52525b">' + escapeHtml(customer.phone) + '</span>'
-      : '');
   return (
-    '<section class="details-block" style="margin:28px 0;padding-top:18px;border-top:1px solid #e4e4e7">' +
-    '<p class="details-heading" style="margin:0 0 8px;color:#18181b;font-size:15px;font-weight:700">Podaci za obradu</p>' +
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse">' +
-    '<tr>' +
-    detailCell('Kupac', customer.name) +
-    detailCell('Kontakt', contact, true) +
-    '</tr><tr>' +
-    detailCell('Isporuka', shipping.text) +
-    detailCell('Plaćanje', paymentLabel(order.paymentMethod)) +
-    '</tr><tr>' +
-    detailCell('Datum porudžbine', formatOrderDate(order.createdAt)) +
-    detailCell('Broj porudžbine', '#' + order.displayId) +
-    '</tr></table></section>'
+    '<section class="details-block" style="margin:28px 0">' +
+    '<p class="details-heading" style="margin:0 0 10px;color:#18181b;font-size:15px;font-weight:700">Podaci za obradu</p>' +
+    detailsCardHtml([
+      { label: 'Kupac', value: customer.name },
+      { label: 'Email', value: safeEmail, valueIsHtml: true },
+      { label: 'Telefon', value: customer.phone },
+      { label: 'Adresa', value: shipping.address || shipping.method },
+      { label: 'Isporuka', value: shipping.method },
+      { label: 'Plaćanje', value: paymentLabel(order.paymentMethod) },
+      { label: 'Datum porudžbine', value: formatOrderDate(order.createdAt) },
+      { label: 'Broj porudžbine', value: '#' + order.displayId }
+    ]) +
+    '</section>'
   );
 }
 
-function detailCell(label: string, value: string, valueIsHtml = false): string {
+function detailsCardHtml(
+  rows: Array<{ label: string; value: string; valueIsHtml?: boolean }>
+): string {
   return (
-    '<td class="mobile-block detail-cell" valign="top" style="width:50%;padding:12px 14px 12px 0;border-top:1px solid #f0f0f1">' +
-    '<p class="detail-label" style="margin:0 0 5px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.07em;text-transform:uppercase">' +
-    escapeHtml(label) +
-    '</p><p class="detail-value" style="margin:0;color:#27272a;font-size:13px;line-height:1.45;font-weight:600">' +
-    (valueIsHtml ? value : escapeHtml(value)) +
-    '</p></td>'
+    '<table class="details-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5;border:1px solid #e4e4e7">' +
+    '<tbody>' +
+    rows
+      .map((row, index) => detailRowHtml(row, index === rows.length - 1))
+      .join('') +
+    '</tbody></table>'
+  );
+}
+
+function detailRowHtml(
+  row: { label: string; value: string; valueIsHtml?: boolean },
+  isLast: boolean
+): string {
+  const border = isLast ? '' : 'border-bottom:1px solid #e4e4e7;';
+  return (
+    '<tr class="detail-row">' +
+    '<td class="detail-label" width="142" valign="top" bgcolor="#f4f4f5" style="width:142px;padding:11px 14px;background-color:#f4f4f5;' +
+    border +
+    'color:#71717a;font-size:11px;line-height:1.45;font-weight:800;letter-spacing:0.07em;text-transform:uppercase">' +
+    escapeHtml(row.label) +
+    '</td><td class="detail-value" valign="top" bgcolor="#f4f4f5" style="padding:11px 14px 11px 0;background-color:#f4f4f5;' +
+    border +
+    'color:#27272a;font-size:13px;line-height:1.45;font-weight:600">' +
+    (row.valueIsHtml ? row.value : escapeHtml(row.value)) +
+    '</td></tr>'
   );
 }
 
@@ -353,7 +372,7 @@ function emailPage(input: {
 }): string {
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-padding h1,.email-padding p,.email-padding td,.email-padding a,.email-padding strong,.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.detail-label{color:#c7c7cc !important}.item-row td,.detail-cell,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-padding h1,.email-padding p,.email-padding td,.email-padding a,.email-padding strong,.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.email-padding .detail-label{color:#c7c7cc !important}.item-row td,.details-card td,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td,.details-card,.details-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}}</style>' +
     '</head><body class="email-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<table class="email-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
     '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
