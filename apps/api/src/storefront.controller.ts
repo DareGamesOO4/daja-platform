@@ -32,6 +32,7 @@ import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
 import { PromotionsService } from './promotions.service.js';
+import { PhoneOtpService } from './phone-otp.service.js';
 
 const registerSchema = z.object({
   identity: z.string().trim().min(3).max(240),
@@ -42,6 +43,13 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   identity: z.string().trim().min(3).max(240),
   password: z.string().min(1).max(240)
+});
+const phoneOtpStartSchema = z.object({
+  phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Unesite broj u međunarodnom formatu.'),
+  purpose: z.enum(['login', 'link']).optional()
+});
+const phoneOtpVerifySchema = phoneOtpStartSchema.extend({
+  code: z.string().trim().regex(/^\d{6}$/, 'Kod mora imati šest cifara.')
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
@@ -144,6 +152,7 @@ export class CustomerAuthController {
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(AuthService) private readonly staffAuth: AuthService,
     @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService,
+    @Inject(PhoneOtpService) private readonly phoneOtp: PhoneOtpService,
     private readonly realtime: RealtimeGateway
   ) {}
 
@@ -231,13 +240,45 @@ export class CustomerAuthController {
   }
 
   @Post('phone/start')
-  phoneStart() {
-    return { supported: false, reason: 'Phone OTP provider is not configured yet' };
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  async phoneStart(@Req() request: Request, @Body() body: unknown) {
+    const input = parseWithSchema(phoneOtpStartSchema, body);
+    const purpose = input.purpose ?? 'login';
+    const customer =
+      purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+    return this.phoneOtp.start({
+      organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
+      phone: input.phone,
+      purpose,
+      ...(customer ? { customerId: customer.customerId } : {})
+    });
   }
 
   @Post('phone/verify')
-  phoneVerify() {
-    return { supported: false, reason: 'Phone OTP provider is not configured yet' };
+  @Throttle({ default: { limit: 8, ttl: 60_000 } })
+  async phoneVerify(@Req() request: Request, @Body() body: unknown) {
+    const input = parseWithSchema(phoneOtpVerifySchema, body);
+    const purpose = input.purpose ?? 'login';
+    const customer =
+      purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+    const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
+    await this.phoneOtp.verify({
+      organizationId,
+      phone: input.phone,
+      purpose,
+      code: input.code,
+      ...(customer ? { customerId: customer.customerId } : {})
+    });
+
+    if (customer) {
+      return {
+        status: 'verified' as const,
+        user: serializeCustomerPrincipal(
+          await this.auth.verifyPhoneForCustomer({ customer, phone: input.phone })
+        )
+      };
+    }
+    return this.auth.loginWithVerifiedPhone({ organizationId, phone: input.phone });
   }
 
   @Get('oauth/google/start')

@@ -23,6 +23,7 @@ import { OfflineInventoryController } from './offline-inventory.controller.js';
 import { DevicePluginsController } from './device-plugins.controller.js';
 import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
+import { PhoneOtpService } from './phone-otp.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
@@ -83,6 +84,7 @@ const logger = createLogger(config, 'api');
     AuthMiddleware,
     AuthService,
     CustomerAuthService,
+    PhoneOtpService,
     DesktopGoogleOAuthService,
     EmailDeliveryService,
     NovostiEmailService,

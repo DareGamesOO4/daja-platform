@@ -53,6 +53,10 @@ const envSchema = z.object({
   SES_ORDER_FROM_EMAIL: optionalPreparedSecret,
   SES_REPLY_TO_EMAIL: optionalPreparedSecret,
   ORDER_NOTIFICATION_EMAILS: optionalPreparedSecret,
+  SNS_SMS_REGION: z.string().trim().min(1).default('eu-north-1'),
+  SNS_SMS_ACCESS_KEY_ID: optionalPreparedSecret,
+  SNS_SMS_SECRET_ACCESS_KEY: optionalPreparedSecret,
+  SNS_SMS_SENDER_ID: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,10}$/).default('DAJASHOP'),
   PRIVACY_TOKEN_SECRET: optionalPreparedSecret,
   STOREFRONT_PUBLIC_BASE_URL: z.string().url().default('https://dajashop.rs'),
   // Comma-separated email allowlist. These storefront customers may exchange a

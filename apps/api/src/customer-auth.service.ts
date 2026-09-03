@@ -120,6 +120,45 @@ export class CustomerAuthService {
     });
   }
 
+  async loginWithVerifiedPhone(input: { organizationId: string; phone: string }) {
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      const customer = await repo.findCustomerByVerifiedPhone(input);
+      if (!customer) {
+        // Do not reveal whether this number belongs to an account.
+        throw new InvalidCredentialsError();
+      }
+      const session = await this.createSession(repo, customer.organizationId, customer.id);
+      const principal = await repo.buildCustomerPrincipal({
+        organizationId: customer.organizationId,
+        customerId: customer.id,
+        sessionFamilyId: session.familyId,
+        sessionId: session.id
+      });
+      return {
+        user: serializeCustomerPrincipal(principal),
+        ...this.issueTokenPair(principal, session.refreshToken)
+      };
+    });
+  }
+
+  async verifyPhoneForCustomer(input: { customer: CustomerPrincipal; phone: string }) {
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      await repo.verifyCustomerPhone({
+        organizationId: input.customer.organizationId,
+        customerId: input.customer.customerId,
+        phone: input.phone
+      });
+      return repo.buildCustomerPrincipal({
+        organizationId: input.customer.organizationId,
+        customerId: input.customer.customerId,
+        sessionFamilyId: input.customer.sessionFamilyId,
+        ...(input.customer.sessionId ? { sessionId: input.customer.sessionId } : {})
+      });
+    });
+  }
+
   async setPassword(input: {
     customer: CustomerPrincipal;
     currentPassword?: string | undefined;
@@ -568,6 +607,7 @@ export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
     uid: principal.customerId,
     email: principal.email,
     phoneNumber: principal.phone,
+    phoneVerified: principal.phoneVerified,
     displayName: principal.displayName,
     active: principal.active,
     hasPassword: principal.hasPassword,

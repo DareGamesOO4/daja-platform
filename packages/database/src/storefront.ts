@@ -13,6 +13,7 @@ export interface CustomerPrincipal {
   organizationId: string;
   email: string | null;
   phone: string | null;
+  phoneVerified: boolean;
   displayName: string;
   active: boolean;
   hasPassword: boolean;
@@ -268,6 +269,25 @@ export class StorefrontRepository {
          AND deleted_at IS NULL
        LIMIT 1`,
       [input.organizationId, input.email]
+    );
+    const row = result.rows[0];
+    return row ? { id: row.id, organizationId: row.organization_id } : null;
+  }
+
+  async findCustomerByVerifiedPhone(input: {
+    organizationId: string;
+    phone: string;
+  }): Promise<OAuthCustomerRecord | null> {
+    const result = await this.client.query<{ id: string; organization_id: string }>(
+      `SELECT id, organization_id
+       FROM customers
+       WHERE organization_id = $1
+         AND normalized_phone = regexp_replace($2, '[^0-9+]', '', 'g')
+         AND phone_verified = TRUE
+         AND active
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [input.organizationId, input.phone]
     );
     const row = result.rows[0];
     return row ? { id: row.id, organizationId: row.organization_id } : null;
@@ -533,6 +553,37 @@ export class StorefrontRepository {
         input.phone ?? null,
         input.photoUrl ?? null
       ]
+    );
+    return serializeCustomer(requireRow(result));
+  }
+
+  async verifyCustomerPhone(input: {
+    organizationId: string;
+    customerId: string;
+    phone: string;
+  }) {
+    const existing = await this.client.query<{ id: string }>(
+      `SELECT id
+       FROM customers
+       WHERE organization_id = $1
+         AND normalized_phone = regexp_replace($2, '[^0-9+]', '', 'g')
+         AND id <> $3
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [input.organizationId, input.phone, input.customerId]
+    );
+    if (existing.rowCount) {
+      throw new ResourceConflictError('Ovaj broj telefona je već povezan sa drugim nalogom.');
+    }
+    const result = await this.client.query<CustomerRow>(
+      `UPDATE customers
+       SET phone = $3,
+           phone_verified = TRUE,
+           updated_at = now(),
+           version = version + 1
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+       RETURNING *`,
+      [input.organizationId, input.customerId, input.phone]
     );
     return serializeCustomer(requireRow(result));
   }
@@ -1483,6 +1534,7 @@ function mapCustomerPrincipal(
     organizationId: row.organization_id,
     email: row.email,
     phone: row.phone,
+    phoneVerified: row.phone_verified,
     displayName: row.display_name,
     active: row.active,
     hasPassword: Boolean(row.has_password),
