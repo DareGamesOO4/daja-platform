@@ -739,15 +739,17 @@ export class StorefrontContentController {
         email: subscriber.email,
         ...(matchingCustomerId ? { customerId: matchingCustomerId } : {})
       }));
-    if (welcomeOfferEligible) {
+    const welcomeEmailSent = subscriber.isFirstSubscription;
+    if (welcomeEmailSent) {
       await this.newsletterEmail.sendWelcomeEmail({
         recipient: subscriber.email,
         unsubscribeUrl: subscriber.unsubscribeUrl,
-        promotionCode: NEWSLETTER_WELCOME_PROMO_CODE
+        ...(welcomeOfferEligible ? { promotionCode: NEWSLETTER_WELCOME_PROMO_CODE } : {})
       });
     }
     return {
       ...subscriber,
+      welcomeEmailSent,
       welcomeOfferEligible,
       ...(welcomeOfferEligible ? { welcomePromoCode: NEWSLETTER_WELCOME_PROMO_CODE } : {})
     };
