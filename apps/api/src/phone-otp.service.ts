@@ -47,7 +47,7 @@ export class PhoneOtpService {
     await client.set(this.challengeKey(scope), JSON.stringify(challenge), 'EX', OTP_TTL_SECONDS);
 
     try {
-      await this.getClient().send(
+      const response = await this.getClient().send(
         new PublishCommand({
           PhoneNumber: input.phone,
           Message: `DajaShop kod za potvrdu je ${code}. Važi 10 minuta. Ne delite ga ni sa kim.`,
@@ -59,6 +59,10 @@ export class PhoneOtpService {
             }
           }
         })
+      );
+      this.logger.info(
+        { messageId: response.MessageId, phoneLastFour: input.phone.slice(-4), purpose: input.purpose },
+        'Phone verification SMS accepted by Amazon SNS'
       );
     } catch (error) {
       await client.del(this.challengeKey(scope), this.cooldownKey(scope));
