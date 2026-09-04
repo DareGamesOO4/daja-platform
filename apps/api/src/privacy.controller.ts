@@ -167,9 +167,9 @@ export class PrivacyController {
   }
 
   private async requiredCustomer(request: Request) {
-    const customer = await this.optionalCustomer(request);
-    if (!customer) throw new ValidationFailedError('Prijavite se da biste promenili podešavanja privatnosti.');
-    return customer;
+    // Let the storefront recognize an expired customer session, refresh its
+    // access token, and retry this request instead of showing a false prompt.
+    return this.customerAuth.requireCustomer(bearerToken(request));
   }
 
   private unsubscribeRedirect(kind: string, success: boolean): string {
