@@ -113,9 +113,11 @@ const newsletterSchema = z.object({
 const productAlertSchema = z.object({
   type: z.enum(['back_in_stock', 'price_change']),
   variantId: uuidSchema,
+  deliveryChannel: z.enum(['email', 'sms']).default('email'),
   email: z.string().trim().email().max(240).optional(),
+  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/).optional(),
   managementToken: z.string().trim().min(24).max(160).optional(),
-  acceptedTerms: z.literal(true),
+  acceptedSmsMarketing: z.boolean().optional().default(false),
   policyVersion: z.string().trim().min(1).max(120).optional()
 });
 const productAlertStatusQuerySchema = z.object({
@@ -695,15 +697,17 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertSchema, body);
-    const email = customer?.email ?? input.email;
+    const email = input.deliveryChannel === 'email' ? customer?.email ?? input.email : undefined;
     return this.productAlerts.subscribe({
       organizationId: publicOrganizationId(this.config),
       productId: parseWithSchema(uuidSchema, productId),
       variantId: input.variantId,
       ...(customer?.customerId ? { customerId: customer.customerId } : {}),
       email,
+      phone: input.deliveryChannel === 'sms' ? input.phone : undefined,
       managementToken: input.managementToken,
-      acceptedTerms: input.acceptedTerms,
+      deliveryChannel: input.deliveryChannel,
+      acceptedSmsMarketing: input.acceptedSmsMarketing,
       policyVersion: input.policyVersion,
       type: input.type
     });
@@ -725,6 +729,7 @@ export class StorefrontContentController {
       variantId: input.variantId,
       ...(customer?.customerId ? { customerId: customer.customerId } : {}),
       email: customer?.email,
+      phone: customer?.phone,
       managementToken: input.managementToken,
       type: input.type
     });
@@ -747,6 +752,7 @@ export class StorefrontContentController {
       variantId: input.variantId,
       ...(customer?.customerId ? { customerId: customer.customerId } : {}),
       email: customer?.email,
+      phone: customer?.phone,
       managementToken: input.managementToken
     });
   }

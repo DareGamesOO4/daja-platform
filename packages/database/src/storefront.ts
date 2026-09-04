@@ -79,10 +79,13 @@ export interface CheckoutInput {
 }
 
 export type ProductAlertType = 'back_in_stock' | 'price_change';
+export type ProductAlertDeliveryChannel = 'email' | 'sms';
 
 export interface ProductAlertSubscription {
   id: string;
-  email: string;
+  email: string | null;
+  phone: string | null;
+  deliveryChannel: ProductAlertDeliveryChannel;
   type: ProductAlertType;
   active: boolean;
   contactId: string | null;
@@ -90,7 +93,9 @@ export interface ProductAlertSubscription {
 
 export interface ProductAlertNotification {
   subscriptionId: string;
-  email: string;
+  email: string | null;
+  phone: string | null;
+  deliveryChannel: ProductAlertDeliveryChannel;
   productName: string;
   brand: string | null;
   slug: string;
@@ -1093,7 +1098,9 @@ export class StorefrontRepository {
     variantId: string;
     customerId?: string | null;
     contactId?: string | null;
-    email: string;
+    email?: string | null;
+    phone?: string | null;
+    deliveryChannel: ProductAlertDeliveryChannel;
     type: ProductAlertType;
   }): Promise<ProductAlertSubscription> {
     const product = await this.client.query<{
@@ -1129,15 +1136,18 @@ export class StorefrontRepository {
 
     const result = await this.client.query<{
       id: string;
-      email: string;
+      email: string | null;
+      phone: string | null;
+      delivery_channel: ProductAlertDeliveryChannel;
       alert_type: ProductAlertType;
       active: boolean;
       contact_id: string | null;
     }>(
       `INSERT INTO product_alert_subscriptions (
-         organization_id, product_id, variant_id, customer_id, contact_id, email, alert_type, requested_price_amount
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (organization_id, variant_id, normalized_email, alert_type) DO UPDATE
+         organization_id, product_id, variant_id, customer_id, contact_id, delivery_channel,
+         email, phone, alert_type, requested_price_amount
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (organization_id, variant_id, delivery_channel, contact_key, alert_type) DO UPDATE
        SET customer_id = COALESCE(EXCLUDED.customer_id, product_alert_subscriptions.customer_id),
            contact_id = COALESCE(EXCLUDED.contact_id, product_alert_subscriptions.contact_id),
            active = TRUE,
@@ -1149,14 +1159,16 @@ export class StorefrontRepository {
            requested_price_amount = EXCLUDED.requested_price_amount,
            notified_at = NULL,
            updated_at = now()
-       RETURNING id, email, alert_type, active, contact_id`,
+       RETURNING id, email, phone, delivery_channel, alert_type, active, contact_id`,
       [
         input.organizationId,
         input.productId,
         input.variantId,
         input.customerId ?? null,
         input.contactId ?? null,
-        input.email.trim().toLowerCase(),
+        input.deliveryChannel,
+        input.deliveryChannel === 'email' ? input.email?.trim().toLowerCase() ?? null : null,
+        input.deliveryChannel === 'sms' ? input.phone?.trim() ?? null : null,
         input.type,
         input.type === 'price_change' ? current.current_price_amount : null
       ]
@@ -1165,6 +1177,8 @@ export class StorefrontRepository {
     return {
       id: row.id,
       email: row.email,
+      phone: row.phone,
+      deliveryChannel: row.delivery_channel,
       type: row.alert_type,
       active: row.active,
       contactId: row.contact_id
@@ -1175,7 +1189,9 @@ export class StorefrontRepository {
     organizationId: string;
     productId: string;
     variantId: string;
-    email: string;
+    customerId?: string | null;
+    email?: string | null;
+    phone?: string | null;
   }): Promise<ProductAlertType[]> {
     const result = await this.client.query<{ alert_type: ProductAlertType }>(
       `SELECT alert_type
@@ -1183,12 +1199,53 @@ export class StorefrontRepository {
        WHERE organization_id = $1
          AND product_id = $2
          AND variant_id = $3
-         AND normalized_email = lower($4)
+         AND (
+           customer_id = $4
+           OR normalized_email = lower($5)
+           OR normalized_phone = regexp_replace($6, '[^0-9+]', '', 'g')
+         )
          AND active = TRUE
        ORDER BY alert_type`,
-      [input.organizationId, input.productId, input.variantId, input.email]
+      [
+        input.organizationId,
+        input.productId,
+        input.variantId,
+        input.customerId ?? null,
+        input.email ?? null,
+        input.phone ?? null
+      ]
     );
     return result.rows.map((row) => row.alert_type);
+  }
+
+  async subscribeSmsMarketing(input: {
+    organizationId: string;
+    customerId?: string | null;
+    phone: string;
+    policyVersion?: string | undefined;
+    source: string;
+  }): Promise<void> {
+    await this.client.query(
+      `INSERT INTO sms_marketing_subscribers (
+         organization_id, customer_id, phone, consent_version, source
+       ) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (organization_id, normalized_phone) DO UPDATE
+       SET customer_id = COALESCE(EXCLUDED.customer_id, sms_marketing_subscribers.customer_id),
+           phone = EXCLUDED.phone,
+           active = TRUE,
+           consent_version = EXCLUDED.consent_version,
+           consented_at = now(),
+           revoked_at = NULL,
+           source = EXCLUDED.source,
+           updated_at = now()`,
+      [
+        input.organizationId,
+        input.customerId ?? null,
+        input.phone,
+        input.policyVersion ?? null,
+        input.source
+      ]
+    );
   }
 
   /** Remove one alert type without touching another alert for the same product. */
@@ -1254,8 +1311,8 @@ export class StorefrontRepository {
          AND product.active
          AND product.published
          AND inventory.available_quantity > 0
-       RETURNING alert.id AS subscription_id, alert.email, product.name AS product_name, brand.name AS brand,
-                 product.slug, variant.currency, variant.current_price_amount,
+       RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
+                 product.name AS product_name, brand.name AS brand, product.slug, variant.currency, variant.current_price_amount,
                  NULL::integer AS previous_price_amount`,
       [input.organizationId, input.variantId]
     );
@@ -1290,8 +1347,8 @@ export class StorefrontRepository {
          AND product.deleted_at IS NULL
          AND product.active
          AND product.published
-       RETURNING alert.id AS subscription_id, alert.email, product.name AS product_name, brand.name AS brand,
-                 product.slug, variant.currency, $3::integer AS previous_price_amount,
+       RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
+                 product.name AS product_name, brand.name AS brand, product.slug, variant.currency, $3::integer AS previous_price_amount,
                  $4::integer AS current_price_amount`,
       [
         input.organizationId,
@@ -1515,7 +1572,9 @@ interface ReviewRow {
 
 interface ProductAlertNotificationRow {
   subscription_id: string;
-  email: string;
+  email: string | null;
+  phone: string | null;
+  delivery_channel: ProductAlertDeliveryChannel;
   product_name: string;
   brand: string | null;
   slug: string;
@@ -1628,6 +1687,8 @@ function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductA
   return {
     subscriptionId: row.subscription_id,
     email: row.email,
+    phone: row.phone,
+    deliveryChannel: row.delivery_channel,
     productName: row.product_name,
     brand: row.brand,
     slug: row.slug,

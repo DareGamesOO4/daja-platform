@@ -5,11 +5,13 @@ import {
   type Database,
   type ProductAlertNotification,
   type ProductAlertSubscription,
+  type ProductAlertDeliveryChannel,
   type ProductAlertType
 } from '@daja/database';
 import { CONFIG, DATABASE } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { PrivacyService } from './privacy.service.js';
+import { SmsDeliveryService } from './sms-delivery.service.js';
 
 @Injectable()
 export class ProductAlertService {
@@ -17,6 +19,7 @@ export class ProductAlertService {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     private readonly delivery: EmailDeliveryService,
+    private readonly sms: SmsDeliveryService,
     private readonly privacy: PrivacyService
   ) {}
 
@@ -26,31 +29,34 @@ export class ProductAlertService {
     variantId: string;
     customerId?: string | null | undefined;
     email?: string | undefined;
+    phone?: string | undefined;
     managementToken?: string | undefined;
-    acceptedTerms: boolean;
+    deliveryChannel: ProductAlertDeliveryChannel;
+    acceptedSmsMarketing?: boolean | undefined;
     policyVersion?: string | undefined;
     type: ProductAlertType;
   }): Promise<
     ProductAlertSubscription & {
       managementToken?: string;
       maskedEmail?: string;
-      termsAccepted: boolean;
     }
   > {
-    if (!input.acceptedTerms) {
-      throw new Error('Potvrdite uslove korišćenja i politiku privatnosti.');
-    }
-    const contact = input.customerId
+    const usesEmail = input.deliveryChannel === 'email';
+    const contact = !usesEmail || input.customerId
       ? null
       : await this.privacy.resolveAlertContact({
           organizationId: input.organizationId,
           email: input.email,
           managementToken: input.managementToken,
-          acceptedTerms: input.acceptedTerms,
+          acceptedTerms: true,
           policyVersion: input.policyVersion
         });
-    const email = input.email?.trim().toLowerCase() || contact?.email;
-    if (!email) throw new Error('Unesite email adresu za obaveštenje.');
+    const email = usesEmail ? input.email?.trim().toLowerCase() || contact?.email : undefined;
+    const phone = !usesEmail ? normalizePhone(input.phone) : undefined;
+    if (usesEmail && !email) throw new Error('Unesite email adresu za obaveštenje.');
+    if (!usesEmail && !phone) throw new Error('Unesite broj telefona u međunarodnom formatu, npr. +381601234567.');
+    const contactValue = email ?? phone;
+    if (!contactValue) throw new Error('Kontakt za obaveštenje nije dostupan.');
     const subscription = await new StorefrontRepository(this.database.pool).subscribeProductAlert({
       organizationId: input.organizationId,
       productId: input.productId,
@@ -58,6 +64,8 @@ export class ProductAlertService {
       ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
       ...(contact?.id ? { contactId: contact.id } : {}),
       email,
+      phone,
+      deliveryChannel: input.deliveryChannel,
       type: input.type
     });
     await this.database.pool.query(
@@ -68,15 +76,23 @@ export class ProductAlertService {
     );
     await this.privacy.recordProductAlertConsent({
       organizationId: input.organizationId,
-      email,
+      contact: contactValue,
       customerId: input.customerId,
       subscriptionId: subscription.id,
       policyVersion: input.policyVersion,
       source: input.customerId ? 'authenticated_alert_modal' : 'guest_alert_modal'
     });
+    if (input.acceptedSmsMarketing && phone) {
+      await new StorefrontRepository(this.database.pool).subscribeSmsMarketing({
+        organizationId: input.organizationId,
+        ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
+        phone,
+        policyVersion: input.policyVersion,
+        source: input.customerId ? 'authenticated_alert_modal' : 'guest_alert_modal'
+      });
+    }
     return {
       ...subscription,
-      termsAccepted: true,
       ...(contact
         ? { managementToken: contact.managementToken, maskedEmail: contact.maskedEmail }
         : {})
@@ -89,6 +105,7 @@ export class ProductAlertService {
     variantId: string;
     customerId?: string | null | undefined;
     email?: string | null | undefined;
+    phone?: string | null | undefined;
     managementToken?: string | undefined;
   }): Promise<{
     types: ProductAlertType[];
@@ -100,7 +117,8 @@ export class ProductAlertService {
       ? await this.privacy.alertContactByToken(input.organizationId, input.managementToken)
       : null;
     const email = input.email?.trim().toLowerCase() || contact?.email;
-    if (!email) {
+    const phone = normalizePhone(input.phone);
+    if (!email && !phone && !input.customerId) {
       return {
         types: [],
         termsAccepted: contact?.termsAccepted ?? false,
@@ -112,9 +130,11 @@ export class ProductAlertService {
         organizationId: input.organizationId,
         productId: input.productId,
         variantId: input.variantId,
-        email
+        customerId: input.customerId,
+        email,
+        phone
       }),
-      this.privacy.newsletterStatus({ organizationId: input.organizationId, email }),
+      this.privacy.newsletterStatus({ organizationId: input.organizationId, email: email ?? null }),
       input.customerId
         ? this.database.pool.query<{ accepted: boolean }>(
             `SELECT EXISTS (
@@ -142,18 +162,26 @@ export class ProductAlertService {
     type: ProductAlertType;
     customerId?: string | null | undefined;
     email?: string | null | undefined;
+    phone?: string | null | undefined;
     managementToken?: string | undefined;
   }): Promise<boolean> {
     const contact = input.managementToken
       ? await this.privacy.alertContactByToken(input.organizationId, input.managementToken)
       : null;
     const email = input.email?.trim().toLowerCase() || contact?.email;
-    if (!email) throw new Error('Prijavite se ili potvrdite email za odjavu.');
+    const phone = normalizePhone(input.phone);
+    if (!email && !phone && !input.customerId) {
+      throw new Error('Prijavite se ili otvorite link za odjavu iz obaveštenja.');
+    }
     const result = await this.database.pool.query<{ id: string }>(
       `SELECT id FROM product_alert_subscriptions
        WHERE organization_id = $1 AND product_id = $2 AND variant_id = $3
          AND alert_type = $4 AND active
-         AND (customer_id = $5 OR normalized_email = lower($6))
+         AND (
+           customer_id = $5
+           OR normalized_email = lower($6)
+           OR normalized_phone = regexp_replace($7, '[^0-9+]', '', 'g')
+         )
        LIMIT 1`,
       [
         input.organizationId,
@@ -161,7 +189,8 @@ export class ProductAlertService {
         input.variantId,
         input.type,
         input.customerId ?? null,
-        email
+        email ?? null,
+        phone ?? null
       ]
     );
     const subscriptionId = result.rows[0]?.id;
@@ -170,14 +199,20 @@ export class ProductAlertService {
       organizationId: input.organizationId,
       subscriptionId,
       customerId: input.customerId,
-      customerEmail: email,
+      customerEmail: email ?? null,
       source: input.customerId ? 'account_or_wishlist' : 'guest_wishlist'
     });
   }
 
   async notifyBackInStock(input: { organizationId: string; variantId: string }): Promise<void> {
     const alerts = await new StorefrontRepository(this.database.pool).claimBackInStockProductAlerts(input);
-    await Promise.all(alerts.map((alert) => this.sendBackInStockEmail(alert)));
+    await Promise.all(
+      alerts.map((alert) => (
+        alert.deliveryChannel === 'sms'
+          ? this.sendBackInStockSms(alert)
+          : this.sendBackInStockEmail(alert)
+      ))
+    );
   }
 
   async notifyPriceChanged(input: {
@@ -188,10 +223,17 @@ export class ProductAlertService {
   }): Promise<void> {
     if (input.previousPriceAmount === input.currentPriceAmount) return;
     const alerts = await new StorefrontRepository(this.database.pool).claimPriceChangeProductAlerts(input);
-    await Promise.all(alerts.map((alert) => this.sendPriceChangeEmail(alert)));
+    await Promise.all(
+      alerts.map((alert) => (
+        alert.deliveryChannel === 'sms'
+          ? this.sendPriceChangeSms(alert)
+          : this.sendPriceChangeEmail(alert)
+      ))
+    );
   }
 
   private async sendBackInStockEmail(alert: ProductAlertNotification): Promise<void> {
+    if (!alert.email) return;
     const name = productName(alert);
     const url = this.productUrl(alert.slug);
     await this.delivery.send({
@@ -218,6 +260,7 @@ export class ProductAlertService {
   }
 
   private async sendPriceChangeEmail(alert: ProductAlertNotification): Promise<void> {
+    if (!alert.email) return;
     const name = productName(alert);
     const url = this.productUrl(alert.slug);
     const oldPrice = formatMoney(alert.previousPriceAmount ?? alert.currentPriceAmount, alert.currency);
@@ -243,6 +286,40 @@ export class ProductAlertService {
         url,
         unsubscribeUrl: this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)
       }),
+      tag: 'product-price-change'
+    });
+  }
+
+  private async sendBackInStockSms(alert: ProductAlertNotification): Promise<void> {
+    if (!alert.phone) return;
+    const name = productName(alert);
+    const url = this.productUrl(alert.slug);
+    await this.sms.send({
+      phone: alert.phone,
+      message: [
+        `DajaShop: ${name} je ponovo na stanju.`,
+        `Cena: ${formatMoney(alert.currentPriceAmount, alert.currency)}.`,
+        url,
+        `Odjava: ${this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)}`
+      ].join('\n'),
+      tag: 'product-back-in-stock'
+    });
+  }
+
+  private async sendPriceChangeSms(alert: ProductAlertNotification): Promise<void> {
+    if (!alert.phone) return;
+    const name = productName(alert);
+    const url = this.productUrl(alert.slug);
+    const oldPrice = formatMoney(alert.previousPriceAmount ?? alert.currentPriceAmount, alert.currency);
+    const currentPrice = formatMoney(alert.currentPriceAmount, alert.currency);
+    await this.sms.send({
+      phone: alert.phone,
+      message: [
+        `DajaShop: cena za ${name} je promenjena.`,
+        `Pre: ${oldPrice}. Sada: ${currentPrice}.`,
+        url,
+        `Odjava: ${this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)}`
+      ].join('\n'),
       tag: 'product-price-change'
     });
   }
@@ -301,6 +378,13 @@ function rawEmailAddress(value: string | undefined): string {
   const match = /<([^>]+)>/.exec(value ?? '');
   const address = (match?.[1] ?? value ?? '').trim();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) ? address : '';
+}
+
+function normalizePhone(value: string | null | undefined): string | undefined {
+  const normalized = value?.trim().replace(/[\s()-]/g, '');
+  return normalized && /^\+[1-9]\d{7,14}$/.test(normalized)
+    ? normalized
+    : undefined;
 }
 
 function escapeHtml(value: string): string {

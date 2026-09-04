@@ -144,7 +144,7 @@ export class PrivacyService {
       );
       await this.recordMarketingEvent({
         organizationId: input.organizationId,
-        email: row.email,
+        contact: row.email,
         customerId: input.customerId,
         newsletterSubscriberId: row.id,
         purpose: 'newsletter',
@@ -182,7 +182,7 @@ export class PrivacyService {
     if (!subscriber) throw new ValidationFailedError('Prijava na newsletter nije uspela.');
     await this.recordMarketingEvent({
       organizationId: input.organizationId,
-      email: subscriber.email,
+      contact: subscriber.email,
       customerId: input.customerId,
       newsletterSubscriberId: subscriber.id,
       purpose: 'newsletter',
@@ -259,7 +259,7 @@ export class PrivacyService {
     if (!row) return false;
     await this.recordMarketingEvent({
       organizationId: input.organizationId,
-      email: row.email,
+      contact: row.email,
       customerId: input.customerId,
       newsletterSubscriberId: row.id,
       purpose: 'newsletter',
@@ -371,7 +371,7 @@ export class PrivacyService {
 
   async recordProductAlertConsent(input: {
     organizationId: string;
-    email: string;
+    contact: string;
     customerId?: string | null | undefined;
     subscriptionId: string;
     policyVersion?: string | undefined;
@@ -379,7 +379,7 @@ export class PrivacyService {
   }): Promise<void> {
     await this.recordMarketingEvent({
       organizationId: input.organizationId,
-      email: input.email,
+      contact: input.contact,
       customerId: input.customerId,
       productAlertSubscriptionId: input.subscriptionId,
       purpose: 'product_alert',
@@ -396,19 +396,19 @@ export class PrivacyService {
     customerId?: string | null | undefined;
     customerEmail?: string | null | undefined;
   }): Promise<boolean> {
-    const result = await this.database.pool.query<{ id: string; email: string }>(
+    const result = await this.database.pool.query<{ id: string; email: string | null; phone: string | null }>(
       `UPDATE product_alert_subscriptions
        SET active = false, revoked_at = COALESCE(revoked_at, now()), updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND active
          AND ($3::uuid IS NULL OR customer_id = $3 OR normalized_email = lower($4))
-       RETURNING id, email`,
+       RETURNING id, email, phone`,
       [input.organizationId, input.subscriptionId, input.customerId ?? null, input.customerEmail ?? null]
     );
     const row = result.rows[0];
     if (!row) return false;
     await this.recordMarketingEvent({
       organizationId: input.organizationId,
-      email: row.email,
+      contact: row.email ?? row.phone ?? '',
       customerId: input.customerId,
       productAlertSubscriptionId: row.id,
       purpose: 'product_alert',
@@ -517,7 +517,7 @@ export class PrivacyService {
 
   private async recordMarketingEvent(input: {
     organizationId: string;
-    email: string;
+    contact: string;
     customerId?: string | null | undefined;
     newsletterSubscriberId?: string | undefined;
     productAlertSubscriptionId?: string | undefined;
@@ -526,7 +526,7 @@ export class PrivacyService {
     policyVersion?: string | undefined;
     source: string;
   }): Promise<void> {
-    const subjectEmailHash = sha256(normalizeEmail(input.email));
+    const subjectEmailHash = sha256(normalizeEmail(input.contact));
     await this.database.pool.query(
       `INSERT INTO marketing_consent_events (
          organization_id, subject_email_hash, customer_id, newsletter_subscriber_id,
