@@ -74,9 +74,7 @@ export class CustomerAuthService {
       })
     );
 
-    // Return the same public result whether or not the address belongs to an
-    // account, so this endpoint cannot be used to discover customer emails.
-    if (!reset) return { status: 'accepted' as const };
+    if (!reset) return { status: 'not_found' as const };
 
     const resetUrl = new URL('/reset-password', this.config.STOREFRONT_PUBLIC_BASE_URL);
     resetUrl.searchParams.set('token', token);
@@ -84,7 +82,7 @@ export class CustomerAuthService {
       recipient: reset.email,
       resetUrl: resetUrl.toString()
     });
-    return { status: 'accepted' as const };
+    return { status: 'sent' as const };
   }
 
   async resetPassword(input: { token: string; newPassword: string }): Promise<void> {
