@@ -45,6 +45,24 @@ export class NovostiEmailService {
     });
   }
 
+  async posaljiLinkZaPromenuLozinke(input: {
+    recipient: string;
+    resetUrl: string;
+  }): Promise<void> {
+    const resetUrl = escapeHtml(input.resetUrl);
+    await this.posaljiEmail({
+      recipient: input.recipient,
+      fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
+      subject: 'Promena lozinke za DajaShop nalog',
+      text: `Otvorite ovaj link da postavite novu lozinku za svoj DajaShop nalog: ${input.resetUrl}\n\nLink važi 30 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku.`,
+      html:
+        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Promenite lozinku</h1><p style="font-size:16px;line-height:1.6">Otvorite dugme ispod da postavite novu lozinku za svoj DajaShop nalog.</p><p style="margin:28px 0"><a href="' +
+        resetUrl +
+        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Postavi novu lozinku</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link važi 30 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      tag: 'promena-lozinke'
+    });
+  }
+
   async posaljiPorukuDobrodoslice(input: {
     recipient: string;
     odjavaUrl: string;

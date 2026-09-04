@@ -57,6 +57,17 @@ const passwordUpdateSchema = z.object({
   currentPassword: z.string().min(1).max(240).optional(),
   newPassword: z.string().min(8).max(240)
 });
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(240)
+});
+const passwordResetSchema = z.object({
+  token: z.string().trim().min(32).max(256),
+  newPassword: z
+    .string()
+    .min(8)
+    .max(240)
+    .regex(/^(?=.*[A-Z])(?=.*\d).+$/, 'Lozinka mora imati veliko slovo i broj.')
+});
 const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
 const KOD_DOBRODOSLICE = 'DOBRODOSLI10';
@@ -179,6 +190,23 @@ export class CustomerAuthController {
   async logout(@Req() request: Request) {
     await this.auth.logout(bearerToken(request));
     return { ok: true };
+  }
+
+  @Post('password/reset-request')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  requestPasswordReset(@Body() body: unknown) {
+    const input = parseWithSchema(passwordResetRequestSchema, body);
+    return this.auth.requestPasswordReset({
+      organizationId: publicOrganizationId(this.config),
+      email: input.email
+    });
+  }
+
+  @Post('password/reset')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async resetPassword(@Body() body: unknown) {
+    await this.auth.resetPassword(parseWithSchema(passwordResetSchema, body));
+    return { status: 'changed' as const };
   }
 
   @Get('me')

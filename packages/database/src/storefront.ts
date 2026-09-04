@@ -36,6 +36,13 @@ export interface CustomerPasswordIdentity {
   passwordHash: string;
 }
 
+export interface CustomerPasswordResetRecord {
+  organizationId: string;
+  customerId: string;
+  email: string;
+  phone: string | null;
+}
+
 export interface CustomerSessionRecord {
   id: string;
   familyId: string;
@@ -238,6 +245,72 @@ export class StorefrontRepository {
        ) VALUES ($1, $2, 'password', $3, $4)`,
       [input.organizationId, input.customerId, providerSubject, input.passwordHash]
     );
+  }
+
+  async createCustomerPasswordReset(input: {
+    organizationId: string;
+    email: string;
+    tokenHash: string;
+    expiresAt: Date;
+  }): Promise<{ email: string } | null> {
+    const customer = await this.client.query<{ id: string; email: string }>(
+      `SELECT id, email
+       FROM customers
+       WHERE organization_id = $1
+         AND lower(email) = lower($2)
+         AND active
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [input.organizationId, input.email]
+    );
+    const row = customer.rows[0];
+    if (!row?.email) return null;
+
+    await this.client.query(
+      `INSERT INTO customer_password_reset_tokens (
+         organization_id, customer_id, token_hash, expires_at
+       ) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, customer_id) WHERE used_at IS NULL
+       DO UPDATE SET token_hash = EXCLUDED.token_hash,
+                     expires_at = EXCLUDED.expires_at,
+                     created_at = now()`,
+      [input.organizationId, row.id, input.tokenHash, input.expiresAt]
+    );
+    return { email: row.email };
+  }
+
+  async consumeCustomerPasswordReset(tokenHash: string): Promise<CustomerPasswordResetRecord> {
+    const result = await this.client.query<{
+      organization_id: string;
+      customer_id: string;
+      email: string;
+      phone: string | null;
+    }>(
+      `WITH matched_token AS (
+         UPDATE customer_password_reset_tokens
+         SET used_at = now()
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+         RETURNING organization_id, customer_id
+       )
+       SELECT token.organization_id, token.customer_id, customer.email, customer.phone
+       FROM matched_token token
+       JOIN customers customer
+         ON customer.organization_id = token.organization_id
+        AND customer.id = token.customer_id
+        AND customer.active
+        AND customer.deleted_at IS NULL`,
+      [tokenHash]
+    );
+    const row = result.rows[0];
+    if (!row?.email) {
+      throw new ValidationFailedError('Link za promenu lozinke nije važeći ili je istekao.');
+    }
+    return {
+      organizationId: row.organization_id,
+      customerId: row.customer_id,
+      email: row.email,
+      phone: row.phone
+    };
   }
 
   async findOAuthCustomer(input: {
@@ -803,6 +876,19 @@ export class StorefrontRepository {
       `DELETE FROM customer_wishlist_items
        WHERE organization_id = $1 AND product_id = $2`,
       [input.organizationId, input.productId]
+    );
+  }
+
+  async revokeCustomerSessions(
+    organizationId: string,
+    customerId: string,
+    reason: string
+  ): Promise<void> {
+    await this.client.query(
+      `UPDATE customer_sessions
+       SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = $3
+       WHERE organization_id = $1 AND customer_id = $2 AND revoked_at IS NULL`,
+      [organizationId, customerId, reason]
     );
   }
 

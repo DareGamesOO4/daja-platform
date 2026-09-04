@@ -63,6 +63,50 @@ export class CustomerAuthService {
     return new StorefrontRepository(this.database.pool).confirmCustomerEmailVerification(sha256Hex(token));
   }
 
+  async requestPasswordReset(input: { organizationId: string; email: string }) {
+    const token = randomBytes(32).toString('base64url');
+    const reset = await new TransactionManager(this.database.pool, this.logger).run((client) =>
+      new StorefrontRepository(client).createCustomerPasswordReset({
+        organizationId: input.organizationId,
+        email: input.email.trim().toLowerCase(),
+        tokenHash: sha256Hex(token),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+      })
+    );
+
+    // Return the same public result whether or not the address belongs to an
+    // account, so this endpoint cannot be used to discover customer emails.
+    if (!reset) return { status: 'accepted' as const };
+
+    const resetUrl = new URL('/reset-password', this.config.STOREFRONT_PUBLIC_BASE_URL);
+    resetUrl.searchParams.set('token', token);
+    await this.email.posaljiLinkZaPromenuLozinke({
+      recipient: reset.email,
+      resetUrl: resetUrl.toString()
+    });
+    return { status: 'accepted' as const };
+  }
+
+  async resetPassword(input: { token: string; newPassword: string }): Promise<void> {
+    const passwordHash = await hash(input.newPassword, { type: argon2id });
+    await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      const reset = await repo.consumeCustomerPasswordReset(sha256Hex(input.token));
+      await repo.savePasswordIdentity({
+        organizationId: reset.organizationId,
+        customerId: reset.customerId,
+        email: reset.email,
+        phone: reset.phone,
+        passwordHash
+      });
+      await repo.revokeCustomerSessions(
+        reset.organizationId,
+        reset.customerId,
+        'password_reset'
+      );
+    });
+  }
+
   async register(input: {
     organizationId: string;
     identity: string;
