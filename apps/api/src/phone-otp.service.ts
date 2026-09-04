@@ -50,7 +50,7 @@ export class PhoneOtpService {
       const response = await this.getClient().send(
         new PublishCommand({
           PhoneNumber: input.phone,
-          Message: `DajaShop kod za potvrdu je ${code}. Važi 10 minuta. Ne delite ga ni sa kim.`,
+          Message: `DajaShop kod za potvrdu: ${code}. Traje 10 min. Ne delite ga ni sa kim.`,
           MessageAttributes: {
             'AWS.SNS.SMS.SMSType': { DataType: 'String', StringValue: 'Transactional' },
             'AWS.SNS.SMS.SenderID': {
