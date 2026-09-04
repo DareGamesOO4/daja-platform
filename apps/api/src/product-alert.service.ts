@@ -63,8 +63,8 @@ export class ProductAlertService {
       variantId: input.variantId,
       ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
       ...(contact?.id ? { contactId: contact.id } : {}),
-      email,
-      phone,
+      ...(email ? { email } : {}),
+      ...(phone ? { phone } : {}),
       deliveryChannel: input.deliveryChannel,
       type: input.type
     });
@@ -130,9 +130,9 @@ export class ProductAlertService {
         organizationId: input.organizationId,
         productId: input.productId,
         variantId: input.variantId,
-        customerId: input.customerId,
-        email,
-        phone
+        ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
+        ...(email ? { email } : {}),
+        ...(phone ? { phone } : {})
       }),
       this.privacy.newsletterStatus({ organizationId: input.organizationId, email: email ?? null }),
       input.customerId
