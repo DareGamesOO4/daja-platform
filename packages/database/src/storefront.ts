@@ -106,6 +106,7 @@ export interface ProductAlertNotification {
   productName: string;
   brand: string | null;
   slug: string;
+  imageUrl: string | null;
   currency: string;
   currentPriceAmount: number;
   previousPriceAmount: number | null;
@@ -1383,6 +1384,17 @@ export class StorefrontRepository {
        LEFT JOIN brands brand
          ON brand.id = product.brand_id
         AND brand.organization_id = product.organization_id
+       LEFT JOIN LATERAL (
+         SELECT media_asset.public_url
+         FROM product_media media
+         JOIN media_assets media_asset
+           ON media_asset.id = media.media_asset_id
+          AND media_asset.status = 'ready'
+         WHERE media.organization_id = product.organization_id
+           AND media.product_id = product.id
+         ORDER BY media.is_primary DESC, media.position ASC, media.id
+         LIMIT 1
+       ) primary_asset ON true
        CROSS JOIN inventory
        WHERE alert.organization_id = $1
          AND alert.variant_id = $2
@@ -1398,7 +1410,8 @@ export class StorefrontRepository {
          AND product.published
          AND inventory.available_quantity > 0
        RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
-                 product.name AS product_name, brand.name AS brand, product.slug, variant.currency, variant.current_price_amount,
+                 product.name AS product_name, brand.name AS brand, product.slug, primary_asset.public_url AS image_url,
+                 variant.currency, variant.current_price_amount,
                  NULL::integer AS previous_price_amount`,
       [input.organizationId, input.variantId]
     );
@@ -1421,6 +1434,17 @@ export class StorefrontRepository {
        LEFT JOIN brands brand
          ON brand.id = product.brand_id
         AND brand.organization_id = product.organization_id
+       LEFT JOIN LATERAL (
+         SELECT media_asset.public_url
+         FROM product_media media
+         JOIN media_assets media_asset
+           ON media_asset.id = media.media_asset_id
+          AND media_asset.status = 'ready'
+         WHERE media.organization_id = product.organization_id
+           AND media.product_id = product.id
+         ORDER BY media.is_primary DESC, media.position ASC, media.id
+         LIMIT 1
+       ) primary_asset ON true
        WHERE alert.organization_id = $1
          AND alert.variant_id = $2
          AND alert.alert_type = 'price_change'
@@ -1434,7 +1458,8 @@ export class StorefrontRepository {
          AND product.active
          AND product.published
        RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
-                 product.name AS product_name, brand.name AS brand, product.slug, variant.currency, $3::integer AS previous_price_amount,
+                 product.name AS product_name, brand.name AS brand, product.slug, primary_asset.public_url AS image_url,
+                 variant.currency, $3::integer AS previous_price_amount,
                  $4::integer AS current_price_amount`,
       [
         input.organizationId,
@@ -1664,6 +1689,7 @@ interface ProductAlertNotificationRow {
   product_name: string;
   brand: string | null;
   slug: string;
+  image_url: string | null;
   currency: string;
   current_price_amount: number;
   previous_price_amount: number | null;
@@ -1778,6 +1804,7 @@ function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductA
     productName: row.product_name,
     brand: row.brand,
     slug: row.slug,
+    imageUrl: row.image_url,
     currency: row.currency,
     currentPriceAmount: row.current_price_amount,
     previousPriceAmount: row.previous_price_amount
