@@ -1167,6 +1167,55 @@ export class StaffCatalogController {
     return result.rows[0];
   }
 
+  @Delete('variants/:id/prices/sale')
+  async clearVariantSale(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const variantId = parseWithSchema(uuidSchema, id);
+    const catalog = new CatalogRepository(this.database.pool);
+    const variant = await catalog.getVariant(ctx, variantId);
+    const product = await catalog.getProduct(ctx, variant.productId);
+
+    // A new sale must never compete with an older active or scheduled price.
+    // Remove the whole current sale set, including a sale that has already
+    // started and one scheduled for a future date.  Historical, expired sales
+    // stay intact.
+    const deleted = await new TransactionManager(this.database.pool, this.logger).run(
+      async (client) =>
+        client.query<{ id: string }>(
+          `WITH current_sales AS (
+             SELECT id
+             FROM variant_prices
+             WHERE organization_id = $1
+               AND variant_id = $2
+               AND price_type = 'sale'
+               AND (valid_until IS NULL OR valid_until > now())
+           ), removed_alert_events AS (
+             DELETE FROM product_sale_price_alert_events event
+             USING current_sales sale
+             WHERE event.variant_price_id = sale.id
+           )
+           DELETE FROM variant_prices price
+           USING current_sales sale
+           WHERE price.id = sale.id
+           RETURNING price.id`,
+          [ctx.organizationId, variantId]
+        )
+    );
+
+    await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
+      organizationId: ctx.organizationId,
+      productId: product.id
+    });
+    await new OperationalSyncProjector(this.database.pool).publishProductChange(
+      ctx,
+      product.id,
+      variantId
+    );
+    await this.invalidateCatalog(ctx.organizationId, product.slug);
+    return { deleted: deleted.rowCount ?? 0 };
+  }
+
   @Get('admin/products/:id/reviews')
   async listAdminReviews(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
