@@ -105,6 +105,8 @@ export interface ProductAlertNotification {
   deliveryChannel: ProductAlertDeliveryChannel;
   productName: string;
   brand: string | null;
+  sku: string;
+  variantName: string | null;
   slug: string;
   imageUrl: string | null;
   currency: string;
@@ -1427,7 +1429,8 @@ export class StorefrontRepository {
          AND product.published
          AND inventory.available_quantity > 0
        RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
-                 product.name AS product_name, brand.name AS brand, product.slug, primary_asset.public_url AS image_url,
+                 product.name AS product_name, brand.name AS brand, variant.sku, variant.name AS variant_name,
+                 product.slug, primary_asset.public_url AS image_url,
                  variant.currency, variant.current_price_amount,
                  NULL::integer AS previous_price_amount`,
       [input.organizationId, input.variantId]
@@ -1475,7 +1478,8 @@ export class StorefrontRepository {
          AND product.active
          AND product.published
        RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
-                 product.name AS product_name, brand.name AS brand, product.slug, primary_asset.public_url AS image_url,
+                 product.name AS product_name, brand.name AS brand, variant.sku, variant.name AS variant_name,
+                 product.slug, primary_asset.public_url AS image_url,
                  variant.currency, $3::integer AS previous_price_amount,
                  $4::integer AS current_price_amount`,
       [
@@ -1777,6 +1781,8 @@ interface ProductAlertNotificationRow {
   delivery_channel: ProductAlertDeliveryChannel;
   product_name: string;
   brand: string | null;
+  sku: string;
+  variant_name: string | null;
   slug: string;
   image_url: string | null;
   currency: string;
@@ -1909,6 +1915,8 @@ function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductA
     deliveryChannel: row.delivery_channel,
     productName: row.product_name,
     brand: row.brand,
+    sku: row.sku,
+    variantName: row.variant_name,
     slug: row.slug,
     imageUrl: row.image_url,
     currency: row.currency,
