@@ -252,7 +252,9 @@ export class ProductAlertService implements OnModuleInit, OnModuleDestroy {
     currentPriceAmount: number;
   }): Promise<void> {
     if (input.previousPriceAmount === input.currentPriceAmount) return;
-    await this.dispatchDueRegularPriceChanges();
+    // The database trigger has queued (or refreshed) exactly one debounced
+    // event for this variant. The minute scheduler sends it only after the
+    // ten-minute quiet period and after it verifies the price is still current.
   }
 
   async dispatchDueRegularPriceChanges(): Promise<void> {

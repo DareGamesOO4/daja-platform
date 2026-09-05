@@ -1513,7 +1513,19 @@ export class StorefrontRepository {
          WHERE sale.price_type = 'sale'
            AND sale.valid_from <= now()
            AND sale.valid_until > now()
+           AND sale.created_at <= now() - interval '10 minutes'
            AND sale.amount_minor < variant.current_price_amount
+           AND sale.id = (
+             SELECT current_sale.id
+             FROM variant_prices current_sale
+             WHERE current_sale.organization_id = sale.organization_id
+               AND current_sale.variant_id = sale.variant_id
+               AND current_sale.price_type = 'sale'
+               AND current_sale.valid_from <= now()
+               AND current_sale.valid_until > now()
+             ORDER BY current_sale.valid_from DESC, current_sale.created_at DESC
+             LIMIT 1
+           )
            AND variant.deleted_at IS NULL
            AND variant.active
            AND variant.published
@@ -1542,13 +1554,42 @@ export class StorefrontRepository {
   }
 
   async claimDueRegularPriceAlerts(): Promise<DueRegularPriceAlert[]> {
+    // The trigger debounces consecutive edits into one row.  Re-check the
+    // variant's current price immediately before claiming it so an outdated
+    // event can never produce a stale email if a price changed again.
+    await this.client.query(
+      `UPDATE product_regular_price_alert_events event
+       SET superseded_at = now()
+       WHERE event.sent_at IS NULL
+         AND event.superseded_at IS NULL
+         AND event.available_at <= now()
+         AND (
+           event.previous_price_amount = event.current_price_amount
+           OR NOT EXISTS (
+             SELECT 1
+             FROM product_variants variant
+             WHERE variant.organization_id = event.organization_id
+               AND variant.id = event.variant_id
+               AND variant.deleted_at IS NULL
+               AND variant.current_price_amount = event.current_price_amount
+           )
+         )`,
+      []
+    );
     const result = await this.client.query<DueRegularPriceAlertRow>(
       `WITH due_events AS (
-         SELECT id
-         FROM product_regular_price_alert_events
-         WHERE sent_at IS NULL
-         ORDER BY created_at, id
-         FOR UPDATE SKIP LOCKED
+         SELECT event.id
+         FROM product_regular_price_alert_events event
+         JOIN product_variants variant
+           ON variant.organization_id = event.organization_id
+          AND variant.id = event.variant_id
+          AND variant.deleted_at IS NULL
+         WHERE event.sent_at IS NULL
+           AND event.superseded_at IS NULL
+           AND event.available_at <= now()
+           AND variant.current_price_amount = event.current_price_amount
+         ORDER BY event.available_at, event.created_at, event.id
+         FOR UPDATE OF event SKIP LOCKED
          LIMIT 100
        )
        UPDATE product_regular_price_alert_events event
