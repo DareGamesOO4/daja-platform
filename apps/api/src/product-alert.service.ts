@@ -385,6 +385,7 @@ export class ProductAlertService implements OnModuleInit, OnModuleDestroy {
         brand: alert.brand,
         model: alert.variantName?.trim() || alert.sku,
         ...(brandUrl ? { brandUrl } : {}),
+        emailAssetBaseUrl: this.emailAssetBaseUrl(),
         imageUrl: alert.imageUrl,
         previousPrice: oldPrice,
         currentPrice,
@@ -452,6 +453,10 @@ export class ProductAlertService implements OnModuleInit, OnModuleDestroy {
     return `${this.config.STOREFRONT_PUBLIC_BASE_URL.replace(/\/$/, '')}/catalog?brand=${encodeURIComponent(normalizedBrand)}`;
   }
 
+  private emailAssetBaseUrl(): string {
+    return `${this.config.STOREFRONT_PUBLIC_BASE_URL.replace(/\/$/, '')}/images/email`;
+  }
+
   private fromEmail(): string {
     const configured = this.config.SES_FROM_EMAIL;
     const address = rawEmailAddress(configured);
@@ -491,6 +496,7 @@ function priceChangeEmail(input: {
   brand: string | null;
   model?: string | null;
   brandUrl?: string;
+  emailAssetBaseUrl: string;
   imageUrl: string | null;
   previousPrice: string;
   currentPrice: string;
@@ -507,6 +513,7 @@ function priceChangeEmail(input: {
   const model = input.model?.trim() ? escapeHtml(input.model.trim()) : '';
   const url = escapeHtml(input.url);
   const brandUrl = input.brandUrl ? escapeHtml(input.brandUrl) : '';
+  const emailAssetBaseUrl = escapeHtml(input.emailAssetBaseUrl.replace(/\/$/, ''));
   const unsubscribeUrl = escapeHtml(input.unsubscribeUrl);
   const saleStarted = input.kind === 'sale_started';
   const priceDropped = saleStarted || input.kind === 'regular_price_drop';
@@ -566,7 +573,7 @@ function priceChangeEmail(input: {
       '</p></td></tr></table>'
     : '';
   const salePeriodBlock = saleStarted && input.saleValidFrom && input.saleValidUntil
-    ? '<table class="sale-period" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1faf2" style="width:100%;margin:20px 0 0;background-color:#f1faf2;border:1px solid #d7eedb"><tr><td bgcolor="#f1faf2" style="padding:16px 18px;background-color:#f1faf2">' +
+    ? '<table class="sale-period" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1faf2" style="width:100%;margin:20px 0 0;background-color:#f1faf2;border:1px solid #d7eedb;border-radius:12px;overflow:hidden"><tr><td bgcolor="#f1faf2" style="padding:16px 18px;background-color:#f1faf2;border-radius:12px">' +
       '<p style="margin:0 0 8px;color:#16853a;font-size:11px;font-weight:800;letter-spacing:0.1em">AKCIJA TRAJE</p>' +
       '<p style="margin:0;color:#176b32;font-size:14px;line-height:1.55;font-weight:700">Od ' +
       escapeHtml(formatSaleDate(input.saleValidFrom)) +
@@ -575,15 +582,18 @@ function priceChangeEmail(input: {
       '</p></td></tr></table>'
     : '';
   const benefitsBlock =
-    '<table class="price-benefits" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f8f8fa" style="width:100%;margin:30px 0 0;background-color:#f8f8fa;border-radius:10px"><tr>' +
-    '<td class="price-benefit" width="25%" valign="top" style="width:25%;padding:16px 10px 14px;border-right:1px solid #e5e7eb">' +
-    '<p style="margin:0 0 8px;color:#111111;font-size:19px;line-height:1">🚚</p><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Besplatna dostava</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">za porudžbine<br>preko 5.000 RSD</p></td>' +
-    '<td class="price-benefit" width="25%" valign="top" style="width:25%;padding:16px 10px 14px;border-right:1px solid #e5e7eb">' +
-    '<p style="margin:0 0 8px;color:#111111;font-size:19px;line-height:1">♢</p><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">2 godine garancije</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">na sve naše<br>proizvode</p></td>' +
-    '<td class="price-benefit" width="25%" valign="top" style="width:25%;padding:16px 10px 14px;border-right:1px solid #e5e7eb">' +
-    '<p style="margin:0 0 8px;color:#111111;font-size:19px;line-height:1">⟳</p><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Jednostavan povrat</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">14 dana pravo na<br>povrat</p></td>' +
-    '<td class="price-benefit" width="25%" valign="top" style="width:25%;padding:16px 10px 14px">' +
-    '<p style="margin:0 0 8px;color:#111111;font-size:19px;line-height:1">◉</p><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Korisnička podrška</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">Tu smo za vas<br>svakog dana</p></td>' +
+    '<table class="price-benefits" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f8f8fa" style="width:100%;margin:30px 0 0;background-color:#f8f8fa;border-radius:10px;overflow:hidden"><tr>' +
+    '<td class="price-benefit" width="24%" valign="top" style="width:24%;padding:16px 10px 14px">' +
+    '<img src="' + emailAssetBaseUrl + '/benefit-delivery.svg" alt="" width="20" height="20" style="display:block;width:20px;height:20px;border:0;margin:0 0 8px" /><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Besplatna dostava</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">za porudžbine<br>preko 5.000 RSD</p></td>' +
+    '<td class="price-benefit-divider" width="1" valign="middle" style="width:1px;padding:0"><table role="presentation" width="1" height="44" cellspacing="0" cellpadding="0" border="0" style="width:1px;height:44px"><tr><td bgcolor="#e1e3e8" style="width:1px;height:44px;background-color:#e1e3e8;font-size:0;line-height:0">&nbsp;</td></tr></table></td>' +
+    '<td class="price-benefit" width="24%" valign="top" style="width:24%;padding:16px 10px 14px">' +
+    '<img src="' + emailAssetBaseUrl + '/benefit-warranty.svg" alt="" width="20" height="20" style="display:block;width:20px;height:20px;border:0;margin:0 0 8px" /><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">2 godine garancije</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">na sve naše<br>proizvode</p></td>' +
+    '<td class="price-benefit-divider" width="1" valign="middle" style="width:1px;padding:0"><table role="presentation" width="1" height="44" cellspacing="0" cellpadding="0" border="0" style="width:1px;height:44px"><tr><td bgcolor="#e1e3e8" style="width:1px;height:44px;background-color:#e1e3e8;font-size:0;line-height:0">&nbsp;</td></tr></table></td>' +
+    '<td class="price-benefit" width="24%" valign="top" style="width:24%;padding:16px 10px 14px">' +
+    '<img src="' + emailAssetBaseUrl + '/benefit-return.svg" alt="" width="20" height="20" style="display:block;width:20px;height:20px;border:0;margin:0 0 8px" /><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Jednostavan povrat</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">14 dana pravo na<br>povrat</p></td>' +
+    '<td class="price-benefit-divider" width="1" valign="middle" style="width:1px;padding:0"><table role="presentation" width="1" height="44" cellspacing="0" cellpadding="0" border="0" style="width:1px;height:44px"><tr><td bgcolor="#e1e3e8" style="width:1px;height:44px;background-color:#e1e3e8;font-size:0;line-height:0">&nbsp;</td></tr></table></td>' +
+    '<td class="price-benefit" width="24%" valign="top" style="width:24%;padding:16px 10px 14px">' +
+    '<img src="' + emailAssetBaseUrl + '/benefit-support.svg" alt="" width="20" height="20" style="display:block;width:20px;height:20px;border:0;margin:0 0 8px" /><p class="price-benefit-title" style="margin:0;color:#111111;font-size:10px;line-height:1.25;font-weight:800">Korisnička podrška</p><p class="price-benefit-copy" style="margin:4px 0 0;color:#52525b;font-size:10px;line-height:1.35">Tu smo za vas<br>svakog dana</p></td>' +
     '</tr></table>';
   const communityBlock =
     '<table class="price-community" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:20px 0 0"><tr><td align="center">' +
@@ -596,7 +606,7 @@ function priceChangeEmail(input: {
     '</tr></table></td></tr></table>';
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.price-shell{width:100% !important}.price-outer{padding:0 !important}.price-header{padding:24px 20px 8px !important}.price-content{padding:28px 20px !important}.price-footer{padding:20px !important}.price-product-media,.price-product-info{display:block !important;width:auto !important}.price-product-media{padding:20px 20px 0 !important}.price-product-info{padding:18px 20px 24px !important}.price-product-image{width:100% !important;height:260px !important}.price-button{display:block !important;text-align:center !important}.price-link{word-break:break-all !important}.price-benefit{display:block !important;width:auto !important;border-right:0 !important;border-bottom:1px solid #e5e7eb !important}.price-benefit:last-child{border-bottom:0 !important}}@media (prefers-color-scheme:dark){.price-body,.price-page,.price-outer{background:#27272a !important}.price-shell,.price-header{background:#2c2c2e !important}.price-footer{background:#353538 !important;border-color:#48484a !important}.price-product-card{border-color:#48484a !important}.price-content h1,.price-content h2,.price-content p,.price-content td,.price-content a,.price-brand,.price-product-name,.price-current,.price-price-label{color:#fafafa !important}.price-copy,.price-footer,.price-eyebrow,.price-product-copy,.price-old,.price-link{color:#d4d4d8 !important}.price-product-card,.price-product-card td,.price-product-media,.price-image-frame,.price-image-frame td,.price-summary,.price-summary td,.price-benefits,.price-benefits td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.price-benefit-copy,.price-social-copy{color:#d4d4d8 !important}.price-savings td,.sale-period,.sale-period td{background-color:#163d22 !important;background-image:linear-gradient(#163d22,#163d22) !important}.price-savings p,.sale-period p{color:#b8f0c7 !important}.price-drop-badge td{background-color:#4d1c24 !important}.price-discount,.price-button-cell{background-color:#e30613 !important}.price-button{color:#ffffff !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.price-shell{width:100% !important}.price-outer{padding:0 !important}.price-header{padding:24px 20px 8px !important}.price-content{padding:28px 20px !important}.price-footer{padding:20px !important}.price-product-media,.price-product-info{display:block !important;width:auto !important}.price-product-media{padding:20px 20px 0 !important}.price-product-info{padding:18px 20px 24px !important}.price-image-frame{width:220px !important;height:240px !important}.price-product-image{width:190px !important;height:226px !important}.price-button{display:block !important;text-align:center !important}.price-link{word-break:break-all !important}.price-benefit{display:block !important;width:auto !important;border-right:0 !important;border-bottom:1px solid #e5e7eb !important}.price-benefit-divider{display:none !important}.price-benefit:last-child{border-bottom:0 !important}}@media (prefers-color-scheme:dark){.price-body,.price-page,.price-outer{background:#27272a !important}.price-shell,.price-header{background:#2c2c2e !important}.price-footer{background:#353538 !important;border-color:#48484a !important}.price-product-card{border-color:#48484a !important}.price-content h1,.price-content h2,.price-content p,.price-content td,.price-content a,.price-brand,.price-product-name,.price-current,.price-price-label{color:#fafafa !important}.price-copy,.price-footer,.price-eyebrow,.price-product-copy,.price-old,.price-link{color:#d4d4d8 !important}.price-product-card,.price-product-card td,.price-product-media,.price-image-frame,.price-image-frame td,.price-summary,.price-summary td,.price-benefits,.price-benefits td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.price-benefit-copy,.price-social-copy{color:#d4d4d8 !important}.price-savings td,.sale-period,.sale-period td{background-color:#163d22 !important;background-image:linear-gradient(#163d22,#163d22) !important}.price-savings p,.sale-period p{color:#b8f0c7 !important}.price-drop-badge td{background-color:#4d1c24 !important}.price-discount,.price-button-cell{background-color:#e30613 !important}.price-button{color:#ffffff !important}}</style>' +
     '</head><body class="price-body" style="margin:0;padding:0;background:#f7f7f8;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">' +
     priceMessage +
@@ -613,16 +623,17 @@ function priceChangeEmail(input: {
     '</h1><p class="price-copy" style="margin:0 0 28px;color:#52525b;font-size:16px;line-height:1.6">' +
     heroCopy +
     '</p>' +
-    '<table class="price-product-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:100%;border-collapse:collapse;background-color:#ffffff;border:1px solid #e5e7eb;border-radius:16px"><tr>' +
-    '<td class="price-product-media" width="258" align="center" valign="middle" bgcolor="#ffffff" style="width:258px;padding:24px 0 24px 24px;background-color:#ffffff">' +
+    '<table class="price-product-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:100%;border-collapse:collapse;background-color:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden"><tr>' +
+    '<td class="price-product-media" width="214" align="center" valign="middle" bgcolor="#ffffff" style="width:214px;padding:20px 0 20px 20px;background-color:#ffffff;border-radius:16px 0 0 16px">' +
+    '<table class="price-image-frame" role="presentation" width="188" height="230" cellspacing="0" cellpadding="0" border="0" bgcolor="#f8f9fb" style="width:188px;height:230px;background-color:#f8f9fb;border-radius:12px"><tr><td align="center" valign="middle" bgcolor="#f8f9fb" style="background-color:#f8f9fb;border-radius:12px">' +
     productAlertImageHtml(input.imageUrl, input.productName) +
-    '</td><td class="price-product-info" valign="middle" bgcolor="#ffffff" style="padding:28px 28px 28px 24px;background-color:#ffffff">' +
+    '</td></tr></table></td><td class="price-product-info" valign="middle" bgcolor="#ffffff" style="padding:28px 26px 28px 20px;background-color:#ffffff;border-radius:0 16px 16px 0">' +
     brandBadge +
     '<h2 class="price-product-name" style="margin:0 0 4px;color:#111111;font-size:24px;line-height:1.2;font-weight:800">' +
     productName +
     '</h2>' +
     modelBlock +
-    '<table class="price-summary" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f7f8fc" style="width:100%;background-color:#f7f8fc;border:1px solid #edf0f4;border-radius:10px"><tr><td class="price-summary-main" valign="middle" bgcolor="#f7f8fc" style="padding:16px 14px;background-color:#f7f8fc">' +
+    '<table class="price-summary" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f7f8fc" style="width:100%;background-color:#f7f8fc;border:1px solid #edf0f4;border-radius:10px;overflow:hidden"><tr><td class="price-summary-main" valign="middle" bgcolor="#f7f8fc" style="padding:16px 14px;background-color:#f7f8fc;border-radius:10px 0 0 10px">' +
     '<p class="price-old-label" style="margin:0 0 4px;color:#737782;font-size:10px;font-weight:800;letter-spacing:0.05em">STARA CENA</p>' +
     '<p class="price-old" style="margin:0 0 15px;color:#71717a;font-size:17px;line-height:1.2;text-decoration:line-through">' +
     escapeHtml(input.previousPrice) +
@@ -680,9 +691,9 @@ function productAlertImageHtml(imageUrl: string | null, productName: string): st
       escapeHtml(imageUrl) +
       '" alt="' +
       escapeHtml(productName) +
-      '" width="234" height="260" style="display:block;width:234px;height:260px;border:0;object-fit:contain" />';
+      '" width="188" height="226" style="display:block;width:188px;height:226px;border:0;margin:0 auto;border-radius:10px;object-fit:contain" />';
   }
-  return '<table class="price-image-frame" role="presentation" width="234" height="260" cellspacing="0" cellpadding="0" border="0" bgcolor="#f7f7f8" style="width:234px;height:260px;background-color:#f7f7f8"><tr><td align="center" valign="middle" bgcolor="#f7f7f8" style="background-color:#f7f7f8;color:#e30613;font-size:13px;font-weight:800;letter-spacing:0.12em">DAJASHOP</td></tr></table>';
+  return '<p style="margin:0;color:#e30613;font-size:13px;font-weight:800;letter-spacing:0.12em">DAJASHOP</p>';
 }
 
 function productName(alert: ProductAlertNotification): string {
