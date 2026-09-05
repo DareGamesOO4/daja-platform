@@ -2349,6 +2349,7 @@ export class OperationalSyncProjector {
        LEFT JOIN LATERAL (
          SELECT amount_minor, valid_from, valid_until FROM variant_prices
          WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
+           AND cancelled_at IS NULL
          ORDER BY created_at DESC LIMIT 1
        ) sale ON true
        LEFT JOIN LATERAL (

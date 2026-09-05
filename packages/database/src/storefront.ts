@@ -960,6 +960,7 @@ export class StorefrontRepository {
          FROM variant_prices vp
          WHERE vp.organization_id = p.organization_id AND vp.variant_id = variant.id
            AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND vp.cancelled_at IS NULL
            AND (vp.valid_until IS NULL OR vp.valid_until > now())
          ORDER BY vp.valid_from DESC, vp.created_at DESC
          LIMIT 1
@@ -1511,6 +1512,7 @@ export class StorefrontRepository {
            ON product.id = variant.product_id
           AND product.organization_id = variant.organization_id
          WHERE sale.price_type = 'sale'
+           AND sale.cancelled_at IS NULL
            AND sale.valid_from <= now()
            AND sale.valid_until > now()
            AND sale.created_at <= now() - interval '10 minutes'
@@ -1521,6 +1523,7 @@ export class StorefrontRepository {
              WHERE current_sale.organization_id = sale.organization_id
                AND current_sale.variant_id = sale.variant_id
                AND current_sale.price_type = 'sale'
+               AND current_sale.cancelled_at IS NULL
                AND current_sale.valid_from <= now()
                AND current_sale.valid_until > now()
              ORDER BY current_sale.valid_from DESC, current_sale.created_at DESC

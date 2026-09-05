@@ -140,6 +140,7 @@ export class CatalogRepository {
          FROM variant_prices vp
          WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
            AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND vp.cancelled_at IS NULL
            AND (vp.valid_until IS NULL OR vp.valid_until > now())
          ORDER BY vp.valid_from DESC, vp.created_at DESC
          LIMIT 1
@@ -226,6 +227,7 @@ export class CatalogRepository {
          FROM variant_prices vp
          WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
            AND vp.price_type = 'sale' AND vp.valid_from <= now()
+           AND vp.cancelled_at IS NULL
            AND (vp.valid_until IS NULL OR vp.valid_until > now())
          ORDER BY vp.valid_from DESC, vp.created_at DESC
          LIMIT 1

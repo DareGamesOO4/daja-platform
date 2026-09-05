@@ -1114,7 +1114,7 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.read');
     return (
       await this.database.pool.query(
-        `SELECT id, amount_minor AS "amountMinor", currency, price_type AS "priceType", valid_from AS "validFrom", valid_until AS "validUntil", created_at AS "createdAt" FROM variant_prices WHERE organization_id=$1 AND variant_id=$2 ORDER BY valid_from DESC`,
+        `SELECT id, amount_minor AS "amountMinor", currency, price_type AS "priceType", valid_from AS "validFrom", valid_until AS "validUntil", cancelled_at AS "cancelledAt", created_at AS "createdAt" FROM variant_prices WHERE organization_id=$1 AND variant_id=$2 ORDER BY valid_from DESC`,
         [ctx.organizationId, parseWithSchema(uuidSchema, id)]
       )
     ).rows;
@@ -1176,16 +1176,16 @@ export class StaffCatalogController {
     const variant = await catalog.getVariant(ctx, variantId);
     const product = await catalog.getProduct(ctx, variant.productId);
 
-    // Ending a sale immediately removes it from every storefront price query,
-    // while retaining its history and any already-sent alert audit record.
-    // This avoids foreign-key failures from a hard delete and also cancels a
-    // scheduled sale before it can become active.
+    // Price records are append-only. Marking a sale cancelled preserves its
+    // schedule and alert audit record while removing it from every active
+    // storefront query, including a sale that is scheduled for the future.
     const cancelled = await this.database.pool.query<{ id: string }>(
       `UPDATE variant_prices
-       SET valid_until = now()
+       SET cancelled_at = now()
        WHERE organization_id = $1
          AND variant_id = $2
          AND price_type = 'sale'
+         AND cancelled_at IS NULL
          AND (valid_until IS NULL OR valid_until > now())
        RETURNING id`,
       [ctx.organizationId, variantId]

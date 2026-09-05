@@ -466,6 +466,7 @@ export class PrivacyService {
                FROM variant_prices price
                WHERE price.organization_id = variant.organization_id AND price.variant_id = variant.id
                  AND price.price_type = 'sale' AND price.valid_from <= now()
+                 AND price.cancelled_at IS NULL
                  AND (price.valid_until IS NULL OR price.valid_until > now())
                ORDER BY price.valid_from DESC, price.created_at DESC
                LIMIT 1

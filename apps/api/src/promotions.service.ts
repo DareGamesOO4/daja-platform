@@ -828,6 +828,7 @@ async function canonicalCartLines(
        WHERE organization_id = v.organization_id
          AND variant_id = v.id
          AND price_type = 'sale'
+         AND cancelled_at IS NULL
          AND valid_from <= now()
          AND (valid_until IS NULL OR valid_until > now())
        ORDER BY valid_from DESC, created_at DESC
