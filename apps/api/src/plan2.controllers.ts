@@ -1161,6 +1161,9 @@ export class StaffCatalogController {
       variantId
     );
     await this.invalidateCatalog(ctx.organizationId, product.slug);
+    if (input.priceType === 'sale') {
+      await this.productAlerts.dispatchDueSaleStarts();
+    }
     return result.rows[0];
   }
 

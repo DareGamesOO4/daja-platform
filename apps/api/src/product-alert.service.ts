@@ -1,5 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
+import type { Logger } from '@daja/observability';
 import {
   StorefrontRepository,
   type Database,
@@ -8,20 +9,49 @@ import {
   type ProductAlertDeliveryChannel,
   type ProductAlertType
 } from '@daja/database';
-import { CONFIG, DATABASE } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { SmsDeliveryService } from './sms-delivery.service.js';
 
+type PriceAlertEventKind = 'sale_started' | 'regular_price_drop' | 'regular_price_increase';
+
+interface PriceAlertEvent {
+  kind: PriceAlertEventKind;
+  previousPriceAmount: number;
+  currentPriceAmount: number;
+  saleValidFrom?: Date;
+  saleValidUntil?: Date;
+}
+
 @Injectable()
-export class ProductAlertService {
+export class ProductAlertService implements OnModuleInit, OnModuleDestroy {
+  private saleStartTimer: NodeJS.Timeout | undefined;
+  private dispatchingDueSales = false;
+  private dispatchingDueRegularPrices = false;
+
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
+    @Inject(LOGGER) private readonly logger: Logger,
     private readonly delivery: EmailDeliveryService,
     private readonly sms: SmsDeliveryService,
     private readonly privacy: PrivacyService
   ) {}
+
+  onModuleInit(): void {
+    void this.dispatchDueRegularPriceChanges();
+    void this.dispatchDueSaleStarts();
+    this.saleStartTimer = setInterval(() => {
+      void this.dispatchDueRegularPriceChanges();
+      void this.dispatchDueSaleStarts();
+    }, 60_000);
+    this.saleStartTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.saleStartTimer) clearInterval(this.saleStartTimer);
+  }
 
   async subscribe(input: {
     organizationId: string;
@@ -222,14 +252,49 @@ export class ProductAlertService {
     currentPriceAmount: number;
   }): Promise<void> {
     if (input.previousPriceAmount === input.currentPriceAmount) return;
-    const alerts = await new StorefrontRepository(this.database.pool).claimPriceChangeProductAlerts(input);
-    await Promise.all(
-      alerts.map((alert) => (
-        alert.deliveryChannel === 'sms'
-          ? this.sendPriceChangeSms(alert)
-          : this.sendPriceChangeEmail(alert)
-      ))
-    );
+    await this.dispatchDueRegularPriceChanges();
+  }
+
+  async dispatchDueRegularPriceChanges(): Promise<void> {
+    if (this.dispatchingDueRegularPrices) return;
+    this.dispatchingDueRegularPrices = true;
+    try {
+      const changes = await new StorefrontRepository(this.database.pool).claimDueRegularPriceAlerts();
+      await Promise.all(
+        changes.map((change) => this.sendPriceAlertEvent(change.organizationId, change.variantId, {
+          kind: change.previousPriceAmount > change.currentPriceAmount
+            ? 'regular_price_drop'
+            : 'regular_price_increase',
+          previousPriceAmount: change.previousPriceAmount,
+          currentPriceAmount: change.currentPriceAmount
+        }))
+      );
+    } catch (error) {
+      this.logger.error({ err: error }, 'Unable to dispatch due regular price alerts');
+    } finally {
+      this.dispatchingDueRegularPrices = false;
+    }
+  }
+
+  async dispatchDueSaleStarts(): Promise<void> {
+    if (this.dispatchingDueSales) return;
+    this.dispatchingDueSales = true;
+    try {
+      const sales = await new StorefrontRepository(this.database.pool).claimDueSalePriceAlerts();
+      await Promise.all(
+        sales.map((sale) => this.sendPriceAlertEvent(sale.organizationId, sale.variantId, {
+          kind: 'sale_started',
+          previousPriceAmount: sale.regularPriceAmount,
+          currentPriceAmount: sale.salePriceAmount,
+          saleValidFrom: sale.validFrom,
+          saleValidUntil: sale.validUntil
+        }))
+      );
+    } catch (error) {
+      this.logger.error({ err: error }, 'Unable to dispatch due sale price alerts');
+    } finally {
+      this.dispatchingDueSales = false;
+    }
   }
 
   private async sendBackInStockEmail(alert: ProductAlertNotification): Promise<void> {
@@ -259,28 +324,54 @@ export class ProductAlertService {
     });
   }
 
-  private async sendPriceChangeEmail(alert: ProductAlertNotification): Promise<void> {
+  private async sendPriceAlertEvent(
+    organizationId: string,
+    variantId: string,
+    event: PriceAlertEvent
+  ): Promise<void> {
+    const alerts = await new StorefrontRepository(this.database.pool).claimPriceChangeProductAlerts({
+      organizationId,
+      variantId,
+      previousPriceAmount: event.previousPriceAmount,
+      currentPriceAmount: event.currentPriceAmount
+    });
+    await Promise.all(
+      alerts.map((alert) => (
+        alert.deliveryChannel === 'sms'
+          ? this.sendPriceChangeSms(alert, event)
+          : this.sendPriceChangeEmail(alert, event)
+      ))
+    );
+  }
+
+  private async sendPriceChangeEmail(
+    alert: ProductAlertNotification,
+    event: PriceAlertEvent
+  ): Promise<void> {
     if (!alert.email) return;
     const name = productName(alert);
     const url = this.productUrl(alert.slug);
-    const previousPriceAmount = alert.previousPriceAmount ?? alert.currentPriceAmount;
+    const previousPriceAmount = event.previousPriceAmount;
     const oldPrice = formatMoney(previousPriceAmount, alert.currency);
-    const currentPrice = formatMoney(alert.currentPriceAmount, alert.currency);
-    const priceDropped = previousPriceAmount > alert.currentPriceAmount;
+    const currentPrice = formatMoney(event.currentPriceAmount, alert.currency);
+    const priceDropped = previousPriceAmount > event.currentPriceAmount;
     const savings = priceDropped
-      ? formatMoney(previousPriceAmount - alert.currentPriceAmount, alert.currency)
+      ? formatMoney(previousPriceAmount - event.currentPriceAmount, alert.currency)
       : undefined;
+    const previousPriceLabel = event.kind === 'sale_started' ? 'Redovna cena' : 'Prethodna cena';
+    const currentPriceLabel = event.kind === 'sale_started' ? 'Akcijska cena' : 'Nova cena';
     await this.delivery.send({
       recipients: [alert.email],
       fromEmail: this.fromEmail(),
-      subject: priceDropped
-        ? `Cena je sada niža za ${name} | DajaShop`
-        : `Promenjena je cena za ${name} | DajaShop`,
+      subject: priceAlertSubject(event.kind, name),
       text: [
-        priceDropped ? `Cena za ${name} je sada niža.` : `Cena za ${name} je promenjena.`,
-        `Prethodna cena: ${oldPrice}`,
-        `Nova cena: ${currentPrice}`,
+        priceAlertHeading(event.kind, name),
+        `${previousPriceLabel}: ${oldPrice}`,
+        `${currentPriceLabel}: ${currentPrice}`,
         ...(savings ? [`Ušteda: ${savings}`] : []),
+        ...(event.saleValidFrom && event.saleValidUntil
+          ? [`Akcija važi od ${formatSaleDate(event.saleValidFrom)} do ${formatSaleDate(event.saleValidUntil)}.`]
+          : []),
         '',
         `Pogledajte proizvod: ${url}`,
         `Odjava od ovog obaveštenja: ${this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)}`
@@ -291,11 +382,15 @@ export class ProductAlertService {
         previousPrice: oldPrice,
         currentPrice,
         ...(savings ? { savings } : {}),
-        priceDropped,
+        kind: event.kind,
+        ...(event.saleValidFrom ? { saleValidFrom: event.saleValidFrom } : {}),
+        ...(event.saleValidUntil ? { saleValidUntil: event.saleValidUntil } : {}),
         url,
         unsubscribeUrl: this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)
       }),
-      tag: 'product-price-change'
+      tag: event.kind === 'sale_started'
+        ? 'product-sale-start'
+        : 'product-regular-price-change'
     });
   }
 
@@ -315,21 +410,27 @@ export class ProductAlertService {
     });
   }
 
-  private async sendPriceChangeSms(alert: ProductAlertNotification): Promise<void> {
+  private async sendPriceChangeSms(
+    alert: ProductAlertNotification,
+    event: PriceAlertEvent
+  ): Promise<void> {
     if (!alert.phone) return;
     const name = productName(alert);
     const url = this.productUrl(alert.slug);
-    const oldPrice = formatMoney(alert.previousPriceAmount ?? alert.currentPriceAmount, alert.currency);
-    const currentPrice = formatMoney(alert.currentPriceAmount, alert.currency);
+    const oldPrice = formatMoney(event.previousPriceAmount, alert.currency);
+    const currentPrice = formatMoney(event.currentPriceAmount, alert.currency);
     await this.sms.send({
       phone: alert.phone,
       message: [
-        `DajaShop: cena za ${name} je promenjena.`,
+        `DajaShop: ${priceAlertHeading(event.kind, name)}`,
         `Pre: ${oldPrice}. Sada: ${currentPrice}.`,
+        ...(event.saleValidUntil ? [`Akcija do: ${formatSaleDate(event.saleValidUntil)}.`] : []),
         url,
         `Odjava: ${this.privacy.productAlertUnsubscribeUrl(alert.subscriptionId)}`
       ].join('\n'),
-      tag: 'product-price-change'
+      tag: event.kind === 'sale_started'
+        ? 'product-sale-start'
+        : 'product-regular-price-change'
     });
   }
 
@@ -377,72 +478,132 @@ function priceChangeEmail(input: {
   previousPrice: string;
   currentPrice: string;
   savings?: string;
-  priceDropped: boolean;
+  kind: PriceAlertEventKind;
+  saleValidFrom?: Date;
+  saleValidUntil?: Date;
   url: string;
   unsubscribeUrl: string;
 }): string {
   const productName = escapeHtml(input.productName);
   const url = escapeHtml(input.url);
   const unsubscribeUrl = escapeHtml(input.unsubscribeUrl);
-  const priceMessage = input.priceDropped
-    ? 'Cena proizvoda koji pratite je sada niža.'
-    : 'Cena proizvoda koji pratite je upravo ažurirana.';
-  const priceLabel = input.priceDropped ? 'NOVA, NIŽA CENA' : 'TRENUTNA CENA';
-  const buttonLabel = input.priceDropped ? 'Pogledajte novu cenu' : 'Pogledajte proizvod';
+  const saleStarted = input.kind === 'sale_started';
+  const priceDropped = saleStarted || input.kind === 'regular_price_drop';
+  const priceMessage = saleStarted
+    ? 'Cena koju ste čekali je sada na akciji.'
+    : priceDropped
+      ? 'Redovna cena proizvoda koji pratite je sada niža.'
+      : 'Redovna cena proizvoda koji pratite je upravo ažurirana.';
+  const priceLabel = saleStarted
+    ? 'AKCIJSKA CENA'
+    : priceDropped
+      ? 'NOVA, NIŽA REDOVNA CENA'
+      : 'NOVA REDOVNA CENA';
+  const buttonLabel = saleStarted
+    ? 'Pogledajte akcijsku cenu →'
+    : priceDropped
+      ? 'Pogledajte novu cenu →'
+      : 'Pogledajte proizvod →';
+  const headline = saleStarted
+    ? 'Akcija je počela.'
+    : priceDropped
+      ? 'Cena je sada niža.'
+      : 'Cena je ažurirana.';
   const savingsBlock = input.savings
-    ? '<p class="price-savings" style="margin:14px 0 0;color:#166534;font-size:13px;font-weight:800;letter-spacing:0.02em">UŠTEDA ' +
+    ? '<table class="price-savings" role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0 0"><tr><td bgcolor="#facc15" style="padding:7px 10px;background-color:#facc15;border-radius:3px">' +
+      '<p style="margin:0;color:#881337;font-size:12px;font-weight:800;letter-spacing:0.04em">UŠTEDA ' +
       escapeHtml(input.savings) +
-      '</p>'
+      '</p></td></tr></table>'
+    : '';
+  const urgencyBlock = priceDropped
+    ? '<table class="price-drop-badge" role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 16px"><tr><td bgcolor="#facc15" style="padding:7px 10px;background-color:#facc15;border-radius:3px">' +
+      '<p style="margin:0;color:#9f1239;font-size:11px;font-weight:800;letter-spacing:0.1em">' +
+      (saleStarted ? 'AKCIJA JE POČELA' : 'CENA JE PALA') +
+      '</p></td></tr></table>'
+    : '';
+  const salePeriodBlock = saleStarted && input.saleValidFrom && input.saleValidUntil
+    ? '<table class="sale-period" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#881337" style="width:100%;margin:20px 0 0;background-color:#881337"><tr><td bgcolor="#881337" style="padding:16px 18px;background-color:#881337">' +
+      '<p style="margin:0 0 8px;color:#facc15;font-size:11px;font-weight:800;letter-spacing:0.1em">TRAJANJE AKCIJE</p>' +
+      '<p style="margin:0;color:#ffffff;font-size:14px;line-height:1.55;font-weight:700">Od ' +
+      escapeHtml(formatSaleDate(input.saleValidFrom)) +
+      '<br>Do ' +
+      escapeHtml(formatSaleDate(input.saleValidUntil)) +
+      '</p></td></tr></table>'
     : '';
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.price-shell{width:100% !important}.price-outer{padding:0 !important}.price-header{padding:24px 20px !important}.price-content{padding:28px 20px !important}.price-footer{padding:20px !important}.price-product-media,.price-product-info{display:block !important;width:auto !important}.price-product-media{padding:20px 20px 0 !important}.price-product-info{padding:18px 20px 24px !important}.price-product-image{width:100% !important;height:220px !important}.price-button{display:block !important;text-align:center !important}.price-link{word-break:break-all !important}}@media (prefers-color-scheme:dark){.price-body,.price-page,.price-outer,.price-shell,.price-header,.price-footer{background:#2c2c2e !important}.price-header,.price-footer,.price-product-card{border-color:#48484a !important}.price-content h1,.price-content h2,.price-content p,.price-content td,.price-content a,.price-brand,.price-product-name,.price-current,.price-price-label{color:#fafafa !important}.price-copy,.price-footer,.price-eyebrow,.price-product-copy,.price-old,.price-link{color:#c7c7cc !important}.price-product-card,.price-product-card td,.price-image-frame,.price-image-frame td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.price-product-card{border-color:#48484a !important}.price-savings{color:#86efac !important}.price-button-cell{background-color:#fafafa !important}.price-button{color:#2c2c2e !important}}</style>' +
-    '</head><body class="price-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.price-shell{width:100% !important}.price-outer{padding:0 !important}.price-header{padding:24px 20px !important}.price-content{padding:28px 20px !important}.price-footer{padding:20px !important}.price-product-media,.price-product-info{display:block !important;width:auto !important}.price-product-media{padding:20px 20px 0 !important}.price-product-info{padding:18px 20px 24px !important}.price-product-image{width:100% !important;height:220px !important}.price-button{display:block !important;text-align:center !important}.price-link{word-break:break-all !important}}@media (prefers-color-scheme:dark){.price-body,.price-page,.price-outer{background:#27272a !important}.price-shell{background:#2c2c2e !important}.price-header{background:#9f1239 !important;border-color:#facc15 !important}.price-footer{background:#3a3a3c !important;border-color:#48484a !important}.price-product-card{border-color:#fb7185 !important}.price-content h1,.price-content h2,.price-content p,.price-content td,.price-content a,.price-brand,.price-product-name,.price-current,.price-price-label{color:#fafafa !important}.price-copy,.price-footer,.price-eyebrow,.price-product-copy,.price-old,.price-link{color:#fecdd3 !important}.price-product-card,.price-product-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.price-product-media,.price-image-frame,.price-image-frame td{background-color:#4c1d2f !important;background-image:linear-gradient(#4c1d2f,#4c1d2f) !important}.price-savings td,.price-drop-badge td{background-color:#facc15 !important}.sale-period,.sale-period td{background-color:#881337 !important;background-image:linear-gradient(#881337,#881337) !important}.price-button-cell{background-color:#e11d48 !important}.price-button{color:#ffffff !important}}</style>' +
+    '</head><body class="price-body" style="margin:0;padding:0;background:#fff7ed;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">' +
     priceMessage +
-    '</div><table class="price-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="price-outer" align="center" style="padding:32px 16px">' +
+    '</div><table class="price-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#fff7ed"><tr><td class="price-outer" align="center" style="padding:32px 16px">' +
     '<table class="price-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
-    '<tr><td class="price-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
-    '<p class="price-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
-    '<p class="price-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">OBAVEŠTENJE O CENI</p>' +
+    '<tr><td class="price-header" bgcolor="#e11d48" style="padding:28px 44px;background-color:#e11d48;border-bottom:6px solid #facc15">' +
+    '<p class="price-brand" style="margin:0;color:#ffffff;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
+    '<p class="price-eyebrow" style="margin:8px 0 0;color:#fef3c7;font-size:12px;font-weight:800;letter-spacing:0.08em">OBAVEŠTENJE O CENI</p>' +
     '</td></tr><tr><td class="price-content" style="padding:38px 44px">' +
-    '<h1 style="margin:0 0 12px;color:#18181b;font-size:28px;line-height:1.2;font-weight:700">' +
-    (input.priceDropped ? 'Cena je sada niža.' : 'Cena je ažurirana.') +
-    '</h1><p class="price-copy" style="margin:0 0 28px;color:#52525b;font-size:16px;line-height:1.6">' +
+    urgencyBlock +
+    '<h1 style="margin:0 0 12px;color:#9f1239;font-size:30px;line-height:1.16;font-weight:800">' +
+    headline +
+    '</h1><p class="price-copy" style="margin:0 0 28px;color:#6b2132;font-size:16px;line-height:1.6">' +
     priceMessage +
     '</p>' +
-    '<table class="price-product-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5;border:1px solid #e4e4e7"><tr>' +
-    '<td class="price-product-media" width="196" valign="top" bgcolor="#f4f4f5" style="width:196px;padding:20px 0 20px 20px;background-color:#f4f4f5">' +
+    '<table class="price-product-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fff7ed" style="width:100%;border-collapse:collapse;background-color:#fff7ed;border:2px solid #fb7185"><tr>' +
+    '<td class="price-product-media" width="196" valign="top" bgcolor="#fef3c7" style="width:196px;padding:20px 0 20px 20px;background-color:#fef3c7">' +
     productAlertImageHtml(input.imageUrl, input.productName) +
-    '</td><td class="price-product-info" valign="middle" bgcolor="#f4f4f5" style="padding:22px 24px 22px 22px;background-color:#f4f4f5">' +
-    '<p class="price-price-label" style="margin:0 0 8px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase">' +
+    '</td><td class="price-product-info" valign="middle" bgcolor="#fff7ed" style="padding:22px 24px 22px 22px;background-color:#fff7ed">' +
+    '<p class="price-price-label" style="margin:0 0 8px;color:#be123c;font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase">' +
     priceLabel +
-    '</p><h2 class="price-product-name" style="margin:0 0 17px;color:#18181b;font-size:18px;line-height:1.35;font-weight:700">' +
+    '</p><h2 class="price-product-name" style="margin:0 0 17px;color:#18181b;font-size:19px;line-height:1.35;font-weight:800">' +
     productName +
     '</h2><p class="price-old" style="margin:0 0 4px;color:#71717a;font-size:14px;line-height:1.4;text-decoration:line-through">' +
     escapeHtml(input.previousPrice) +
-    '</p><p class="price-current" style="margin:0;color:#18181b;font-size:28px;line-height:1.2;font-weight:800">' +
+    '</p><p class="price-current" style="margin:0;color:#be123c;font-size:32px;line-height:1.15;font-weight:800">' +
     escapeHtml(input.currentPrice) +
     '</p>' +
     savingsBlock +
     '</td></tr></table>' +
-    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:28px 0 0"><tr><td class="price-button-cell" align="center" bgcolor="#18181b" style="background-color:#18181b"><a class="price-button" href="' +
+    salePeriodBlock +
+    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:30px 0 0"><tr><td class="price-button-cell" align="center" bgcolor="#e11d48" style="background-color:#e11d48;border-radius:4px"><a class="price-button" href="' +
     url +
-    '" style="display:inline-block;padding:14px 22px;color:#ffffff;font-size:14px;font-weight:700;line-height:1.2;text-decoration:none">' +
+    '" style="display:inline-block;padding:15px 24px;color:#ffffff;font-size:15px;font-weight:800;line-height:1.2;text-decoration:none">' +
     buttonLabel +
     '</a></td></tr></table>' +
-    '<p class="price-product-copy" style="margin:20px 0 0;color:#52525b;font-size:14px;line-height:1.65">Otvorite proizvod da proverite trenutnu dostupnost i detalje modela.</p>' +
-    '<p class="price-link" style="margin:20px 0 0;color:#71717a;font-size:12px;line-height:1.6">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br><a href="' +
+    '<p class="price-product-copy" style="margin:20px 0 0;color:#6b2132;font-size:14px;line-height:1.65">Otvorite proizvod da proverite trenutnu dostupnost i detalje modela.</p>' +
+    '<p class="price-link" style="margin:20px 0 0;color:#8b5e4a;font-size:12px;line-height:1.6">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br><a href="' +
     url +
-    '" style="color:#52525b;text-decoration:underline;word-break:break-all">' +
+    '" style="color:#9f1239;text-decoration:underline;word-break:break-all">' +
     url +
     '</a></p>' +
-    '</td></tr><tr><td class="price-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.55">' +
+    '</td></tr><tr><td class="price-footer" bgcolor="#fff1f2" style="padding:20px 44px;background-color:#fff1f2;border-top:1px solid #fecdd3;color:#8b5e4a;font-size:12px;line-height:1.55">' +
     'Ovu poruku ste dobili jer ste zatražili obaveštenje o ceni. <a href="' +
     unsubscribeUrl +
-    '" style="color:#52525b;text-decoration:underline">Odjavite se jednim klikom</a>.<br>DajaShop' +
+    '" style="color:#9f1239;text-decoration:underline">Odjavite se jednim klikom</a>.<br>DajaShop' +
     '</td></tr></table></td></tr></table></body></html>'
   );
+}
+
+function priceAlertSubject(kind: PriceAlertEventKind, productName: string): string {
+  if (kind === 'sale_started') return `Akcija je počela: ${productName} | DajaShop`;
+  if (kind === 'regular_price_drop') return `Cena je niža: ${productName} | DajaShop`;
+  return `Nova redovna cena: ${productName} | DajaShop`;
+}
+
+function priceAlertHeading(kind: PriceAlertEventKind, productName: string): string {
+  if (kind === 'sale_started') return `Akcija za ${productName} je počela.`;
+  if (kind === 'regular_price_drop') return `Redovna cena za ${productName} je sada niža.`;
+  return `Redovna cena za ${productName} je promenjena.`;
+}
+
+function formatSaleDate(value: Date): string {
+  return new Intl.DateTimeFormat('sr-RS', {
+    timeZone: 'Europe/Belgrade',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(value);
 }
 
 function productAlertImageHtml(imageUrl: string | null, productName: string): string {
@@ -453,7 +614,7 @@ function productAlertImageHtml(imageUrl: string | null, productName: string): st
       escapeHtml(productName) +
       '" width="176" height="176" style="display:block;width:176px;height:176px;border:0;object-fit:contain" />';
   }
-  return '<table class="price-image-frame" role="presentation" width="176" height="176" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:176px;height:176px;background-color:#ffffff"><tr><td align="center" valign="middle" bgcolor="#ffffff" style="background-color:#ffffff;color:#71717a;font-size:13px;font-weight:800;letter-spacing:0.12em">DAJASHOP</td></tr></table>';
+  return '<table class="price-image-frame" role="presentation" width="176" height="176" cellspacing="0" cellpadding="0" border="0" bgcolor="#fff7ed" style="width:176px;height:176px;background-color:#fff7ed"><tr><td align="center" valign="middle" bgcolor="#fff7ed" style="background-color:#fff7ed;color:#be123c;font-size:13px;font-weight:800;letter-spacing:0.12em">DAJASHOP</td></tr></table>';
 }
 
 function productName(alert: ProductAlertNotification): string {

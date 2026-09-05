@@ -112,6 +112,23 @@ export interface ProductAlertNotification {
   previousPriceAmount: number | null;
 }
 
+export interface DueSalePriceAlert {
+  organizationId: string;
+  variantId: string;
+  regularPriceAmount: number;
+  salePriceAmount: number;
+  currency: string;
+  validFrom: Date;
+  validUntil: Date;
+}
+
+export interface DueRegularPriceAlert {
+  organizationId: string;
+  variantId: string;
+  previousPriceAmount: number;
+  currentPriceAmount: number;
+}
+
 export class StorefrontRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
 
@@ -1471,6 +1488,78 @@ export class StorefrontRepository {
     return result.rows.map(mapProductAlertNotification);
   }
 
+  async claimDueSalePriceAlerts(): Promise<DueSalePriceAlert[]> {
+    const result = await this.client.query<DueSalePriceAlertRow>(
+      `WITH due_sales AS (
+         SELECT sale.id AS sale_price_id,
+                sale.organization_id,
+                sale.variant_id,
+                variant.current_price_amount AS regular_price_amount,
+                sale.amount_minor AS sale_price_amount,
+                sale.currency,
+                sale.valid_from,
+                sale.valid_until
+         FROM variant_prices sale
+         JOIN product_variants variant
+           ON variant.id = sale.variant_id
+          AND variant.organization_id = sale.organization_id
+         JOIN products product
+           ON product.id = variant.product_id
+          AND product.organization_id = variant.organization_id
+         WHERE sale.price_type = 'sale'
+           AND sale.valid_from <= now()
+           AND sale.valid_until > now()
+           AND sale.amount_minor < variant.current_price_amount
+           AND variant.deleted_at IS NULL
+           AND variant.active
+           AND variant.published
+           AND product.deleted_at IS NULL
+           AND product.active
+           AND product.published
+       ), claimed_events AS (
+         INSERT INTO product_sale_price_alert_events (variant_price_id, event_type)
+         SELECT sale_price_id, 'sale_started'
+         FROM due_sales
+         ON CONFLICT (variant_price_id, event_type) DO NOTHING
+         RETURNING variant_price_id
+       )
+       SELECT due_sales.organization_id,
+              due_sales.variant_id,
+              due_sales.regular_price_amount,
+              due_sales.sale_price_amount,
+              due_sales.currency,
+              due_sales.valid_from,
+              due_sales.valid_until
+       FROM due_sales
+       JOIN claimed_events ON claimed_events.variant_price_id = due_sales.sale_price_id`,
+      []
+    );
+    return result.rows.map(mapDueSalePriceAlert);
+  }
+
+  async claimDueRegularPriceAlerts(): Promise<DueRegularPriceAlert[]> {
+    const result = await this.client.query<DueRegularPriceAlertRow>(
+      `WITH due_events AS (
+         SELECT id
+         FROM product_regular_price_alert_events
+         WHERE sent_at IS NULL
+         ORDER BY created_at, id
+         FOR UPDATE SKIP LOCKED
+         LIMIT 100
+       )
+       UPDATE product_regular_price_alert_events event
+       SET sent_at = now()
+       FROM due_events
+       WHERE event.id = due_events.id
+       RETURNING event.organization_id,
+                 event.variant_id,
+                 event.previous_price_amount,
+                 event.current_price_amount`,
+      []
+    );
+    return result.rows.map(mapDueRegularPriceAlert);
+  }
+
   async subscribeNewsletter(input: {
     organizationId: string;
     email: string;
@@ -1695,6 +1784,23 @@ interface ProductAlertNotificationRow {
   previous_price_amount: number | null;
 }
 
+interface DueSalePriceAlertRow {
+  organization_id: string;
+  variant_id: string;
+  regular_price_amount: number;
+  sale_price_amount: number;
+  currency: string;
+  valid_from: Date;
+  valid_until: Date;
+}
+
+interface DueRegularPriceAlertRow {
+  organization_id: string;
+  variant_id: string;
+  previous_price_amount: number;
+  current_price_amount: number;
+}
+
 function mapCustomerPrincipal(
   row: CustomerRow,
   sessionFamilyId: string,
@@ -1808,6 +1914,27 @@ function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductA
     currency: row.currency,
     currentPriceAmount: row.current_price_amount,
     previousPriceAmount: row.previous_price_amount
+  };
+}
+
+function mapDueSalePriceAlert(row: DueSalePriceAlertRow): DueSalePriceAlert {
+  return {
+    organizationId: row.organization_id,
+    variantId: row.variant_id,
+    regularPriceAmount: row.regular_price_amount,
+    salePriceAmount: row.sale_price_amount,
+    currency: row.currency,
+    validFrom: row.valid_from,
+    validUntil: row.valid_until
+  };
+}
+
+function mapDueRegularPriceAlert(row: DueRegularPriceAlertRow): DueRegularPriceAlert {
+  return {
+    organizationId: row.organization_id,
+    variantId: row.variant_id,
+    previousPriceAmount: row.previous_price_amount,
+    currentPriceAmount: row.current_price_amount
   };
 }
 
