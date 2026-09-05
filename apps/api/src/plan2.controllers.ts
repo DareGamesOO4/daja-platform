@@ -1176,31 +1176,19 @@ export class StaffCatalogController {
     const variant = await catalog.getVariant(ctx, variantId);
     const product = await catalog.getProduct(ctx, variant.productId);
 
-    // A new sale must never compete with an older active or scheduled price.
-    // Remove the whole current sale set, including a sale that has already
-    // started and one scheduled for a future date.  Historical, expired sales
-    // stay intact.
-    const deleted = await new TransactionManager(this.database.pool, this.logger).run(
-      async (client) =>
-        client.query<{ id: string }>(
-          `WITH current_sales AS (
-             SELECT id
-             FROM variant_prices
-             WHERE organization_id = $1
-               AND variant_id = $2
-               AND price_type = 'sale'
-               AND (valid_until IS NULL OR valid_until > now())
-           ), removed_alert_events AS (
-             DELETE FROM product_sale_price_alert_events event
-             USING current_sales sale
-             WHERE event.variant_price_id = sale.id
-           )
-           DELETE FROM variant_prices price
-           USING current_sales sale
-           WHERE price.id = sale.id
-           RETURNING price.id`,
-          [ctx.organizationId, variantId]
-        )
+    // Ending a sale immediately removes it from every storefront price query,
+    // while retaining its history and any already-sent alert audit record.
+    // This avoids foreign-key failures from a hard delete and also cancels a
+    // scheduled sale before it can become active.
+    const cancelled = await this.database.pool.query<{ id: string }>(
+      `UPDATE variant_prices
+       SET valid_until = now()
+       WHERE organization_id = $1
+         AND variant_id = $2
+         AND price_type = 'sale'
+         AND (valid_until IS NULL OR valid_until > now())
+       RETURNING id`,
+      [ctx.organizationId, variantId]
     );
 
     await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
@@ -1213,7 +1201,7 @@ export class StaffCatalogController {
       variantId
     );
     await this.invalidateCatalog(ctx.organizationId, product.slug);
-    return { deleted: deleted.rowCount ?? 0 };
+    return { deleted: cancelled.rowCount ?? 0 };
   }
 
   @Get('admin/products/:id/reviews')

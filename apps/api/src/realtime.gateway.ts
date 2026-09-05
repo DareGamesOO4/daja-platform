@@ -45,10 +45,7 @@ const allowedEvents: RealtimeEvent[] = [
 
 @WebSocketGateway({
   namespace: '/realtime',
-  // The storefront and API are deployed on different Render origins.  Socket.IO
-  // polling therefore needs an explicit cross-origin response, while the
-  // gateway still authenticates every non-public room below.
-  cors: { origin: true, credentials: true }
+  cors: { origin: false }
 })
 export class RealtimeGateway {
   constructor(
