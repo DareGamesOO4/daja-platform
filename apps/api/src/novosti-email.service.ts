@@ -50,15 +50,23 @@ export class NovostiEmailService {
     resetUrl: string;
   }): Promise<void> {
     const resetUrl = escapeHtml(input.resetUrl);
-    const logoUrl = escapeHtml(
-      new URL('/images/dajashop-email-logo.png', this.config.STOREFRONT_PUBLIC_BASE_URL).toString()
-    );
+    const emailAssetUrl = (path: string) =>
+      escapeHtml(new URL(path, this.config.STOREFRONT_PUBLIC_BASE_URL).toString());
     await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
       subject: 'Promena lozinke za DajaShop nalog',
       text: `Otvorite ovaj link da postavite novu lozinku za svoj DajaShop nalog: ${input.resetUrl}\n\nLink važi 30 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku.`,
-      html: htmlPromenaLozinke({ resetUrl, logoUrl }),
+      html: htmlPromenaLozinke({
+        resetUrl,
+        logoUrl: emailAssetUrl('/images/dajashop-email-logo.png'),
+        darkLogoUrl: emailAssetUrl('/images/dajashop-email-logo-dark.png'),
+        socialIcons: {
+          facebook: emailAssetUrl('/images/email-social-facebook.png'),
+          instagram: emailAssetUrl('/images/email-social-instagram.png'),
+          tiktok: emailAssetUrl('/images/email-social-tiktok.png')
+        }
+      }),
       tag: 'promena-lozinke'
     });
   }
@@ -105,19 +113,27 @@ export class NovostiEmailService {
   }
 }
 
-function htmlPromenaLozinke(input: { resetUrl: string; logoUrl: string }): string {
-  const { resetUrl, logoUrl } = input;
+function htmlPromenaLozinke(input: {
+  resetUrl: string;
+  logoUrl: string;
+  darkLogoUrl: string;
+  socialIcons: { facebook: string; instagram: string; tiktok: string };
+}): string {
+  const { resetUrl, logoUrl, darkLogoUrl, socialIcons } = input;
   const currentYear = new Date().getFullYear();
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.reset-shell{width:100% !important}.reset-outer{padding:0 !important}.reset-header{padding:20px 20px 14px !important}.reset-content{padding:28px 20px 32px !important}.reset-footer{padding:20px !important}.reset-button{display:block !important;text-align:center !important}.reset-logo{width:124px !important;height:auto !important}}@media (prefers-color-scheme:dark){.reset-body,.reset-page,.reset-outer{background:#27272a !important}.reset-shell{background:#2c2c2e !important}.reset-header{background:#ffffff !important;border-color:#48484a !important}.reset-content h1,.reset-content p,.reset-content td,.reset-content a,.reset-security-value{color:#fafafa !important}.reset-copy,.reset-eyebrow,.reset-security-label,.reset-community-copy,.reset-footer{color:#d4d4d8 !important}.reset-security-card,.reset-security-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.reset-security-card{border-color:#48484a !important}.reset-community{border-color:#48484a !important}.reset-button-cell{background-color:#111111 !important}.reset-button{color:#ffffff !important}.reset-footer{background:#353538 !important;border-color:#48484a !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}.reset-logo-dark{display:none !important;max-height:0 !important;overflow:hidden !important}@media only screen and (max-width:640px){.reset-shell{width:100% !important}.reset-outer{padding:0 !important}.reset-header{padding:20px 20px 14px !important}.reset-content{padding:28px 20px 32px !important}.reset-footer{padding:20px !important}.reset-button{display:block !important;text-align:center !important}.reset-logo{width:124px !important;height:auto !important}}@media (prefers-color-scheme:dark){.reset-body,.reset-page,.reset-outer{background:#27272a !important}.reset-shell{background:#2c2c2e !important}.reset-header{background:#18181b !important;border-color:#48484a !important}.reset-logo-light{display:none !important;max-height:0 !important;overflow:hidden !important}.reset-logo-dark{display:block !important;max-height:none !important;overflow:visible !important}.reset-content h1,.reset-content p,.reset-content td,.reset-content a,.reset-security-value{color:#fafafa !important}.reset-copy,.reset-eyebrow,.reset-security-label,.reset-community-copy,.reset-footer{color:#d4d4d8 !important}.reset-security-card,.reset-security-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.reset-security-card{border-color:#48484a !important}.reset-community{border-color:#48484a !important}.reset-button-cell{background-color:#111111 !important}.reset-button{color:#ffffff !important}.reset-footer{background:#353538 !important;border-color:#48484a !important}}</style>' +
     '</head><body class="reset-body" style="margin:0;padding:0;background:#f7f7f8;color:#111111;font-family:Arial,Helvetica,sans-serif">' +
     '<table class="reset-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f7f7f8"><tr><td class="reset-outer" align="center" style="padding:32px 16px">' +
     '<table class="reset-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
     '<tr><td class="reset-header" align="center" bgcolor="#ffffff" style="padding:20px 44px 14px;background-color:#ffffff;border-bottom:1px solid #e5e7eb">' +
-    '<img class="reset-logo" src="' +
+    '<img class="reset-logo reset-logo-light" src="' +
     logoUrl +
     '" alt="DajaShop" width="132" height="95" style="display:block;width:132px;height:auto;border:0;margin:0 auto" />' +
+    '<img class="reset-logo reset-logo-dark" src="' +
+    darkLogoUrl +
+    '" alt="DajaShop" width="132" height="95" style="display:none;width:132px;height:auto;border:0;margin:0 auto;max-height:0;overflow:hidden" />' +
     '<p class="reset-eyebrow" style="margin:8px 0 0;color:#e30613;font-size:11px;font-weight:800;letter-spacing:0.1em">BEZBEDNOST NALOGA</p>' +
     '</td></tr><tr><td class="reset-content" align="center" style="padding:30px 44px 34px">' +
     '<h1 style="margin:0 0 10px;color:#111111;font-size:30px;line-height:1.18;font-weight:800">Postavite novu lozinku.</h1>' +
@@ -139,9 +155,15 @@ function htmlPromenaLozinke(input: { resetUrl: string; logoUrl: string }): strin
     '<p style="margin:0;color:#27272a;font-size:15px;line-height:1.45">Bezbednost vašeg DajaShop naloga nam je važna.</p>' +
     '<p class="reset-community-copy" style="margin:11px 0 8px;color:#52525b;font-size:11px;line-height:1.4">Pratite nas</p>' +
     '<table role="presentation" align="center" cellspacing="0" cellpadding="0" border="0"><tr>' +
-    '<td style="padding:0 6px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:800;line-height:22px;text-align:center;text-decoration:none">f</a></td>' +
-    '<td style="padding:0 6px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;color:#ffffff;font-family:Arial,sans-serif;font-size:14px;font-weight:800;line-height:22px;text-align:center;text-decoration:none">◎</a></td>' +
-    '<td style="padding:0 6px"><a href="https://youtube.com" aria-label="YouTube" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;font-family:Arial,sans-serif;font-size:11px;font-weight:800;line-height:22px;text-align:center;text-decoration:none;color:#ffffff">▶</a></td>' +
+    '<td style="padding:0 6px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    socialIcons.facebook +
+    '" alt="Facebook" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
+    '<td style="padding:0 6px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    socialIcons.instagram +
+    '" alt="Instagram" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
+    '<td style="padding:0 6px"><a href="https://tiktok.com" aria-label="TikTok" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    socialIcons.tiktok +
+    '" alt="TikTok" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
     '</tr></table></td></tr></table>' +
     '</td></tr><tr><td class="reset-footer" align="center" bgcolor="#fafafa" style="padding:20px 44px;background-color:#fafafa;border-top:1px solid #e5e7eb;color:#71717a;font-size:12px;line-height:1.55;text-align:center">Ovu poruku ste dobili jer je zatražena promena lozinke za vaš DajaShop nalog.<br>Ako zahtev niste poslali vi, možete slobodno zanemariti ovu poruku.<br><br>© ' +
     currentYear +
