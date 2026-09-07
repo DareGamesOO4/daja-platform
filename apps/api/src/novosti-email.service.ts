@@ -50,12 +50,15 @@ export class NovostiEmailService {
     resetUrl: string;
   }): Promise<void> {
     const resetUrl = escapeHtml(input.resetUrl);
+    const logoUrl = escapeHtml(
+      new URL('/images/dajashop-email-logo.png', this.config.STOREFRONT_PUBLIC_BASE_URL).toString()
+    );
     await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
       subject: 'Promena lozinke za DajaShop nalog',
       text: `Otvorite ovaj link da postavite novu lozinku za svoj DajaShop nalog: ${input.resetUrl}\n\nLink važi 30 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku.`,
-      html: htmlPromenaLozinke(resetUrl),
+      html: htmlPromenaLozinke({ resetUrl, logoUrl }),
       tag: 'promena-lozinke'
     });
   }
@@ -102,33 +105,44 @@ export class NovostiEmailService {
   }
 }
 
-function htmlPromenaLozinke(resetUrl: string): string {
+function htmlPromenaLozinke(input: { resetUrl: string; logoUrl: string }): string {
+  const { resetUrl, logoUrl } = input;
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.reset-shell{width:100% !important}.reset-outer{padding:0 !important}.reset-header{padding:24px 20px !important}.reset-content{padding:28px 20px !important}.reset-footer{padding:20px !important}.reset-button{display:block !important;text-align:center !important}}@media (prefers-color-scheme:dark){.reset-body,.reset-page,.reset-outer,.reset-shell,.reset-header,.reset-footer{background:#2c2c2e !important}.reset-header,.reset-footer,.reset-security-card{border-color:#48484a !important}.reset-content h1,.reset-content h2,.reset-content p,.reset-content td,.reset-content a,.reset-brand,.reset-security-value{color:#fafafa !important}.reset-copy,.reset-footer,.reset-eyebrow,.reset-security-label{color:#c7c7cc !important}.reset-security-card,.reset-security-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.reset-button-cell{background-color:#fafafa !important}.reset-button{color:#2c2c2e !important}}</style>' +
-    '</head><body class="reset-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
-    '<table class="reset-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="reset-outer" align="center" style="padding:32px 16px">' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.reset-shell{width:100% !important}.reset-outer{padding:0 !important}.reset-header{padding:20px 20px 14px !important}.reset-content{padding:28px 20px 32px !important}.reset-footer{padding:20px !important}.reset-button{display:block !important;text-align:center !important}.reset-logo{width:124px !important;height:auto !important}}@media (prefers-color-scheme:dark){.reset-body,.reset-page,.reset-outer{background:#27272a !important}.reset-shell{background:#2c2c2e !important}.reset-header{background:#ffffff !important;border-color:#48484a !important}.reset-content h1,.reset-content p,.reset-content td,.reset-content a,.reset-security-value{color:#fafafa !important}.reset-copy,.reset-eyebrow,.reset-security-label,.reset-community-copy,.reset-footer{color:#d4d4d8 !important}.reset-security-card,.reset-security-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.reset-security-card{border-color:#48484a !important}.reset-community{border-color:#48484a !important}.reset-button-cell{background-color:#e30613 !important}.reset-button{color:#ffffff !important}.reset-footer{background:#353538 !important;border-color:#48484a !important}}</style>' +
+    '</head><body class="reset-body" style="margin:0;padding:0;background:#f7f7f8;color:#111111;font-family:Arial,Helvetica,sans-serif">' +
+    '<table class="reset-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f7f7f8"><tr><td class="reset-outer" align="center" style="padding:32px 16px">' +
     '<table class="reset-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
-    '<tr><td class="reset-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
-    '<p class="reset-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
-    '<p class="reset-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">BEZBEDNOST NALOGA</p>' +
-    '</td></tr><tr><td class="reset-content" style="padding:38px 44px">' +
-    '<h1 style="margin:0 0 12px;color:#18181b;font-size:26px;line-height:1.25;font-weight:700">Promenite lozinku.</h1>' +
-    '<p class="reset-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Zatražili ste promenu lozinke za svoj DajaShop nalog. Kliknite na dugme ispod da postavite novu lozinku.</p>' +
-    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:28px 0"><tr><td class="reset-button-cell" align="center" bgcolor="#18181b" style="background-color:#18181b"><a class="reset-button" href="' +
+    '<tr><td class="reset-header" align="center" bgcolor="#ffffff" style="padding:20px 44px 14px;background-color:#ffffff;border-bottom:1px solid #e5e7eb">' +
+    '<img class="reset-logo" src="' +
+    logoUrl +
+    '" alt="DajaShop" width="132" height="95" style="display:block;width:132px;height:auto;border:0;margin:0 auto" />' +
+    '<p class="reset-eyebrow" style="margin:8px 0 0;color:#e30613;font-size:11px;font-weight:800;letter-spacing:0.1em">BEZBEDNOST NALOGA</p>' +
+    '</td></tr><tr><td class="reset-content" align="center" style="padding:30px 44px 34px">' +
+    '<h1 style="margin:0 0 10px;color:#111111;font-size:30px;line-height:1.18;font-weight:800">Postavite novu lozinku.</h1>' +
+    '<p class="reset-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Zatražili ste promenu lozinke za svoj DajaShop nalog. Kliknite na dugme ispod da bezbedno postavite novu lozinku.</p>' +
+    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:26px auto 28px"><tr><td class="reset-button-cell" align="center" bgcolor="#e30613" style="background-color:#e30613;border-radius:6px"><a class="reset-button" href="' +
     resetUrl +
-    '" style="display:inline-block;padding:13px 18px;color:#ffffff;font-size:14px;font-weight:700;line-height:1.2;text-decoration:none">Postavi novu lozinku</a></td></tr></table>' +
-    '<table class="reset-security-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5;border:1px solid #e4e4e7"><tr><td bgcolor="#f4f4f5" style="padding:16px 18px;background-color:#f4f4f5">' +
-    '<p class="reset-security-label" style="margin:0 0 5px;color:#71717a;font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase">VAŽNOST LINKA</p>' +
-    '<p class="reset-security-value" style="margin:0;color:#18181b;font-size:15px;line-height:1.45;font-weight:700">30 minuta · može da se iskoristi samo jednom</p>' +
+    '" style="display:inline-block;padding:15px 25px;color:#ffffff;font-size:14px;font-weight:800;line-height:1.2;letter-spacing:0.03em;text-decoration:none">POSTAVI NOVU LOZINKU&nbsp;&rarr;</a></td></tr></table>' +
+    '<table class="reset-security-card" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f7f8fc" style="width:100%;border-collapse:collapse;background-color:#f7f8fc;border:1px solid #edf0f4;border-radius:10px;overflow:hidden"><tr><td width="44" align="center" valign="top" bgcolor="#fdebed" style="width:44px;padding:16px 0;background-color:#fdebed;border-radius:10px 0 0 10px"><p style="margin:0;color:#e30613;font-size:19px;line-height:1;font-weight:800">!</p></td><td bgcolor="#f7f8fc" style="padding:14px 16px;background-color:#f7f8fc;text-align:left">' +
+    '<p class="reset-security-label" style="margin:0 0 4px;color:#71717a;font-size:10px;font-weight:800;letter-spacing:0.08em">VAŽNOST LINKA</p>' +
+    '<p class="reset-security-value" style="margin:0;color:#27272a;font-size:14px;line-height:1.5;font-weight:700">Link važi 30 minuta i može da se iskoristi samo jednom.</p>' +
     '</td></tr></table>' +
-    '<p class="reset-copy" style="margin:24px 0 0;color:#52525b;font-size:14px;line-height:1.65">Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku. Vaša postojeća lozinka ostaje nepromenjena.</p>' +
-    '<p class="reset-copy" style="margin:16px 0 0;color:#52525b;font-size:13px;line-height:1.6">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br><a href="' +
+    '<p class="reset-copy" style="margin:22px 0 0;color:#52525b;font-size:14px;line-height:1.65;text-align:left">Ako niste vi zatražili promenu lozinke, slobodno zanemarite ovu poruku. Vaša postojeća lozinka ostaje nepromenjena.</p>' +
+    '<p class="reset-copy" style="margin:16px 0 0;color:#52525b;font-size:13px;line-height:1.6;text-align:left">Ako dugme ne radi, kopirajte ovaj link u pregledač:<br><a href="' +
     resetUrl +
     '" style="color:#52525b;text-decoration:underline;word-break:break-all">' +
     resetUrl +
     '</a></p>' +
-    '</td></tr><tr><td class="reset-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.55">DajaShop · Automatska poruka o bezbednosti vašeg naloga</td></tr>' +
+    '<table class="reset-community" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:28px 0 0;padding-top:20px;border-top:1px solid #e5e7eb"><tr><td align="center">' +
+    '<p style="margin:0;color:#27272a;font-size:15px;line-height:1.45">Bezbednost vašeg DajaShop naloga nam je važna.</p>' +
+    '<p class="reset-community-copy" style="margin:11px 0 8px;color:#52525b;font-size:11px;line-height:1.4">Pratite nas</p>' +
+    '<table role="presentation" align="center" cellspacing="0" cellpadding="0" border="0"><tr>' +
+    '<td style="padding:0 6px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:800;line-height:22px;text-align:center;text-decoration:none">f</a></td>' +
+    '<td style="padding:0 6px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;color:#ffffff;font-family:Arial,sans-serif;font-size:14px;font-weight:800;line-height:22px;text-align:center;text-decoration:none">◎</a></td>' +
+    '<td style="padding:0 6px"><a href="https://youtube.com" aria-label="YouTube" style="display:block;width:22px;height:22px;background-color:#111111;border-radius:11px;font-family:Arial,sans-serif;font-size:11px;font-weight:800;line-height:22px;text-align:center;text-decoration:none;color:#ffffff">▶</a></td>' +
+    '</tr></table></td></tr></table>' +
+    '</td></tr><tr><td class="reset-footer" bgcolor="#fafafa" style="padding:20px 44px;background-color:#fafafa;border-top:1px solid #e5e7eb;color:#71717a;font-size:12px;line-height:1.55">Ovu poruku ste dobili jer je zatražena promena lozinke za vaš DajaShop nalog.<br>Ako zahtev niste poslali vi, možete bezbedno zanemariti ovu poruku.<br><br>© 2025 DajaShop. Sva prava zadržana.</td></tr>' +
     '</table></td></tr></table></body></html>'
   );
 }
