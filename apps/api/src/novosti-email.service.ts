@@ -62,9 +62,9 @@ export class NovostiEmailService {
         logoUrl: emailAssetUrl('/images/dajashop-email-logo.png'),
         darkLogoUrl: emailAssetUrl('/images/dajashop-email-logo-dark.png'),
         socialIcons: {
-          facebook: emailAssetUrl('/images/email-social-facebook-official.png'),
-          instagram: emailAssetUrl('/images/email-social-instagram-official.png'),
-          tiktok: emailAssetUrl('/images/email-social-tiktok-official.png')
+          facebook: emailAssetUrl('/images/email-social-facebook-circle.png'),
+          instagram: emailAssetUrl('/images/email-social-instagram-circle.png'),
+          tiktok: emailAssetUrl('/images/email-social-tiktok-circle.png')
         }
       }),
       tag: 'promena-lozinke'
