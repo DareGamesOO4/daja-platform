@@ -155,15 +155,15 @@ function htmlPromenaLozinke(input: {
     '<p style="margin:0;color:#27272a;font-size:15px;line-height:1.45">Bezbednost vašeg DajaShop naloga nam je važna.</p>' +
     '<p class="reset-community-copy" style="margin:11px 0 8px;color:#52525b;font-size:11px;line-height:1.4">Pratite nas</p>' +
     '<table role="presentation" align="center" cellspacing="0" cellpadding="0" border="0"><tr>' +
-    '<td style="padding:0 6px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    '<td style="padding:0 7px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:28px;height:28px;text-decoration:none"><img src="' +
     socialIcons.facebook +
-    '" alt="Facebook" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
-    '<td style="padding:0 6px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    '" alt="Facebook" width="28" height="28" style="display:block;width:28px;height:28px;border:0" /></a></td>' +
+    '<td style="padding:0 7px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:28px;height:28px;text-decoration:none"><img src="' +
     socialIcons.instagram +
-    '" alt="Instagram" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
-    '<td style="padding:0 6px"><a href="https://tiktok.com" aria-label="TikTok" style="display:block;width:22px;height:22px;text-decoration:none"><img src="' +
+    '" alt="Instagram" width="28" height="28" style="display:block;width:28px;height:28px;border:0" /></a></td>' +
+    '<td style="padding:0 7px"><a href="https://tiktok.com" aria-label="TikTok" style="display:block;width:28px;height:28px;text-decoration:none"><img src="' +
     socialIcons.tiktok +
-    '" alt="TikTok" width="22" height="22" style="display:block;width:22px;height:22px;border:0" /></a></td>' +
+    '" alt="TikTok" width="28" height="28" style="display:block;width:28px;height:28px;border:0" /></a></td>' +
     '</tr></table></td></tr></table>' +
     '</td></tr><tr><td class="reset-footer" align="center" bgcolor="#fafafa" style="padding:20px 44px;background-color:#fafafa;border-top:1px solid #e5e7eb;color:#71717a;font-size:12px;line-height:1.55;text-align:center">Ovu poruku ste dobili jer je zatražena promena lozinke za vaš DajaShop nalog.<br>Ako zahtev niste poslali vi, možete slobodno zanemariti ovu poruku.<br><br>© ' +
     currentYear +
