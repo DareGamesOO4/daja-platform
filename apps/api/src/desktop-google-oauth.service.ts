@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
 import { StorefrontRepository, type CustomerPrincipal, type Database } from '@daja/database';
+import { AuthRepository } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { InvalidTokenError, PermissionDeniedError, ValidationFailedError } from '@daja/security';
 import { AuthService } from './auth.service.js';
@@ -21,7 +22,11 @@ function callbackUrl(value: string): URL {
   } catch {
     throw new ValidationFailedError('Desktop callback URL is invalid');
   }
-  if (
+  const mobileCallback =
+    url.protocol === 'dajashop-rfid:' &&
+    url.hostname === 'auth' &&
+    (url.pathname === '' || url.pathname === '/');
+  if (!mobileCallback && (
     url.protocol !== 'http:' ||
     url.hostname !== '127.0.0.1' ||
     url.pathname !== '/callback' ||
@@ -30,7 +35,7 @@ function callbackUrl(value: string): URL {
     url.hash ||
     url.username ||
     url.password
-  ) {
+  )) {
     throw new ValidationFailedError('Desktop callback must be http://127.0.0.1:<port>/callback');
   }
   return url;
@@ -70,6 +75,19 @@ export class DesktopGoogleOAuthService {
       ]
     );
     return { authorizationUrl: this.customerAuth.googleAuthorizationUrl(providerState) };
+  }
+
+  async startMobile(input: { email: string; deviceId: string; state: string }) {
+    const staff = await new AuthRepository(this.database.pool).findStaffUserForLogin({
+      email: input.email
+    });
+    if (!staff || !staff.active) throw new PermissionDeniedError('auth.google');
+    return this.start({
+      organizationId: staff.organizationId,
+      deviceId: input.deviceId,
+      callbackUrl: 'dajashop-rfid://auth',
+      state: input.state
+    });
   }
 
   async isDesktopGoogleCallback(state: string | undefined): Promise<boolean> {
@@ -163,9 +181,21 @@ export class DesktopGoogleOAuthService {
         organizationId: staff.principal.organizationId,
         email: staff.principal.email,
         displayName: staff.principal.displayName,
-        roles: staff.principal.roles
+        roles: staff.principal.roles,
+        permissions: staff.principal.permissions
       }
     };
+  }
+
+  async exchangeMobile(input: { deviceId: string; grant: string }) {
+    const result = await this.database.pool.query<{ organization_id: string }>(
+      `SELECT organization_id FROM desktop_google_oauth_grants
+       WHERE grant_hash = $1 LIMIT 1`,
+      [hash(input.grant)]
+    );
+    const organizationId = result.rows[0]?.organization_id;
+    if (!organizationId) throw new InvalidTokenError();
+    return this.exchange({ organizationId, deviceId: input.deviceId, grant: input.grant });
   }
 
   private async findByState(state: string): Promise<DesktopGrantRow> {

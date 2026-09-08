@@ -8,10 +8,15 @@ import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
 const loginSchema = z.object({
-  organizationId: z.string().uuid(),
+  // Reader users sign in by their own identity; the server resolves the
+  // organization only when that email belongs to exactly one tenant.
+  organizationId: z.string().uuid().optional(),
   email: z.string().email(),
   password: z.string().min(1),
-  deviceId: z.string().uuid()
+  deviceId: z.string().uuid(),
+  // Optional so existing desktop clients keep their exact login contract.
+  deviceType: z.enum(['rfiddaja_desktop', 'rfiddaja_mobile']).optional(),
+  deviceName: z.string().trim().min(1).max(240).optional()
 });
 
 const refreshSchema = z.object({
@@ -31,6 +36,17 @@ const desktopGoogleExchangeSchema = z.object({
   grant: z.string().min(32).max(200)
 });
 
+const mobileGoogleStartSchema = z.object({
+  email: z.string().email(),
+  deviceId: z.string().uuid(),
+  state: z.string().min(32).max(200)
+});
+
+const mobileGoogleExchangeSchema = z.object({
+  deviceId: z.string().uuid(),
+  grant: z.string().min(32).max(200)
+});
+
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -46,6 +62,16 @@ export class AuthController {
   @Post('desktop/google/exchange')
   desktopGoogleExchange(@Body() body: unknown) {
     return this.desktopGoogle.exchange(parseBody(desktopGoogleExchangeSchema, body));
+  }
+
+  @Post('mobile/google/start')
+  mobileGoogleStart(@Body() body: unknown) {
+    return this.desktopGoogle.startMobile(parseBody(mobileGoogleStartSchema, body));
+  }
+
+  @Post('mobile/google/exchange')
+  mobileGoogleExchange(@Body() body: unknown) {
+    return this.desktopGoogle.exchangeMobile(parseBody(mobileGoogleExchangeSchema, body));
   }
 
   @Post('login')

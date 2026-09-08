@@ -44,10 +44,12 @@ export class AuthService {
   ) {}
 
   async login(input: {
-    organizationId: string;
+    organizationId?: string | undefined;
     email: string;
     password: string;
     deviceId: string;
+    deviceType?: 'rfiddaja_desktop' | 'rfiddaja_mobile' | undefined;
+    deviceName?: string | undefined;
     requestId?: string | undefined;
     correlationId?: string | undefined;
   }): Promise<AuthenticatedStaff> {
@@ -68,6 +70,8 @@ export class AuthService {
         organizationId: user.organizationId,
         userId: user.id,
         deviceId: input.deviceId,
+        deviceType: input.deviceType,
+        deviceName: input.deviceName,
         offlineAuthorizationExpiresAt: refreshExpiresAt
       });
       const refreshPayload = {

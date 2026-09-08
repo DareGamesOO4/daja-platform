@@ -44,15 +44,20 @@ export class AuthRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
 
   async findStaffUserForLogin(input: {
-    organizationId: string;
+    organizationId?: string | undefined;
     email: string;
   }): Promise<StaffUserForLogin | null> {
     const result = await this.client.query<StaffUserRow>(
       `SELECT id, organization_id, email, display_name, password_hash, active
        FROM users
-       WHERE organization_id = $1 AND normalized_email = lower($2)`,
-      [input.organizationId, input.email]
+       WHERE normalized_email = lower($1)
+       ${input.organizationId ? 'AND organization_id = $2' : ''}
+       LIMIT 2`,
+      input.organizationId ? [input.email, input.organizationId] : [input.email]
     );
+    // Never make an email address an organization-discovery endpoint. A user
+    // with the same email in more than one tenant must use a managed login.
+    if (!input.organizationId && result.rows.length !== 1) return null;
     const row = result.rows[0];
     if (!row || !row.password_hash) {
       return null;
@@ -71,6 +76,8 @@ export class AuthRepository {
     organizationId: string;
     userId: string;
     deviceId: string;
+    deviceType?: 'rfiddaja_desktop' | 'rfiddaja_mobile' | undefined;
+    deviceName?: string | undefined;
     offlineAuthorizationExpiresAt: Date;
   }): Promise<void> {
     try {
@@ -79,17 +86,26 @@ export class AuthRepository {
            id, organization_id, user_id, device_key, display_name, device_type,
            active, offline_authorization_expires_at, last_seen_at, metadata
          )
-         VALUES ($1::uuid, $2, $3, $1::text, 'RFIDDaja device', 'rfiddaja_desktop', true, $4, now(), '{}'::jsonb)
+         VALUES ($1::uuid, $2, $3, $1::text, $5, $6, true, $4, now(), '{}'::jsonb)
          ON CONFLICT (id)
          DO UPDATE SET
            user_id = EXCLUDED.user_id,
+           display_name = EXCLUDED.display_name,
+           device_type = EXCLUDED.device_type,
            active = true,
            revoked_at = NULL,
            deleted_at = NULL,
            offline_authorization_expires_at = EXCLUDED.offline_authorization_expires_at,
            last_seen_at = now(),
            updated_at = now()`,
-        [input.deviceId, input.organizationId, input.userId, input.offlineAuthorizationExpiresAt]
+        [
+          input.deviceId,
+          input.organizationId,
+          input.userId,
+          input.offlineAuthorizationExpiresAt,
+          input.deviceName ?? 'RFIDDaja device',
+          input.deviceType ?? 'rfiddaja_desktop'
+        ]
       );
     } catch (error) {
       if (isPgError(error, '23505')) {
