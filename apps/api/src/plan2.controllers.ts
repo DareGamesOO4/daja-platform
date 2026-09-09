@@ -840,6 +840,19 @@ export class StaffCatalogController {
         );
         const productId = variant.rows[0]?.product_id;
         if (!productId) throw new TenantAccessDeniedError();
+        // Retire the associated EPC row as well. `deleted_at` makes the EPC
+        // available for reassignment while retaining the historical record.
+        await client.query(
+          `UPDATE rfid_tags t
+           SET deleted_at = now(), status = 'retired', inventory_item_id = NULL,
+               variant_id = NULL, epc = CASE WHEN length(t.epc) % 2 = 1 THEN '0' || t.epc ELSE t.epc END,
+               version = version + 1, updated_at = now()
+           WHERE t.organization_id = $1 AND t.deleted_at IS NULL
+             AND (t.variant_id = $2
+               OR EXISTS (SELECT 1 FROM inventory_items item WHERE item.id = t.inventory_item_id
+                          AND item.organization_id = t.organization_id AND item.variant_id = $2))`,
+          [ctx.organizationId, variantId]
+        );
         await client.query(
           `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
          version = version + 1, updated_at = now()

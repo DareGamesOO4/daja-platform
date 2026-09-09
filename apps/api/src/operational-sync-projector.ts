@@ -1882,6 +1882,21 @@ export class OperationalSyncProjector {
     if (!row) throw new ValidationFailedError('Desktop item does not exist on Platform');
     if (command.kind === 'item.delete') {
       await this.removeProductMedia(ctx.organizationId, row.product_id);
+      // A deleted article must not leave a live EPC behind. Soft-deleting the
+      // tag preserves audit history and frees the partial EPC uniqueness index
+      // so the physical tag can be registered again on a new article.
+      await this.client.query(
+        `UPDATE rfid_tags t
+         SET deleted_at = now(), status = 'retired', inventory_item_id = NULL,
+             variant_id = NULL, epc = CASE WHEN length(t.epc) % 2 = 1 THEN '0' || t.epc ELSE t.epc END,
+             version = version + 1, updated_at = now()
+         WHERE t.organization_id = $1 AND t.deleted_at IS NULL
+           AND (t.variant_id IN (SELECT id FROM product_variants WHERE organization_id = $1 AND product_id = $2)
+             OR EXISTS (SELECT 1 FROM inventory_items item WHERE item.id = t.inventory_item_id
+                        AND item.organization_id = t.organization_id AND item.variant_id IN
+                          (SELECT id FROM product_variants WHERE organization_id = $1 AND product_id = $2)))`,
+        [ctx.organizationId, row.product_id]
+      );
       await this.client.query(
         `UPDATE product_variants SET deleted_at = now(), active = false, published = false,
          version = version + 1, updated_at = now()
@@ -2366,7 +2381,9 @@ export class OperationalSyncProjector {
          ORDER BY t.updated_at DESC
          LIMIT 1
        ) tag ON true
-       WHERE p.organization_id = $1 AND p.id = $2 AND v.id = $3`,
+       WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active
+         AND v.deleted_at IS NULL AND v.active
+         AND p.id = $2 AND v.id = $3`,
       [organizationId, productId, variantId]
     );
     return { kind: 'catalog.item', record: result.rows[0] ?? { productId, variantId } };
