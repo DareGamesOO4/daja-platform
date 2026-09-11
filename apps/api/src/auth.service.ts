@@ -14,6 +14,8 @@ import {
   InvalidCredentialsError,
   InvalidTokenError,
   PermissionDeniedError,
+  ResourceConflictError,
+  ResourceNotFoundError,
   sha256Hex,
   signJwt,
   verifyJwt
@@ -167,13 +169,19 @@ export class AuthService {
     return user ? { recognized: true, displayName: user.display_name } : { recognized: false };
   }
 
-  async bindNfcCard(input: { organizationId: string; actorUserId?: string | undefined; deviceId?: string | undefined; userId: string; cardId: string; pin: string }): Promise<void> {
+  async bindNfcCard(input: { organizationId: string; actorUserId?: string | undefined; deviceId?: string | undefined; userEmail: string; cardId: string; pin: string }): Promise<void> {
     const pinHash = await hash(input.pin, { type: argon2id });
     await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const user = await client.query(`SELECT 1 FROM users WHERE id = $1 AND organization_id = $2 AND active FOR UPDATE`, [input.userId, input.organizationId]);
-      if (user.rowCount !== 1) throw new InvalidCredentialsError();
+      const user = await client.query<{ id: string }>(
+        `SELECT id FROM users WHERE lower(email) = lower($1) AND organization_id = $2 AND active FOR UPDATE`,
+        [input.userEmail, input.organizationId]
+      );
+      if (user.rowCount !== 1) throw new ResourceNotFoundError('aktivan korisnik sa tom e-adresom');
+      const userId = user.rows[0]!.id;
       const occupied = await client.query(`SELECT id, user_id FROM staff_nfc_cards WHERE card_id = $1 FOR UPDATE`, [input.cardId]);
-      if (occupied.rowCount && occupied.rows[0]?.user_id !== input.userId) throw new InvalidCredentialsError();
+      if (occupied.rowCount && occupied.rows[0]?.user_id !== userId) {
+        throw new ResourceConflictError('Kartica je već povezana sa drugim korisnikom.');
+      }
       if (occupied.rowCount) {
         await client.query(
           `UPDATE staff_nfc_cards
@@ -184,8 +192,8 @@ export class AuthService {
         );
         return;
       }
-      await client.query(`UPDATE staff_nfc_cards SET active = false, revoked_at = now(), updated_at = now() WHERE organization_id = $1 AND user_id = $2 AND active AND revoked_at IS NULL`, [input.organizationId, input.userId]);
-      await client.query(`INSERT INTO staff_nfc_cards (organization_id, user_id, card_id, pin_hash) VALUES ($1, $2, $3, $4)`, [input.organizationId, input.userId, input.cardId, pinHash]);
+      await client.query(`UPDATE staff_nfc_cards SET active = false, revoked_at = now(), updated_at = now() WHERE organization_id = $1 AND user_id = $2 AND active AND revoked_at IS NULL`, [input.organizationId, userId]);
+      await client.query(`INSERT INTO staff_nfc_cards (organization_id, user_id, card_id, pin_hash) VALUES ($1, $2, $3, $4)`, [input.organizationId, userId, input.cardId, pinHash]);
     });
   }
 

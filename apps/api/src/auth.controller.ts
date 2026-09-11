@@ -46,7 +46,7 @@ const nfcCardLoginSchema = z.object({
   deviceName: z.string().trim().min(1).max(240).optional()
 });
 const nfcCardBindSchema = z.object({
-  userId: z.string().uuid(),
+  userEmail: z.string().trim().email(),
   cardId: nfcCardIdSchema,
   pin: z.string().regex(/^\d{4}$/)
 });
