@@ -81,8 +81,24 @@ export class DesktopGoogleOAuthService {
     const staff = input.email
       ? await new AuthRepository(this.database.pool).findStaffUserForLogin({ email: input.email })
       : undefined;
-    const organizationId = staff?.organizationId ?? this.config.PUBLIC_ORGANIZATION_ID;
-    if (!organizationId || (input.email && !staff?.active)) throw new PermissionDeniedError('auth.google');
+    if (input.email && !staff?.active) throw new PermissionDeniedError('auth.google');
+    let organizationId = staff?.organizationId;
+    if (!organizationId && this.config.PUBLIC_ORGANIZATION_ID) {
+      const configured = await this.database.pool.query<{ id: string }>(
+        `SELECT id FROM organizations WHERE id = $1 LIMIT 1`,
+        [this.config.PUBLIC_ORGANIZATION_ID]
+      );
+      organizationId = configured.rows[0]?.id;
+    }
+    if (!organizationId) {
+      const organizations = await this.database.pool.query<{ id: string }>(
+        `SELECT id FROM organizations ORDER BY created_at LIMIT 2`
+      );
+      if (organizations.rowCount === 1) organizationId = organizations.rows[0]!.id;
+    }
+    if (!organizationId) {
+      throw new ValidationFailedError('Google prijava nije podešena za ovu organizaciju.');
+    }
     return this.start({
       organizationId,
       deviceId: input.deviceId,
