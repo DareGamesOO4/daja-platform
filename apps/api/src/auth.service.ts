@@ -117,6 +117,78 @@ export class AuthService {
     });
   }
 
+  async loginWithNfcCard(input: {
+    cardId: string;
+    pin: string;
+    deviceId: string;
+    deviceType?: 'rfiddaja_desktop' | 'rfiddaja_mobile' | undefined;
+    deviceName?: string | undefined;
+  }): Promise<AuthenticatedStaff> {
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const cardResult = await client.query<{
+        id: string; organization_id: string; user_id: string; pin_hash: string; locked_until: Date | null;
+        failed_pin_attempts: number; active: boolean; user_active: boolean;
+      }>(`SELECT c.id, c.organization_id, c.user_id, c.pin_hash, c.locked_until,
+                 c.failed_pin_attempts, c.active, u.active AS user_active
+          FROM staff_nfc_cards c JOIN users u ON u.id = c.user_id AND u.organization_id = c.organization_id
+          WHERE c.card_id = $1 AND c.active AND c.revoked_at IS NULL FOR UPDATE`, [input.cardId]);
+      const card = cardResult.rows[0];
+      if (!card || !card.user_active || (card.locked_until && card.locked_until > new Date())) {
+        throw new InvalidCredentialsError();
+      }
+      if (!(await verify(card.pin_hash, input.pin))) {
+        const attempts = card.failed_pin_attempts + 1;
+        await client.query(
+          `UPDATE staff_nfc_cards SET failed_pin_attempts = $2,
+             locked_until = CASE WHEN $2 >= 5 THEN now() + interval '15 minutes' ELSE NULL END,
+             updated_at = now() WHERE id = $1`, [card.id, attempts]);
+        throw new InvalidCredentialsError();
+      }
+      await client.query(`UPDATE staff_nfc_cards SET failed_pin_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = $1`, [card.id]);
+      const repo = new AuthRepository(client);
+      const familyId = randomUUID();
+      const refreshJti = randomUUID();
+      const refreshExpiresAt = expiresAt(this.config.REFRESH_TOKEN_TTL_SECONDS);
+      await repo.ensureLoginDevice({ organizationId: card.organization_id, userId: card.user_id, deviceId: input.deviceId, deviceType: input.deviceType, deviceName: input.deviceName, offlineAuthorizationExpiresAt: refreshExpiresAt });
+      const refreshToken = signJwt({ typ: 'refresh' as const, sub: card.user_id, org: card.organization_id, fam: familyId, jti: refreshJti, dev: input.deviceId }, this.config.JWT_REFRESH_SECRET, this.config.REFRESH_TOKEN_TTL_SECONDS);
+      const session = await repo.createSession({ organizationId: card.organization_id, userId: card.user_id, deviceId: input.deviceId, familyId, refreshJti, refreshTokenHash: sha256Hex(refreshToken), expiresAt: refreshExpiresAt });
+      const principal = await repo.buildPrincipal({ organizationId: card.organization_id, userId: card.user_id, deviceId: input.deviceId, sessionFamilyId: familyId, sessionId: session.id });
+      await repo.auditAuthEvent({ organizationId: card.organization_id, userId: card.user_id, deviceId: input.deviceId, sessionId: session.id, operation: 'auth.nfc_card_login', requestId: createRequestId(), correlationId: createRequestId(), payload: { cardId: input.cardId } });
+      return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
+    });
+  }
+
+  async identifyNfcCard(input: { cardId: string }): Promise<{ recognized: boolean; displayName?: string }> {
+    const result = await this.database.pool.query<{ display_name: string }>(
+      `SELECT u.display_name FROM staff_nfc_cards c JOIN users u ON u.id = c.user_id
+       WHERE c.card_id = $1 AND c.active AND c.revoked_at IS NULL AND u.active LIMIT 1`, [input.cardId]
+    );
+    const user = result.rows[0];
+    return user ? { recognized: true, displayName: user.display_name } : { recognized: false };
+  }
+
+  async bindNfcCard(input: { organizationId: string; actorUserId?: string | undefined; deviceId?: string | undefined; userId: string; cardId: string; pin: string }): Promise<void> {
+    const pinHash = await hash(input.pin, { type: argon2id });
+    await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const user = await client.query(`SELECT 1 FROM users WHERE id = $1 AND organization_id = $2 AND active FOR UPDATE`, [input.userId, input.organizationId]);
+      if (user.rowCount !== 1) throw new InvalidCredentialsError();
+      const occupied = await client.query(`SELECT id, user_id FROM staff_nfc_cards WHERE card_id = $1 FOR UPDATE`, [input.cardId]);
+      if (occupied.rowCount && occupied.rows[0]?.user_id !== input.userId) throw new InvalidCredentialsError();
+      if (occupied.rowCount) {
+        await client.query(
+          `UPDATE staff_nfc_cards
+           SET active = true, revoked_at = NULL, pin_hash = $2, failed_pin_attempts = 0,
+               locked_until = NULL, updated_at = now()
+           WHERE id = $1`,
+          [occupied.rows[0]!.id, pinHash]
+        );
+        return;
+      }
+      await client.query(`UPDATE staff_nfc_cards SET active = false, revoked_at = now(), updated_at = now() WHERE organization_id = $1 AND user_id = $2 AND active AND revoked_at IS NULL`, [input.organizationId, input.userId]);
+      await client.query(`INSERT INTO staff_nfc_cards (organization_id, user_id, card_id, pin_hash) VALUES ($1, $2, $3, $4)`, [input.organizationId, input.userId, input.cardId, pinHash]);
+    });
+  }
+
   /**
    * Exchanges an already authenticated storefront customer for a staff session.
    * The email is checked against a server-side allowlist before a staff user is

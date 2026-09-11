@@ -2,6 +2,7 @@ import { Body, Controller, Get, Headers, Inject, Post, Req } from '@nestjs/commo
 import type { Request } from 'express';
 import { z } from 'zod';
 import { AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
+import { requirePermission } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
@@ -35,6 +36,21 @@ const desktopGoogleExchangeSchema = z.object({
   deviceId: z.string().uuid(),
   grant: z.string().min(32).max(200)
 });
+
+const nfcCardIdSchema = z.string().regex(/^daja_[0-9a-f]{32}$/);
+const nfcCardLoginSchema = z.object({
+  cardId: nfcCardIdSchema,
+  pin: z.string().regex(/^\d{4}$/),
+  deviceId: z.string().uuid(),
+  deviceType: z.enum(['rfiddaja_desktop', 'rfiddaja_mobile']).optional(),
+  deviceName: z.string().trim().min(1).max(240).optional()
+});
+const nfcCardBindSchema = z.object({
+  userId: z.string().uuid(),
+  cardId: nfcCardIdSchema,
+  pin: z.string().regex(/^\d{4}$/)
+});
+const nfcCardIdentifySchema = z.object({ cardId: nfcCardIdSchema });
 
 const mobileGoogleStartSchema = z.object({
   email: z.string().email(),
@@ -86,6 +102,30 @@ export class AuthController {
       ...result.tokens,
       user: serializePrincipal(result.principal)
     };
+  }
+
+  @Post('card/login')
+  async loginWithCard(@Body() body: unknown) {
+    const result = await this.authService.loginWithNfcCard(parseBody(nfcCardLoginSchema, body));
+    return { ...result.tokens, user: serializePrincipal(result.principal) };
+  }
+
+  @Post('card/identify')
+  async identifyCard(@Body() body: unknown) {
+    return this.authService.identifyNfcCard(parseBody(nfcCardIdentifySchema, body));
+  }
+
+  @Post('cards/bind')
+  async bindCard(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'admin.users');
+    await this.authService.bindNfcCard({
+      organizationId: ctx.organizationId,
+      actorUserId: ctx.userId,
+      deviceId: ctx.deviceId,
+      ...parseBody(nfcCardBindSchema, body)
+    });
+    return { ok: true };
   }
 
   @Post('refresh')
