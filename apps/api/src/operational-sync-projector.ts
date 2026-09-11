@@ -1740,7 +1740,14 @@ export class OperationalSyncProjector {
     const input = command.payload;
     const requestedSku = nullableText(input, 'sku');
     const name = text(input, 'name');
-    const variantName = text(input, 'variantName') ?? name;
+    const inputAttributes = record(input.attributes) ?? {};
+    // `_variantName` keeps newly deployed renderer code compatible with an
+    // already-running desktop main process that still has the prior strict
+    // command schema. It is transport-only and never stored as a catalog spec.
+    const variantName = text(input, 'variantName') ?? text(inputAttributes, '_variantName') ?? name;
+    const variantAttributes = Object.fromEntries(
+      Object.entries(inputAttributes).filter(([key]) => key !== '_variantName')
+    );
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
     const variantId =
@@ -1844,7 +1851,7 @@ export class OperationalSyncProjector {
           catalogGender(input) ?? null,
           priceRsd * 100,
           currency,
-          JSON.stringify(record(input.attributes) ?? {}),
+          JSON.stringify(variantAttributes),
           boolean(input, 'active', true),
           boolean(input, 'published', true)
         ]
@@ -1992,7 +1999,7 @@ export class OperationalSyncProjector {
         catalogGender(input) ?? null,
         priceRsd * 100,
         currency,
-        input.attributes === undefined ? null : JSON.stringify(record(input.attributes) ?? {}),
+        input.attributes === undefined ? null : JSON.stringify(variantAttributes),
         boolean(input, 'active', true),
         boolean(input, 'published', true)
       ]
