@@ -1740,6 +1740,7 @@ export class OperationalSyncProjector {
     const input = command.payload;
     const requestedSku = nullableText(input, 'sku');
     const name = text(input, 'name');
+    const variantName = text(input, 'variantName') ?? name;
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
     const variantId =
@@ -1839,7 +1840,7 @@ export class OperationalSyncProjector {
           resolvedProductId,
           sku,
           text(input, 'barcode') ?? null,
-          name,
+          variantName,
           catalogGender(input) ?? null,
           priceRsd * 100,
           currency,
@@ -1987,7 +1988,7 @@ export class OperationalSyncProjector {
         variantId,
         sku,
         text(input, 'barcode') ?? null,
-        name,
+        variantName,
         catalogGender(input) ?? null,
         priceRsd * 100,
         currency,

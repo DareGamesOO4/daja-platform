@@ -489,7 +489,8 @@ export class CatalogRepository {
       published?: boolean | undefined;
     }
   ): Promise<VariantRecord> {
-    await this.getProduct(ctx, productId);
+    const product = await this.getProduct(ctx, productId);
+    const variantName = input.name?.trim() || product.name;
     try {
       const result = await this.client.query<VariantRow>(
         `INSERT INTO product_variants (organization_id, product_id, sku, barcode, mpn, name, gender, current_price_amount, currency, attributes, active, published)
@@ -501,7 +502,7 @@ export class CatalogRepository {
           input.sku,
           input.barcode ?? null,
           input.mpn ?? null,
-          input.name ?? null,
+          variantName,
           input.gender ?? null,
           input.currentPriceAmount,
           input.currency,
