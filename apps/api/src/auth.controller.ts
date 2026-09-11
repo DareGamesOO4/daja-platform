@@ -53,7 +53,7 @@ const nfcCardBindSchema = z.object({
 const nfcCardIdentifySchema = z.object({ cardId: nfcCardIdSchema });
 
 const mobileGoogleStartSchema = z.object({
-  email: z.string().email(),
+  email: z.string().email().optional(),
   deviceId: z.string().uuid(),
   state: z.string().min(32).max(200)
 });

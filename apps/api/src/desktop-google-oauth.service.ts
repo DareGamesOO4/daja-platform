@@ -77,13 +77,14 @@ export class DesktopGoogleOAuthService {
     return { authorizationUrl: this.customerAuth.googleAuthorizationUrl(providerState) };
   }
 
-  async startMobile(input: { email: string; deviceId: string; state: string }) {
-    const staff = await new AuthRepository(this.database.pool).findStaffUserForLogin({
-      email: input.email
-    });
-    if (!staff || !staff.active) throw new PermissionDeniedError('auth.google');
+  async startMobile(input: { email?: string | undefined; deviceId: string; state: string }) {
+    const staff = input.email
+      ? await new AuthRepository(this.database.pool).findStaffUserForLogin({ email: input.email })
+      : undefined;
+    const organizationId = staff?.organizationId ?? this.config.PUBLIC_ORGANIZATION_ID;
+    if (!organizationId || (input.email && !staff?.active)) throw new PermissionDeniedError('auth.google');
     return this.start({
-      organizationId: staff.organizationId,
+      organizationId,
       deviceId: input.deviceId,
       callbackUrl: 'dajashop-rfid://auth',
       state: input.state
