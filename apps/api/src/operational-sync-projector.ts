@@ -2724,7 +2724,12 @@ export class OperationalSyncProjector {
        ) cost ON true
        LEFT JOIN LATERAL (
          SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt",
-                latest_event.location_id, latest_event.metadata ->> 'binId' AS bin_id
+                latest_event.location_id,
+                CASE
+                  WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                    THEN (latest_event.metadata ->> 'binId')::uuid
+                  ELSE NULL
+                END AS bin_id
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          LEFT JOIN LATERAL (
