@@ -383,7 +383,8 @@ export class OperationalSyncProjector {
         : 'users.update';
     requireAnyPermission(ctx, [required, 'admin.users']);
     const actor = text(payload, 'actorUserId') ?? ctx.userId;
-    if (actor !== ctx.userId) throw new ValidationFailedError('Admin actor does not match session.');
+    if (actor !== ctx.userId)
+      throw new ValidationFailedError('Admin actor does not match session.');
     if (kind === 'role.create') {
       const roleId = event.aggregateId;
       const name = text(payload, 'name');
@@ -403,7 +404,11 @@ export class OperationalSyncProjector {
           [roleId, copyFrom]
         );
       }
-      return { kind: 'access', operation: kind, roleId };
+      return {
+        kind: 'access',
+        operation: kind,
+        role: await this.roleSnapshot(ctx.organizationId, roleId)
+      };
     }
     if (kind === 'role.update') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
@@ -411,9 +416,18 @@ export class OperationalSyncProjector {
         `UPDATE roles SET name = COALESCE($3, name), description = COALESCE($4, description),
          updated_at = now(), version = version + 1
          WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL AND code <> 'owner'`,
-        [roleId, ctx.organizationId, text(payload, 'name') ?? null, text(payload, 'description') ?? null]
+        [
+          roleId,
+          ctx.organizationId,
+          text(payload, 'name') ?? null,
+          text(payload, 'description') ?? null
+        ]
       );
-      return { kind: 'access', operation: kind, roleId };
+      return {
+        kind: 'access',
+        operation: kind,
+        role: await this.roleSnapshot(ctx.organizationId, roleId)
+      };
     }
     if (kind === 'role.delete') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
@@ -421,16 +435,27 @@ export class OperationalSyncProjector {
         `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [roleId, ctx.organizationId]
       );
-      if (role.rows[0]?.code === 'owner') throw new ValidationFailedError('Owner role cannot be deleted.');
-      const used = await this.client.query(`SELECT 1 FROM user_role_assignments WHERE role_id = $1 AND deleted_at IS NULL LIMIT 1`, [roleId]);
+      if (role.rows[0]?.code === 'owner')
+        throw new ValidationFailedError('Owner role cannot be deleted.');
+      const used = await this.client.query(
+        `SELECT 1 FROM user_role_assignments WHERE role_id = $1 AND deleted_at IS NULL LIMIT 1`,
+        [roleId]
+      );
       if (used.rowCount) throw new ValidationFailedError('Role is still assigned to a user.');
-      await this.client.query(`UPDATE roles SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`, [roleId, ctx.organizationId]);
-      return { kind: 'access', operation: kind, roleId };
+      await this.client.query(
+        `UPDATE roles SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`,
+        [roleId, ctx.organizationId]
+      );
+      return { kind: 'access', operation: kind, role: { id: roleId, deleted: true } };
     }
     if (kind === 'role.permissions.update') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
-      const role = await this.client.query<{ code: string | null }>(`SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`, [roleId, ctx.organizationId]);
-      if (role.rows[0]?.code === 'owner') throw new ValidationFailedError('Owner permissions are immutable.');
+      const role = await this.client.query<{ code: string | null }>(
+        `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
+        [roleId, ctx.organizationId]
+      );
+      if (role.rows[0]?.code === 'owner')
+        throw new ValidationFailedError('Owner permissions are immutable.');
       await this.client.query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId]);
       const grants = Array.isArray(payload.grants) ? payload.grants : [];
       for (const grant of grants) {
@@ -440,11 +465,18 @@ export class OperationalSyncProjector {
         for (const action of actions) {
           if (typeof action !== 'string' || !module) continue;
           const permission = module === 'counts' ? `rfid_counts.${action}` : `${module}.${action}`;
-          await this.client.query(`INSERT INTO role_permissions (role_id, permission_id) SELECT $1, id FROM permissions WHERE id = $2 ON CONFLICT DO NOTHING`, [roleId, permission]);
+          await this.client.query(
+            `INSERT INTO role_permissions (role_id, permission_id) SELECT $1, id FROM permissions WHERE id = $2 ON CONFLICT DO NOTHING`,
+            [roleId, permission]
+          );
         }
       }
       await this.bumpAccessPolicy(ctx.organizationId);
-      return { kind: 'access', operation: kind, roleId };
+      return {
+        kind: 'access',
+        operation: kind,
+        role: await this.roleSnapshot(ctx.organizationId, roleId)
+      };
     }
     if (kind === 'user.invite') {
       const userId = event.aggregateId;
@@ -458,22 +490,79 @@ export class OperationalSyncProjector {
         [userId, ctx.organizationId, email, displayName]
       );
       await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
-      return { kind: 'access', operation: kind, userId };
+      return {
+        kind: 'access',
+        operation: kind,
+        user: await this.userSnapshot(ctx.organizationId, userId)
+      };
     }
     const userId = text(payload, 'userId') ?? event.aggregateId;
     if (kind === 'user.action') {
       const action = text(payload, 'action');
       if (action === 'activate' || action === 'deactivate') {
-        await this.client.query(`UPDATE users SET active = $3, updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`, [userId, ctx.organizationId, action === 'activate']);
+        await this.client.query(
+          `UPDATE users SET active = $3, updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`,
+          [userId, ctx.organizationId, action === 'activate']
+        );
       }
       if (action === 'deactivate' || action === 'reset_sessions') {
-        await this.client.query(`UPDATE device_sessions SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = 'access_policy_change' WHERE organization_id = $1 AND user_id = $2 AND revoked_at IS NULL`, [ctx.organizationId, userId]);
+        await this.client.query(
+          `UPDATE device_sessions SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = 'access_policy_change' WHERE organization_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+          [ctx.organizationId, userId]
+        );
       }
-      return { kind: 'access', operation: kind, userId, action };
+      return {
+        kind: 'access',
+        operation: kind,
+        user: await this.userSnapshot(ctx.organizationId, userId),
+        action
+      };
     }
     await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
     await this.bumpAccessPolicy(ctx.organizationId);
-    return { kind: 'access', operation: kind, userId };
+    return {
+      kind: 'access',
+      operation: kind,
+      user: await this.userSnapshot(ctx.organizationId, userId)
+    };
+  }
+
+  private async roleSnapshot(
+    organizationId: string,
+    roleId: string
+  ): Promise<Record<string, unknown>> {
+    const role = await this.client.query(
+      `SELECT id, organization_id AS "organizationId", code, name, description,
+              is_system AS "isSystem", deleted_at AS "deletedAt"
+       FROM roles WHERE organization_id = $1 AND id = $2`,
+      [organizationId, roleId]
+    );
+    const permissions = await this.client.query(
+      `SELECT p.id, p.code, p.module, p.action, p.description
+       FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id
+       WHERE rp.role_id = $1 AND p.deleted_at IS NULL`,
+      [roleId]
+    );
+    return { ...(role.rows[0] ?? { id: roleId }), permissions: permissions.rows };
+  }
+
+  private async userSnapshot(
+    organizationId: string,
+    userId: string
+  ): Promise<Record<string, unknown>> {
+    const user = await this.client.query(
+      `SELECT id, email, display_name AS "displayName", active
+       FROM users WHERE organization_id = $1 AND id = $2`,
+      [organizationId, userId]
+    );
+    const assignments = await this.client.query(
+      `SELECT id, role_id AS "roleId", scope, location_id AS "locationId", is_primary AS primary
+       FROM user_role_assignments
+       WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL
+       ORDER BY is_primary DESC, created_at`,
+      [organizationId, userId]
+    );
+    return { ...(user.rows[0] ?? { id: userId }), assignments: assignments.rows };
   }
 
   private async replaceAssignments(
@@ -482,7 +571,10 @@ export class OperationalSyncProjector {
     payload: Record<string, unknown>,
     actorIsOwner: boolean
   ): Promise<void> {
-    await this.client.query(`UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`, [organizationId, userId]);
+    await this.client.query(
+      `UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      [organizationId, userId]
+    );
     const assignments = Array.isArray(payload.assignments) ? payload.assignments : [];
     for (const raw of assignments) {
       const assignment = record(raw);
@@ -500,13 +592,23 @@ export class OperationalSyncProjector {
       await this.client.query(
         `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, location_id, is_primary)
          VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
-        [organizationId, userId, roleId, scope, scope === 'location' ? locationId : null, Boolean(assignment?.primary)]
+        [
+          organizationId,
+          userId,
+          roleId,
+          scope,
+          scope === 'location' ? locationId : null,
+          Boolean(assignment?.primary)
+        ]
       );
     }
   }
 
   private async bumpAccessPolicy(organizationId: string): Promise<void> {
-    await this.client.query(`UPDATE organization_access_policies SET policy_version = policy_version + 1, updated_at = now() WHERE organization_id = $1`, [organizationId]);
+    await this.client.query(
+      `UPDATE organization_access_policies SET policy_version = policy_version + 1, updated_at = now() WHERE organization_id = $1`,
+      [organizationId]
+    );
   }
 
   /**
