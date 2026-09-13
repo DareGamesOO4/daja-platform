@@ -19,6 +19,7 @@ import { DeviceController, SyncController } from './sync.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
+import { AccessControlController } from './access-control.controller.js';
 import { OfflineInventoryController } from './offline-inventory.controller.js';
 import { DevicePluginsController } from './device-plugins.controller.js';
 import { DevicePluginsService } from './device-plugins.service.js';
@@ -57,6 +58,7 @@ const logger = createLogger(config, 'api');
   ],
   controllers: [
     AuthController,
+    AccessControlController,
     CustomerAuthController,
     CustomerController,
     StorefrontOrdersController,
