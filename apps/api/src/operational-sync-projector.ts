@@ -97,6 +97,12 @@ function text(input: Record<string, unknown>, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function requireAnyPermission(ctx: { permissions: string[] }, permissions: string[]): void {
+  if (!permissions.some((permission) => ctx.permissions.includes(permission))) {
+    requirePermission(ctx, permissions[0]!);
+  }
+}
+
 function nullableText(input: Record<string, unknown>, key: string): string | null | undefined {
   if (!Object.prototype.hasOwnProperty.call(input, key)) return undefined;
   return text(input, key) ?? null;
@@ -340,10 +346,155 @@ export class OperationalSyncProjector {
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
+    if (
+      kind === 'user.invite' ||
+      kind === 'user.action' ||
+      kind === 'user.assignments.update' ||
+      kind === 'role.create' ||
+      kind === 'role.update' ||
+      kind === 'role.delete' ||
+      kind === 'role.permissions.update'
+    ) {
+      const snapshot = await this.accessControl(ctx, event, kind, commandPayload);
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
 
     // Existing generic events remain compatible. They deliberately stay event
     // log entries until their server domain model has a matching projector.
     return event;
+  }
+
+  private async accessControl(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    kind: string,
+    payload: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const required = kind.startsWith('role.')
+      ? kind === 'role.create'
+        ? 'roles.create'
+        : kind === 'role.delete'
+          ? 'roles.delete'
+          : kind === 'role.permissions.update'
+            ? 'roles.manage_permissions'
+            : 'roles.update'
+      : kind === 'user.invite'
+        ? 'users.create'
+        : 'users.update';
+    requireAnyPermission(ctx, [required, 'admin.users']);
+    const actor = text(payload, 'actorUserId') ?? ctx.userId;
+    if (actor !== ctx.userId) throw new ValidationFailedError('Admin actor does not match session.');
+    if (kind === 'role.create') {
+      const roleId = event.aggregateId;
+      const name = text(payload, 'name');
+      if (!name) throw new ValidationFailedError('Role name is missing.');
+      await this.client.query(
+        `INSERT INTO roles (id, organization_id, name, description, system_role, is_system)
+         VALUES ($1, $2, $3, $4, false, false)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, updated_at = now()`,
+        [roleId, ctx.organizationId, name, text(payload, 'description') ?? null]
+      );
+      const copyFrom = text(payload, 'copyFromRoleId');
+      if (copyFrom) {
+        await this.client.query(
+          `INSERT INTO role_permissions (role_id, permission_id)
+           SELECT $1, permission_id FROM role_permissions WHERE role_id = $2
+           ON CONFLICT DO NOTHING`,
+          [roleId, copyFrom]
+        );
+      }
+      return { kind: 'access', operation: kind, roleId };
+    }
+    if (kind === 'role.update') {
+      const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      await this.client.query(
+        `UPDATE roles SET name = COALESCE($3, name), description = COALESCE($4, description),
+         updated_at = now(), version = version + 1
+         WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL AND code <> 'owner'`,
+        [roleId, ctx.organizationId, text(payload, 'name') ?? null, text(payload, 'description') ?? null]
+      );
+      return { kind: 'access', operation: kind, roleId };
+    }
+    if (kind === 'role.delete') {
+      const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      const role = await this.client.query<{ code: string | null }>(
+        `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
+        [roleId, ctx.organizationId]
+      );
+      if (role.rows[0]?.code === 'owner') throw new ValidationFailedError('Owner role cannot be deleted.');
+      const used = await this.client.query(`SELECT 1 FROM user_role_assignments WHERE role_id = $1 AND deleted_at IS NULL LIMIT 1`, [roleId]);
+      if (used.rowCount) throw new ValidationFailedError('Role is still assigned to a user.');
+      await this.client.query(`UPDATE roles SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`, [roleId, ctx.organizationId]);
+      return { kind: 'access', operation: kind, roleId };
+    }
+    if (kind === 'role.permissions.update') {
+      const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      const role = await this.client.query<{ code: string | null }>(`SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`, [roleId, ctx.organizationId]);
+      if (role.rows[0]?.code === 'owner') throw new ValidationFailedError('Owner permissions are immutable.');
+      await this.client.query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId]);
+      const grants = Array.isArray(payload.grants) ? payload.grants : [];
+      for (const grant of grants) {
+        const item = record(grant);
+        const module = text(item ?? {}, 'module');
+        const actions = Array.isArray(item?.actions) ? item.actions : [];
+        for (const action of actions) {
+          if (typeof action !== 'string' || !module) continue;
+          const permission = module === 'counts' ? `rfid_counts.${action}` : `${module}.${action}`;
+          await this.client.query(`INSERT INTO role_permissions (role_id, permission_id) SELECT $1, id FROM permissions WHERE id = $2 ON CONFLICT DO NOTHING`, [roleId, permission]);
+        }
+      }
+      await this.bumpAccessPolicy(ctx.organizationId);
+      return { kind: 'access', operation: kind, roleId };
+    }
+    if (kind === 'user.invite') {
+      const userId = event.aggregateId;
+      const email = text(payload, 'email');
+      const displayName = text(payload, 'displayName');
+      if (!email || !displayName) throw new ValidationFailedError('User identity is missing.');
+      await this.client.query(
+        `INSERT INTO users (id, organization_id, email, display_name, active)
+         VALUES ($1, $2, $3, $4, true)
+         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name, active = true, updated_at = now()`,
+        [userId, ctx.organizationId, email, displayName]
+      );
+      await this.replaceAssignments(ctx.organizationId, userId, payload);
+      return { kind: 'access', operation: kind, userId };
+    }
+    const userId = text(payload, 'userId') ?? event.aggregateId;
+    if (kind === 'user.action') {
+      const action = text(payload, 'action');
+      if (action === 'activate' || action === 'deactivate') {
+        await this.client.query(`UPDATE users SET active = $3, updated_at = now(), version = version + 1 WHERE id = $1 AND organization_id = $2`, [userId, ctx.organizationId, action === 'activate']);
+      }
+      if (action === 'deactivate' || action === 'reset_sessions') {
+        await this.client.query(`UPDATE device_sessions SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = 'access_policy_change' WHERE organization_id = $1 AND user_id = $2 AND revoked_at IS NULL`, [ctx.organizationId, userId]);
+      }
+      return { kind: 'access', operation: kind, userId, action };
+    }
+    await this.replaceAssignments(ctx.organizationId, userId, payload);
+    await this.bumpAccessPolicy(ctx.organizationId);
+    return { kind: 'access', operation: kind, userId };
+  }
+
+  private async replaceAssignments(organizationId: string, userId: string, payload: Record<string, unknown>): Promise<void> {
+    await this.client.query(`UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`, [organizationId, userId]);
+    const assignments = Array.isArray(payload.assignments) ? payload.assignments : [];
+    for (const raw of assignments) {
+      const assignment = record(raw);
+      const roleId = text(assignment ?? {}, 'roleId');
+      const scope = text(assignment ?? {}, 'scope');
+      if (!roleId || (scope !== 'location' && scope !== 'all_locations')) continue;
+      const locationId = text(assignment ?? {}, 'locationId');
+      await this.client.query(
+        `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, location_id, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+        [organizationId, userId, roleId, scope, scope === 'location' ? locationId : null, Boolean(assignment?.primary)]
+      );
+    }
+  }
+
+  private async bumpAccessPolicy(organizationId: string): Promise<void> {
+    await this.client.query(`UPDATE organization_access_policies SET policy_version = policy_version + 1, updated_at = now() WHERE organization_id = $1`, [organizationId]);
   }
 
   /**
