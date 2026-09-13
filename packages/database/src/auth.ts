@@ -277,8 +277,8 @@ export class AuthRepository {
     }
     const device = await this.client.query(
       `UPDATE devices
-       SET last_seen_at = now(), updated_at = now()
-       WHERE id = $1 AND organization_id = $2 AND user_id = $3
+       SET user_id = $3, last_seen_at = now(), updated_at = now()
+       WHERE id = $1 AND organization_id = $2
          AND active AND revoked_at IS NULL AND deleted_at IS NULL`,
       [input.deviceId, input.organizationId, input.userId]
     );
