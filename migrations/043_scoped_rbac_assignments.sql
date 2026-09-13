@@ -2,7 +2,26 @@ BEGIN;
 
 ALTER TABLE roles
   ADD COLUMN IF NOT EXISTS code text,
-  ADD COLUMN IF NOT EXISTS is_system boolean NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS is_system boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- The original Platform schema stored permission identifiers directly in
+-- permissions.id. Add the normalized columns used by the new evaluator while
+-- preserving those identifiers and their existing grants.
+ALTER TABLE permissions
+  ADD COLUMN IF NOT EXISTS code text,
+  ADD COLUMN IF NOT EXISTS module text,
+  ADD COLUMN IF NOT EXISTS action text,
+  ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+UPDATE permissions
+SET code = COALESCE(code, id),
+    module = COALESCE(module, split_part(id, '.', 1)),
+    action = COALESCE(action, NULLIF(substr(id, strpos(id, '.') + 1), ''))
+WHERE code IS NULL OR module IS NULL OR action IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS permissions_code_uq
+  ON permissions (code) WHERE deleted_at IS NULL;
 
 UPDATE roles
 SET code = CASE
