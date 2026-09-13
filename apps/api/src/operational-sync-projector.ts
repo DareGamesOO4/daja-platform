@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { hash, argon2id } from 'argon2';
 import {
   InventoryRepository,
   MediaRepository,
@@ -482,12 +483,16 @@ export class OperationalSyncProjector {
       const userId = event.aggregateId;
       const email = text(payload, 'email');
       const displayName = text(payload, 'displayName');
+      const password = text(payload, 'password');
       if (!email || !displayName) throw new ValidationFailedError('User identity is missing.');
+      if (!password || password.length < 8) throw new ValidationFailedError('User password is missing or too short.');
+      const passwordHash = await hash(password, { type: argon2id });
       await this.client.query(
-        `INSERT INTO users (id, organization_id, email, display_name, active)
-         VALUES ($1, $2, $3, $4, true)
-         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name, active = true, updated_at = now()`,
-        [userId, ctx.organizationId, email, displayName]
+        `INSERT INTO users (id, organization_id, email, display_name, password_hash, active)
+         VALUES ($1, $2, $3, $4, $5, true)
+         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name,
+           password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash), active = true, updated_at = now()`,
+        [userId, ctx.organizationId, email, displayName, passwordHash]
       );
       await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
       return {
