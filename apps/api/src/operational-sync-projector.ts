@@ -15,6 +15,7 @@ type ItemCommand = {
   kind: 'item.create' | 'item.update' | 'item.archive' | 'item.delete';
   payload: Record<string, unknown>;
 };
+type ClearPromotionCommand = { kind: 'item.promotion.clear'; payload: Record<string, unknown> };
 
 type TagCommand = { kind: 'tag.assign'; payload: Record<string, unknown> };
 
@@ -226,6 +227,13 @@ export class OperationalSyncProjector {
           unexpectedTotal: 0,
           createdByUserId
         }
+      });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'item.promotion.clear') {
+      const snapshot = await this.clearItemPromotion(ctx, event, {
+        kind: 'item.promotion.clear',
+        payload: commandPayload
       });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
@@ -1274,6 +1282,33 @@ export class OperationalSyncProjector {
       }
       await adjust(sourceLocationId, sourceBinId, -amount);
       await adjust(destinationLocationId, destinationBinId, amount);
+      const rfidTagId = text(command.payload, 'rfidTagId');
+      if (rfidTagId) {
+        // Inventory balances describe the total variant quantity. Keep an
+        // append-only placement event for the physical tag as well, otherwise
+        // a later catalog snapshot has no reliable shelf for this tag.
+        await this.client.query(
+          `UPDATE rfid_tags
+           SET updated_at = now(), version = version + 1
+           WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+          [ctx.organizationId, rfidTagId]
+        );
+        await this.client.query(
+          `INSERT INTO rfid_tag_events (organization_id, tag_id, location_id, event_type, metadata)
+           SELECT $1, id, $2, 'moved', $3::jsonb
+           FROM rfid_tags
+           WHERE organization_id = $1 AND id = $4 AND deleted_at IS NULL`,
+          [
+            ctx.organizationId,
+            destinationLocationId,
+            JSON.stringify({
+              source: 'rfiddaja_inventory_relocation',
+              ...(destinationBinId ? { binId: destinationBinId } : {})
+            }),
+            rfidTagId
+          ]
+        );
+      }
     } else {
       if (['sale', 'transfer_out', 'count_missing', 'tag_retirement'].includes(eventType ?? '')) {
         if (!sourceLocationId)
@@ -2048,6 +2083,33 @@ export class OperationalSyncProjector {
     return this.catalogSnapshot(ctx.organizationId, row.product_id, variantId);
   }
 
+  private async clearItemPromotion(
+    ctx: RequestContext,
+    event: SyncPushEvent,
+    command: ClearPromotionCommand
+  ): Promise<Record<string, unknown>> {
+    requirePermission(ctx, 'catalog.write');
+    const variantId = text(command.payload, 'productVariantId') ?? event.aggregateId;
+    if (!uuid(variantId)) {
+      throw new ValidationFailedError('Desktop promotion clear command is incomplete');
+    }
+    const variant = await this.client.query<{ productId: string }>(
+      `SELECT product_id AS "productId"
+       FROM product_variants
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    const productId = variant.rows[0]?.productId;
+    if (!productId) throw new ValidationFailedError('Desktop item does not exist on Platform');
+    await this.client.query(
+      `UPDATE variant_prices SET cancelled_at = now()
+       WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sale'
+         AND cancelled_at IS NULL`,
+      [ctx.organizationId, variantId]
+    );
+    return this.catalogSnapshot(ctx.organizationId, productId, variantId);
+  }
+
   private async tag(
     ctx: RequestContext,
     event: SyncPushEvent,
@@ -2194,6 +2256,14 @@ export class OperationalSyncProjector {
   ): Promise<void> {
     const saleAmount = integer(input, 'promotionalPriceMinor');
     const costAmount = integer(input, 'costPriceMinor');
+    if (input.clearPromotion === true || input.promotionalPriceMinor === null) {
+      await this.client.query(
+        `UPDATE variant_prices SET cancelled_at = now()
+         WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sale'
+           AND cancelled_at IS NULL`,
+        [ctx.organizationId, variantId]
+      );
+    }
     if (saleAmount !== undefined && saleAmount >= 0) {
       await this.client.query(
         `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, valid_from, valid_until, created_by)
@@ -2351,8 +2421,10 @@ export class OperationalSyncProjector {
               v.version AS "variantVersion", media.public_url AS "imageUri",
               sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
               cost.amount_minor AS "costAmount",
-              COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
-              inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
+              COALESCE(inventory.quantity, 0) AS quantity,
+              COALESCE(tag.location_id, inventory.location_id) AS "locationId",
+              inventory.zone_id AS "zoneId",
+              COALESCE(tag.bin_id, inventory.bin_id) AS "binId",
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
@@ -2381,9 +2453,18 @@ export class OperationalSyncProjector {
          ORDER BY created_at DESC LIMIT 1
        ) cost ON true
        LEFT JOIN LATERAL (
-         SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt"
+         SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt",
+                latest_event.location_id, latest_event.metadata ->> 'binId' AS bin_id
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
+         LEFT JOIN LATERAL (
+           SELECT location_id, metadata
+           FROM rfid_tag_events
+           WHERE organization_id = t.organization_id AND tag_id = t.id
+             AND event_type IN ('assigned', 'moved')
+           ORDER BY occurred_at DESC, id DESC
+           LIMIT 1
+         ) latest_event ON true
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
            AND (t.variant_id = v.id OR ii.variant_id = v.id)
          ORDER BY t.updated_at DESC
