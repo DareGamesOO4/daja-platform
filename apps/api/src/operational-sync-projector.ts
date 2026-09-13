@@ -457,7 +457,7 @@ export class OperationalSyncProjector {
          ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name, active = true, updated_at = now()`,
         [userId, ctx.organizationId, email, displayName]
       );
-      await this.replaceAssignments(ctx.organizationId, userId, payload);
+      await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
       return { kind: 'access', operation: kind, userId };
     }
     const userId = text(payload, 'userId') ?? event.aggregateId;
@@ -471,12 +471,17 @@ export class OperationalSyncProjector {
       }
       return { kind: 'access', operation: kind, userId, action };
     }
-    await this.replaceAssignments(ctx.organizationId, userId, payload);
+    await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
     await this.bumpAccessPolicy(ctx.organizationId);
     return { kind: 'access', operation: kind, userId };
   }
 
-  private async replaceAssignments(organizationId: string, userId: string, payload: Record<string, unknown>): Promise<void> {
+  private async replaceAssignments(
+    organizationId: string,
+    userId: string,
+    payload: Record<string, unknown>,
+    actorIsOwner: boolean
+  ): Promise<void> {
     await this.client.query(`UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`, [organizationId, userId]);
     const assignments = Array.isArray(payload.assignments) ? payload.assignments : [];
     for (const raw of assignments) {
@@ -484,6 +489,13 @@ export class OperationalSyncProjector {
       const roleId = text(assignment ?? {}, 'roleId');
       const scope = text(assignment ?? {}, 'scope');
       if (!roleId || (scope !== 'location' && scope !== 'all_locations')) continue;
+      const role = await this.client.query<{ code: string | null }>(
+        `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
+        [roleId, organizationId]
+      );
+      if (role.rows[0]?.code === 'owner' && !actorIsOwner) {
+        throw new ValidationFailedError('Only the owner can assign the owner role.');
+      }
       const locationId = text(assignment ?? {}, 'locationId');
       await this.client.query(
         `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, location_id, is_primary)
