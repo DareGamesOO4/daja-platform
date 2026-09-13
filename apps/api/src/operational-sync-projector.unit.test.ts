@@ -153,4 +153,67 @@ describe('OperationalSyncProjector RFID terminal state', () => {
 
     expect(query).not.toHaveBeenCalled();
   });
+
+  it('publishes a canonical role snapshot for desktop access sync', async () => {
+    const roleId = '22222222-2222-4222-8222-222222222222';
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: roleId,
+            organizationId: 'organization-id',
+            code: 'warehouse_staff',
+            name: 'Skladištar',
+            description: null,
+            isSystem: false,
+            deletedAt: null
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'permission-id',
+            code: 'receipts.create',
+            module: 'receipts',
+            action: 'create',
+            description: 'Kreiranje prijema'
+          }
+        ]
+      });
+    const projector = new OperationalSyncProjector({ query } as never);
+
+    const result = await projector.materialize(
+      {
+        requestId: 'request-id',
+        correlationId: 'correlation-id',
+        organizationId: 'organization-id',
+        userId: 'user-id',
+        roles: [],
+        permissions: ['roles.create']
+      },
+      {
+        eventId: 'event-id',
+        idempotencyKey: 'idempotency-key',
+        aggregateType: 'role',
+        aggregateId: roleId,
+        operation: 'command',
+        payloadVersion: 1,
+        payload: {
+          command: {
+            kind: 'role.create',
+            payload: { name: 'Skladištar', actorUserId: 'user-id' }
+          }
+        }
+      }
+    );
+
+    expect(result.payload.operationalSnapshot).toMatchObject({
+      kind: 'access',
+      operation: 'role.create',
+      role: { id: roleId, code: 'warehouse_staff', permissions: [{ code: 'receipts.create' }] }
+    });
+  });
 });
