@@ -156,7 +156,10 @@ export class AuthController {
       deviceId: ctx.deviceId,
       locationId: ctx.locationId,
       roles: ctx.roles,
-      permissions: ctx.permissions
+      permissions: ctx.permissions,
+      scopedGrants: ctx.scopedGrants ?? [],
+      policyVersion: ctx.policyVersion ?? 1,
+      isOwner: ctx.isOwner ?? false
     };
   }
 }
@@ -179,6 +182,13 @@ function serializePrincipal(principal: {
   sessionFamilyId: string;
   roles: string[];
   permissions: string[];
+  scopedGrants: Array<{
+    permission: string;
+    scope: 'location' | 'all_locations';
+    locationId?: string;
+  }>;
+  policyVersion: number;
+  isOwner: boolean;
 }) {
   return {
     userId: principal.userId,
@@ -189,7 +199,10 @@ function serializePrincipal(principal: {
     deviceId: principal.deviceId,
     sessionFamilyId: principal.sessionFamilyId,
     roles: principal.roles,
-    permissions: principal.permissions
+    permissions: principal.permissions,
+    scopedGrants: principal.scopedGrants,
+    policyVersion: principal.policyVersion,
+    isOwner: principal.isOwner
   };
 }
 

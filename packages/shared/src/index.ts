@@ -9,6 +9,13 @@ export interface RequestContext {
   locationId?: string;
   roles: string[];
   permissions: string[];
+  scopedGrants?: Array<{
+    permission: string;
+    scope: 'location' | 'all_locations';
+    locationId?: string;
+  }>;
+  policyVersion?: number;
+  isOwner?: boolean;
 }
 
 export function createRequestId(): string {

@@ -17,6 +17,15 @@ export interface StaffPrincipal {
   sessionId?: string;
   roles: string[];
   permissions: string[];
+  scopedGrants: StaffPermissionGrant[];
+  policyVersion: number;
+  isOwner: boolean;
+}
+
+export interface StaffPermissionGrant {
+  permission: string;
+  scope: 'location' | 'all_locations';
+  locationId?: string;
 }
 
 export interface StaffUserForLogin {
@@ -276,15 +285,42 @@ export class AuthRepository {
     if (device.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
-    const grants = await this.client.query<{ role: string; permission: string | null }>(
-      `SELECT r.name AS role, rp.permission_id AS permission
-       FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id AND r.organization_id = $2
+    const grants = await this.client.query<{
+      role: string;
+      role_code: string | null;
+      permission: string | null;
+      scope: 'location' | 'all_locations';
+      location_id: string | null;
+    }>(
+      `SELECT r.name AS role, r.code AS role_code, rp.permission_id AS permission,
+              ura.scope, ura.location_id
+       FROM user_role_assignments ura
+       JOIN roles r ON r.id = ura.role_id AND r.organization_id = $2
        LEFT JOIN role_permissions rp ON rp.role_id = r.id
-       WHERE ur.user_id = $1
-       ORDER BY r.name, rp.permission_id`,
+       WHERE ura.user_id = $1 AND ura.organization_id = $2 AND ura.deleted_at IS NULL
+         AND r.deleted_at IS NULL
+       ORDER BY r.name, rp.permission_id, ura.location_id`,
       [input.userId, input.organizationId]
     );
+    const policy = await this.client.query<{ policy_version: string | number }>(
+      `SELECT policy_version FROM organization_access_policies WHERE organization_id = $1`,
+      [input.organizationId]
+    );
+    const scopedGrants = grants.rows
+      .filter((grant): grant is typeof grant & { permission: string } => !!grant.permission)
+      .map((grant) => ({
+        permission: grant.permission,
+        scope: grant.scope,
+        ...(grant.location_id ? { locationId: grant.location_id } : {})
+      }))
+      .filter((grant, index, all) =>
+        all.findIndex(
+          (candidate) =>
+            candidate.permission === grant.permission &&
+            candidate.scope === grant.scope &&
+            candidate.locationId === grant.locationId
+        ) === index
+      );
     return {
       userId: row.id,
       organizationId: row.organization_id,
@@ -295,11 +331,10 @@ export class AuthRepository {
       sessionFamilyId: input.sessionFamilyId,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       roles: [...new Set(grants.rows.map((grant) => grant.role))],
-      permissions: [
-        ...new Set(
-          grants.rows.map((grant) => grant.permission).filter((value): value is string => !!value)
-        )
-      ]
+      permissions: [...new Set(scopedGrants.map((grant) => grant.permission))],
+      scopedGrants,
+      policyVersion: Number(policy.rows[0]?.policy_version ?? 1),
+      isOwner: grants.rows.some((grant) => grant.role_code === 'owner')
     };
   }
 
@@ -333,12 +368,10 @@ export class AuthRepository {
        WHERE l.id = $3 AND l.organization_id = $1 AND l.active AND l.deleted_at IS NULL
          AND (
            EXISTS (
-             SELECT 1 FROM user_location_assignments ula
-             WHERE ula.user_id = $2 AND ula.location_id = l.id
-           )
-           OR NOT EXISTS (
-             SELECT 1 FROM user_location_assignments ula_any
-             WHERE ula_any.user_id = $2
+             SELECT 1 FROM user_role_assignments ura
+             WHERE ura.organization_id = $1 AND ura.user_id = $2
+               AND ura.deleted_at IS NULL
+               AND (ura.scope = 'all_locations' OR ura.location_id = l.id)
            )
          )`,
       [input.organizationId, input.userId, input.locationId]

@@ -379,6 +379,9 @@ export class AuthService {
       ...(input.locationId ? { locationId: input.locationId } : {}),
       roles: principal.roles,
       permissions: principal.permissions,
+      scopedGrants: principal.scopedGrants,
+      policyVersion: principal.policyVersion,
+      isOwner: principal.isOwner,
       ...(principal.sessionId ? { sessionId: principal.sessionId } : {})
     };
   }
