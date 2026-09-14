@@ -35,7 +35,12 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission, TenantAccessDeniedError, ValidationFailedError } from '@daja/security';
+import {
+  requirePermission,
+  ResourceConflictError,
+  TenantAccessDeniedError,
+  ValidationFailedError
+} from '@daja/security';
 import {
   attributesSchema,
   amountMinorSchema,
@@ -1845,26 +1850,33 @@ export class RfidController {
       }),
       body
     );
-    const tag = await new TransactionManager(this.database.pool, this.logger).run(
-      async (client) => {
-        const tag = await new RfidRepository(client).createTag(ctx, input);
+    let tag;
+    try {
+      tag = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+        const created = await new RfidRepository(client).createTag(ctx, input);
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'rfid_tag',
-          aggregateId: tag.id,
+          aggregateId: created.id,
           operation: 'create',
-          afterPayload: tag
+          afterPayload: created
         });
         await new OutboxRepository(client).append({
           ctx,
           eventType: 'RfidTagStatusChanged',
           aggregateType: 'rfid_tag',
-          aggregateId: tag.id,
-          payload: { tagId: tag.id, status: tag.status }
+          aggregateId: created.id,
+          payload: { tagId: created.id, status: created.status }
         });
-        return tag;
-      }
-    );
+        return created;
+      });
+    } catch (error) {
+      // Re-saving an item with its existing EPC is normal in admin flows.
+      // Return the canonical tag instead of exposing an expected 409 to every
+      // client, while preserving a real conflict at the later assignment step.
+      if (!(error instanceof ResourceConflictError)) throw error;
+      return new RfidRepository(this.database.pool).getTagByEpc(ctx, input.epc);
+    }
     await this.invalidateRfid(ctx.organizationId, tag.epc);
     return tag;
   }
