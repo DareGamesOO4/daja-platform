@@ -644,7 +644,7 @@ export class StaffCatalogController {
     const productId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(workforceReviewSchema, body);
     if (input.status === 'changes_requested' && !input.note) throw new ValidationFailedError('Napomena je obavezna kada vraćate proizvod na doradu.');
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const review = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const before = await new CatalogRepository(client).getProduct(ctx, productId);
       const quality = await this.productQuality(client, ctx.organizationId, productId);
       if (input.status === 'approved' && quality.missing.length) throw new ValidationFailedError(`Proizvod nije kompletan: ${quality.missing.join(', ')}`);
@@ -666,8 +666,12 @@ export class StaffCatalogController {
         afterPayload: result.rows[0],
         ...(input.note ? { reason: input.note } : {})
       });
-      return result.rows[0];
+      return { ...result.rows[0], slug: before.slug };
     });
+    // A returned product must appear immediately in the contributor's
+    // dashboard, without waiting for a manual browser refresh.
+    await this.invalidateCatalog(ctx.organizationId, review.slug);
+    return review;
   }
 
   @Patch('products/:id')
@@ -686,7 +690,7 @@ export class StaffCatalogController {
           `UPDATE products
            SET quality_review_status = 'pending', quality_review_note = NULL,
                quality_reviewed_by_user_id = NULL, quality_reviewed_at = NULL
-           WHERE organization_id = $1 AND id = $2 AND quality_review_status = 'approved'`,
+           WHERE organization_id = $1 AND id = $2 AND quality_review_status <> 'pending'`,
           [ctx.organizationId, productId]
         );
         await new StorefrontRepository(client).refreshProductSnapshots({
