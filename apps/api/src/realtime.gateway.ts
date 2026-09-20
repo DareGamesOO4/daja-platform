@@ -71,7 +71,7 @@ export class RealtimeGateway {
             stringValue(socket.handshake.auth.locationId) ??
             stringValue(socket.handshake.query.locationId)
         });
-        const catalogContributor = ctx.permissions.includes('catalog.contributor') || ctx.roles.includes('Unosilac kataloga');
+        const catalogContributor = ctx.roles.includes('Unosilac kataloga');
         if (!ctx.permissions.includes('realtime.read') && !catalogContributor) {
           deny(socket);
           return;

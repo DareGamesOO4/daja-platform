@@ -13,7 +13,7 @@ const startSchema=z.object({stationId:uuidSchema,clientId:uuidSchema,preview:sta
 const epcSchema=z.object({sessionId:uuidSchema,epc:z.string().trim().min(1).max(256)});
 const barcodeSchema=z.object({sessionId:uuidSchema,barcode:z.string().trim().max(256).optional()});
 function requireReaderAccess(ctx: RequestContext): void {
-  if (ctx.permissions.includes('rfid.scan') || ctx.permissions.includes('catalog.contributor') || ctx.roles.includes('Unosilac kataloga')) return;
+  if (ctx.permissions.includes('rfid.scan') || ctx.roles.includes('Unosilac kataloga')) return;
   throw new TenantAccessDeniedError();
 }
 @Controller('rfid/reader-stations')
