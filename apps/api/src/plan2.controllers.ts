@@ -615,10 +615,13 @@ export class StaffCatalogController {
     )).rows[0];
   }
 
-  @Get('admin/workforce/me')
+  // Keep this outside /admin/workforce/:userId so it can never be interpreted
+  // as a request for a different employee's protected profile.
+  @Get('admin/my-workforce')
   async myWorkforce(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
-    if (!this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
+    const canViewOwnStats = this.isCatalogContributor(ctx) || ctx.permissions.includes('catalog.contributor');
+    if (!canViewOwnStats) throw new TenantAccessDeniedError();
     const [summaryResult, returnsResult, dailyResult, hourlyResult] = await Promise.all([
       this.database.pool.query(
         `WITH bounds AS (
