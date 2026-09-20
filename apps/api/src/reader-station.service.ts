@@ -106,6 +106,30 @@ export class ReaderStationService {
     this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.scan.cancelled', payload);
   }
 
+  /** HTTP fallback for the browser. Realtime can reconnect during a scan, so
+   * the requester can always read the persisted result instead of waiting
+   * forever for an event that happened before its socket joined the room. */
+  async session(ctx: RequestContext, sessionId: string): Promise<Record<string, unknown>> {
+    await this.expire();
+    const result = await this.database.query<SessionRow>(
+      `SELECT id, station_id, requester_user_id, requester_client_id, status, epc, barcode, product, expires_at
+       FROM rfid_reader_scan_sessions
+       WHERE id = $1 AND organization_id = $2 AND requester_user_id = $3`,
+      [sessionId, ctx.organizationId, ctx.userId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new ValidationFailedError('Sesija očitavanja nije pronađena.');
+    return {
+      id: row.id,
+      stationId: row.station_id,
+      status: row.status,
+      epc: row.epc,
+      barcode: row.barcode,
+      product: row.product,
+      expiresAt: row.expires_at,
+    };
+  }
+
   async abortFromStation(ctx: RequestContext, stationId: string, sessionId: string): Promise<void> {
     if (!ctx.deviceId) throw new ValidationFailedError('Reader Station zahteva identitet uređaja.');
     const station = await this.database.query<{ id: string }>(
