@@ -615,6 +615,88 @@ export class StaffCatalogController {
     )).rows[0];
   }
 
+  @Get('admin/workforce/me')
+  async myWorkforce(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    if (!this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
+    const [summaryResult, returnsResult, dailyResult, hourlyResult] = await Promise.all([
+      this.database.pool.query(
+        `WITH bounds AS (
+           SELECT date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade' AS today_start
+         )
+         SELECT
+           count(*) FILTER (WHERE p.deleted_at IS NULL)::int AS "createdTotal",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.created_at >= b.today_start)::int AS "createdToday",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.created_at >= b.today_start - interval '1 day' AND p.created_at < b.today_start)::int AS "createdYesterday",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.created_at >= b.today_start - interval '6 days')::int AS "createdThisWeek",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.created_at >= date_trunc('month', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade')::int AS "createdThisMonth",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.quality_review_status = 'approved')::int AS "approvedCount",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.quality_review_status = 'pending')::int AS "pendingCount",
+           count(*) FILTER (WHERE p.deleted_at IS NULL AND p.quality_review_status = 'changes_requested')::int AS "changesRequestedCount",
+           count(*) FILTER (WHERE p.deleted_at IS NOT NULL)::int AS "deletedCount",
+           COALESCE(sum(p.compensation_amount_minor) FILTER (WHERE p.compensation_approved_at IS NOT NULL), 0)::int AS "approvedAmountMinor",
+           COALESCE(rate.rate_minor, settings.default_rate_minor, 0)::int AS "rateMinor",
+           COALESCE(settings.currency, 'RSD') AS currency
+         FROM products p
+         CROSS JOIN bounds b
+         LEFT JOIN catalog_contributor_rates rate ON rate.organization_id = p.organization_id AND rate.user_id = p.created_by_user_id
+         LEFT JOIN catalog_contributor_settings settings ON settings.organization_id = p.organization_id
+         WHERE p.organization_id = $1 AND p.created_by_user_id = $2
+         GROUP BY rate.rate_minor, settings.default_rate_minor, settings.currency`,
+        [ctx.organizationId, ctx.userId],
+      ),
+      this.database.pool.query(
+        `WITH bounds AS (
+           SELECT date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade' AS today_start
+         )
+         SELECT
+           count(*)::int AS "returnedTotal",
+           count(*) FILTER (WHERE audit.occurred_at >= b.today_start)::int AS "returnedToday",
+           count(*) FILTER (WHERE audit.occurred_at >= b.today_start - interval '1 day' AND audit.occurred_at < b.today_start)::int AS "returnedYesterday"
+         FROM audit_events audit
+         JOIN products p ON p.id = audit.aggregate_id AND p.organization_id = audit.organization_id
+         CROSS JOIN bounds b
+         WHERE audit.organization_id = $1 AND p.created_by_user_id = $2
+           AND audit.operation = 'quality_changes_requested'`,
+        [ctx.organizationId, ctx.userId],
+      ),
+      this.database.pool.query(
+        `SELECT to_char(day, 'DD.MM') AS label, count(p.id)::int AS count
+         FROM generate_series(
+           (date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') - interval '6 days')::date,
+           date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade')::date,
+           interval '1 day'
+         ) AS day
+         LEFT JOIN products p
+           ON p.organization_id = $1 AND p.created_by_user_id = $2 AND p.deleted_at IS NULL
+          AND p.created_at >= day AT TIME ZONE 'Europe/Belgrade'
+          AND p.created_at < (day + interval '1 day') AT TIME ZONE 'Europe/Belgrade'
+         GROUP BY day ORDER BY day`,
+        [ctx.organizationId, ctx.userId],
+      ),
+      this.database.pool.query(
+        `WITH bounds AS (
+           SELECT date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade' AS today_start
+         )
+         SELECT to_char(created_at AT TIME ZONE 'Europe/Belgrade', 'HH24') AS hour, count(*)::int AS count
+         FROM products p CROSS JOIN bounds b
+         WHERE p.organization_id = $1 AND p.created_by_user_id = $2 AND p.deleted_at IS NULL AND p.created_at >= b.today_start
+         GROUP BY 1 ORDER BY 1`,
+        [ctx.organizationId, ctx.userId],
+      ),
+    ]);
+    return {
+      ...(summaryResult.rows[0] ?? {
+        createdTotal: 0, createdToday: 0, createdYesterday: 0, createdThisWeek: 0, createdThisMonth: 0,
+        approvedCount: 0, pendingCount: 0, changesRequestedCount: 0, deletedCount: 0,
+        approvedAmountMinor: 0, rateMinor: 0, currency: 'RSD',
+      }),
+      ...(returnsResult.rows[0] ?? { returnedTotal: 0, returnedToday: 0, returnedYesterday: 0 }),
+      daily: dailyResult.rows,
+      hourly: hourlyResult.rows,
+    };
+  }
+
   @Get('admin/workforce/:userId')
   async workforceMember(@Req() request: Request, @Param('userId') userId: string) {
     const ctx = resolveRequestContext(request);
