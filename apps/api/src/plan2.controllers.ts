@@ -1738,7 +1738,7 @@ export class StaffCatalogController {
    * single query so a realtime update can reload one product, rather than
    * forcing the dashboard to refresh its whole product list. */
   private isCatalogContributor(ctx: RequestContext): boolean {
-    return ctx.roles.includes('Unosilac kataloga');
+    return !ctx.isOwner && ctx.roles.includes('Unosilac kataloga');
   }
 
   private requireWorkforceManager(ctx: RequestContext): void {
@@ -2272,7 +2272,7 @@ export class InventoryController {
   ) {}
 
   private isCatalogContributor(ctx: RequestContext): boolean {
-    return ctx.roles.includes('Unosilac kataloga');
+    return !ctx.isOwner && ctx.roles.includes('Unosilac kataloga');
   }
 
   private async assertContributorOwnsVariant(ctx: RequestContext, variantId: string): Promise<void> {
