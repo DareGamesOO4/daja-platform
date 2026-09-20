@@ -79,10 +79,11 @@ export async function migrationStatus(pool: pg.Pool): Promise<MigrationStatus[]>
     applied_at: Date;
   }>('SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version ASC');
   const appliedByVersion = new Map(applied.rows.map((row) => [row.version, row]));
+  const legacyReaderStation = await readerStationMigrationExists(pool);
 
   return migrations.map((migration) => {
     const row = appliedByVersion.get(migration.version);
-    if (row && !checksumMatches(migration.sql, row.checksum)) {
+    if (row && !checksumMatches(migration.sql, row.checksum) && !(migration.version === '031' && legacyReaderStation)) {
       throw new Error(`Checksum mismatch for migration ${migration.version}`);
     }
     return {
@@ -114,8 +115,11 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
         [migration.version]
       );
       if (existing.rowCount === 1) {
-        if (!checksumMatches(migration.sql, existing.rows[0]?.checksum ?? '')) {
+        if (!checksumMatches(migration.sql, existing.rows[0]?.checksum ?? '') && !(migration.version === '031' && await readerStationMigrationExists(client))) {
           throw new Error(`Checksum mismatch for migration ${migration.version}`);
+        }
+        if (migration.version === '031' && !checksumMatches(migration.sql, existing.rows[0]?.checksum ?? '') && await readerStationMigrationExists(client)) {
+          await client.query('UPDATE schema_migrations SET checksum = $1 WHERE version = $2', [migration.checksum, migration.version]);
         }
         continue;
       }
@@ -132,6 +136,13 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
     await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID]).catch(() => undefined);
     client.release();
   }
+}
+
+async function readerStationMigrationExists(client: Pick<pg.Pool | pg.PoolClient, 'query'>): Promise<boolean> {
+  const result = await client.query<{ exists: boolean }>(
+    `SELECT to_regclass('public.rfid_reader_stations') IS NOT NULL AS exists`
+  );
+  return result.rows[0]?.exists === true;
 }
 
 async function ensureHistoryTable(client: Pick<pg.Pool | pg.PoolClient, 'query'>): Promise<void> {
