@@ -56,6 +56,7 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
 import { ProductAlertService } from './product-alert.service.js';
+import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -534,46 +535,8 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     this.requireWorkforceManager(ctx);
     const input = parseWithSchema(workforceQuerySchema, query);
-    const start = input.start ?? new Date(Date.now() - 30 * 86_400_000).toISOString();
-    const end = input.end ?? new Date().toISOString();
-    return (await this.database.pool.query(
-      `WITH products_with_quality AS (
-         SELECT p.*, (
-           p.name IS NULL OR btrim(p.name) = '' OR p.department_id IS NULL OR p.brand_id IS NULL OR
-           p.primary_category_id IS NULL OR COALESCE(p.description, '') = '' OR
-           NOT EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.sku IS NOT NULL AND v.current_price_amount > 0 AND v.gender IS NOT NULL) OR
-           NOT EXISTS (SELECT 1 FROM product_media pm WHERE pm.product_id = p.id AND pm.organization_id = p.organization_id) OR
-           COALESCE((SELECT count(*) FROM product_variants v CROSS JOIN LATERAL jsonb_object_keys(COALESCE(v.attributes, '{}'::jsonb)) attribute WHERE v.product_id = p.id AND v.organization_id = p.organization_id AND v.deleted_at IS NULL), 0) < 3
-         ) AS incomplete
-         FROM products p
-         WHERE p.organization_id = $1
-       )
-       SELECT u.id, COALESCE(u.display_name, u.email, 'Nepoznat korisnik') AS "name", u.email,
-              count(p.id) FILTER (WHERE p.created_at >= $2::timestamptz AND p.created_at <= $3::timestamptz) AS "createdInPeriod",
-              count(p.id) FILTER (WHERE p.created_at >= date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade') AS "createdToday",
-              count(p.id) FILTER (WHERE p.quality_review_status = 'approved') AS "approvedCount",
-              count(p.id) FILTER (WHERE p.quality_review_status = 'pending') AS "pendingCount",
-              count(p.id) FILTER (WHERE p.quality_review_status = 'changes_requested') AS "changesRequestedCount",
-              count(p.id) FILTER (WHERE p.incomplete AND p.deleted_at IS NULL) AS "incompleteCount",
-              count(p.id) FILTER (WHERE p.deleted_at IS NOT NULL) AS "deletedCount",
-              COALESCE(sum(p.compensation_amount_minor), 0) AS "approvedAmountMinor",
-              COALESCE(rate.rate_minor, settings.default_rate_minor, 0) AS "rateMinor",
-              COALESCE(jsonb_object_agg(hour_bucket.hour, hour_bucket.count) FILTER (WHERE hour_bucket.hour IS NOT NULL), '{}'::jsonb) AS "hourly"
-       FROM users u
-       LEFT JOIN products_with_quality p ON p.created_by_user_id = u.id
-       LEFT JOIN catalog_contributor_rates rate ON rate.organization_id = u.organization_id AND rate.user_id = u.id
-       LEFT JOIN catalog_contributor_settings settings ON settings.organization_id = u.organization_id
-       LEFT JOIN LATERAL (
-         SELECT to_char(date_trunc('hour', created_at AT TIME ZONE 'Europe/Belgrade'), 'HH24') AS hour, count(*)::int AS count
-         FROM products h WHERE h.organization_id = u.organization_id AND h.created_by_user_id = u.id AND h.created_at >= $2::timestamptz AND h.created_at <= $3::timestamptz
-         GROUP BY 1
-       ) hour_bucket ON true
-       WHERE u.organization_id = $1 AND u.active
-       GROUP BY u.id, u.display_name, u.email, rate.rate_minor, settings.default_rate_minor
-       HAVING count(p.id) > 0 OR EXISTS (SELECT 1 FROM user_role_assignments ura JOIN roles r ON r.id = ura.role_id WHERE ura.user_id = u.id AND ura.deleted_at IS NULL AND r.code = 'catalog_contributor')
-       ORDER BY "createdInPeriod" DESC, "name" ASC`,
-      [ctx.organizationId, start, end]
-    )).rows;
+    return workforceSummary(this.database.pool, ctx.organizationId,
+      input.start ?? new Date(Date.now() - 30 * 86_400_000).toISOString(), input.end ?? new Date().toISOString());
   }
 
   @Get('admin/workforce/settings')
@@ -700,6 +663,61 @@ export class StaffCatalogController {
     };
   }
 
+  @Get('admin/workforce-pricing')
+  async workforcePricing(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const { userId } = parseWithSchema(z.object({ userId: uuidSchema.optional() }), query);
+    const [rules, personal, settings] = await Promise.all([
+      this.database.pool.query(`SELECT id, user_id AS "userId", department_id AS "departmentId", category_id AS "categoryId", rate_minor AS "rateMinor"
+        FROM catalog_contributor_rate_rules WHERE organization_id=$1 AND (user_id IS NULL OR user_id=$2) ORDER BY updated_at DESC`, [ctx.organizationId, userId ?? null]),
+      this.database.pool.query(`SELECT rate_minor AS "rateMinor" FROM catalog_contributor_rates WHERE organization_id=$1 AND user_id=$2`, [ctx.organizationId, userId ?? null]),
+      this.database.pool.query(`SELECT default_rate_minor AS "rateMinor" FROM catalog_contributor_settings WHERE organization_id=$1`, [ctx.organizationId]),
+    ]);
+    return { rules: rules.rows, personalRateMinor: personal.rows[0]?.rateMinor ?? null, defaultRateMinor: settings.rows[0]?.rateMinor ?? 0 };
+  }
+
+  @Put('admin/workforce-pricing')
+  async saveWorkforcePricing(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const input = parseWithSchema(z.object({ userId: uuidSchema.optional(), departmentId: uuidSchema.optional(), categoryId: uuidSchema.optional(),
+      rateMinor: z.number().int().min(0).max(10_000_000).nullable() }), body);
+    if (input.categoryId && !input.departmentId) throw new ValidationFailedError('Izaberite odeljenje.');
+    if (!input.userId && !input.departmentId && input.rateMinor === null) throw new ValidationFailedError('Opšta cena ne može biti prazna.');
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      if (input.userId) {
+        const user = await client.query('SELECT 1 FROM users WHERE organization_id=$1 AND id=$2', [ctx.organizationId,input.userId]);
+        if (!user.rowCount) throw new TenantAccessDeniedError();
+      }
+      if (input.departmentId) {
+        const department = await client.query('SELECT 1 FROM departments WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [ctx.organizationId,input.departmentId]);
+        if (!department.rowCount) throw new ValidationFailedError('Odeljenje nije dostupno.');
+      }
+      if (input.categoryId) {
+        const category = await client.query('SELECT 1 FROM categories WHERE organization_id=$1 AND id=$2 AND department_id=$3 AND deleted_at IS NULL', [ctx.organizationId,input.categoryId,input.departmentId]);
+        if (!category.rowCount) throw new ValidationFailedError('Kategorija ne pripada odeljenju.');
+      }
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`workforce-rates:${ctx.organizationId}`]);
+      if (input.departmentId) {
+        await client.query(`DELETE FROM catalog_contributor_rate_rules WHERE organization_id=$1 AND user_id IS NOT DISTINCT FROM $2::uuid
+          AND department_id=$3 AND category_id IS NOT DISTINCT FROM $4::uuid`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.categoryId ?? null]);
+        if (input.rateMinor !== null) await client.query(`INSERT INTO catalog_contributor_rate_rules (organization_id,user_id,department_id,category_id,rate_minor,updated_by_user_id)
+          VALUES ($1,$2,$3,$4,$5,$6)`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.categoryId ?? null,input.rateMinor,ctx.userId]);
+      } else if (input.userId) {
+        if (input.rateMinor === null) await client.query('DELETE FROM catalog_contributor_rates WHERE organization_id=$1 AND user_id=$2', [ctx.organizationId,input.userId]);
+        else await client.query(`INSERT INTO catalog_contributor_rates (organization_id,user_id,rate_minor,updated_by_user_id) VALUES ($1,$2,$3,$4)
+          ON CONFLICT (organization_id,user_id) DO UPDATE SET rate_minor=EXCLUDED.rate_minor, updated_by_user_id=EXCLUDED.updated_by_user_id, updated_at=now()`, [ctx.organizationId,input.userId,input.rateMinor,ctx.userId]);
+      } else {
+        await client.query(`INSERT INTO catalog_contributor_settings (organization_id,default_rate_minor,updated_by_user_id) VALUES ($1,$2,$3)
+          ON CONFLICT (organization_id) DO UPDATE SET default_rate_minor=EXCLUDED.default_rate_minor, updated_by_user_id=EXCLUDED.updated_by_user_id, updated_at=now()`, [ctx.organizationId,input.rateMinor,ctx.userId]);
+      }
+      await new AuditRepository(client).append({ ctx, aggregateType: 'catalog_compensation', aggregateId: input.userId ?? ctx.organizationId,
+        operation: input.rateMinor === null ? 'rate_removed' : 'rate_updated', afterPayload: input });
+      return { saved: true };
+    });
+  }
+
   @Get('admin/workforce/:userId')
   async workforceMember(@Req() request: Request, @Param('userId') userId: string) {
     const ctx = resolveRequestContext(request);
@@ -716,10 +734,16 @@ export class StaffCatalogController {
               audit.before_payload AS "beforePayload", audit.after_payload AS "afterPayload", audit.reason,
               COALESCE(audit.after_payload ->> 'name', audit.before_payload ->> 'name', 'Artikal') AS "productName"
        FROM audit_events audit
-       WHERE audit.organization_id = $1 AND audit.actor_user_id = $2 AND audit.aggregate_type IN ('product', 'variant', 'inventory_balance')
+       WHERE audit.organization_id = $1 AND audit.aggregate_type IN ('product', 'variant', 'inventory_balance')
+         AND (audit.actor_user_id = $2 OR (audit.aggregate_type='product' AND EXISTS (
+           SELECT 1 FROM products p WHERE p.organization_id=$1 AND p.id=audit.aggregate_id AND p.created_by_user_id=$2)))
        ORDER BY audit.occurred_at DESC LIMIT 250`, [ctx.organizationId, id]
     )).rows;
-    return { products, activity };
+    const summaries = await workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString());
+    const rates = (await this.database.pool.query(`SELECT p.id, ${effectiveRateSql('p')} AS "effectiveRateMinor"
+      FROM products p WHERE p.organization_id=$1 AND p.created_by_user_id=$2`, [ctx.organizationId,id])).rows;
+    return { products: products.map(product => ({ ...product, effectiveRateMinor: rates.find(rate => rate.id === product.id)?.effectiveRateMinor ?? 0 })), activity,
+      summary: summaries.find(member => member.id === id) ?? null };
   }
 
   @Patch('admin/workforce/products/:id/review')
@@ -736,7 +760,7 @@ export class StaffCatalogController {
       const result = await client.query(
         `UPDATE products SET quality_review_status = $3, quality_review_note = $4, quality_reviewed_by_user_id = $5, quality_reviewed_at = now(),
            compensation_approved_at = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN now() ELSE compensation_approved_at END,
-           compensation_amount_minor = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN COALESCE((SELECT rate_minor FROM catalog_contributor_rates WHERE organization_id = $1 AND user_id = products.created_by_user_id), (SELECT default_rate_minor FROM catalog_contributor_settings WHERE organization_id = $1), 0) ELSE compensation_amount_minor END
+           compensation_amount_minor = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN ${effectiveRateSql('products')} ELSE compensation_amount_minor END
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
          RETURNING quality_review_status AS "qualityReviewStatus", quality_review_note AS "qualityReviewNote", compensation_amount_minor AS "compensationAmountMinor"`,
         [ctx.organizationId, productId, input.status, input.note ?? null, ctx.userId]
@@ -1851,8 +1875,8 @@ export class StaffCatalogController {
       sku: string | null; current_price_amount: number | null; gender: string | null; specs_count: number; media_count: number;
     }>(
       `SELECT p.name, p.description, p.department_id, p.brand_id, p.primary_category_id, v.sku, v.current_price_amount, v.gender,
-              COALESCE((SELECT count(*) FROM jsonb_object_keys(COALESCE(v.attributes, '{}'::jsonb))), 0)::int AS specs_count,
-              (SELECT count(*) FROM product_media pm WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)::int AS media_count
+              ${meaningfulSpecsSql}::int AS specs_count,
+              (SELECT count(*) FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready' WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)::int AS media_count
        FROM products p
        LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id = p.organization_id AND product_id = p.id AND deleted_at IS NULL ORDER BY created_at LIMIT 1) v ON true
        WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
@@ -1862,14 +1886,14 @@ export class StaffCatalogController {
     const missing: string[] = [];
     if (!product.name?.trim()) missing.push('naziv');
     if (!product.sku?.trim()) missing.push('šifra/SKU');
-    if (!Number(product.current_price_amount)) missing.push('cena');
+    if (!(Number(product.current_price_amount) > 0)) missing.push('cena');
     if (!product.department_id) missing.push('odeljenje');
     if (!product.brand_id) missing.push('brend');
     if (!product.primary_category_id) missing.push('kategorija');
     if (!product.gender?.trim()) missing.push('pol');
     if (!product.description?.trim()) missing.push('opis');
     if (!product.media_count) missing.push('glavna slika');
-    if (Number(product.specs_count) < 3) missing.push('najmanje 3 specifikacije');
+    if (Number(product.specs_count) < 3) missing.push(`najmanje 3 specifikacije (uneto ${product.specs_count})`);
     return { missing };
   }
 
@@ -1880,7 +1904,7 @@ export class StaffCatalogController {
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", p.created_by_user_id AS "createdByUserId",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
-              p.compensation_amount_minor AS "compensationAmountMinor", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
+              p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
               v.id AS "variantId", v.sku, v.barcode, v.mpn, v.name AS "variantName", v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
