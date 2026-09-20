@@ -15,7 +15,7 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   // Capacitor Android serves the mobile UI from these local origins. Keep
   // them enabled in code so a Render environment update cannot strand the
   // Reader Station with a browser-level "Failed to fetch" error.
-  const corsOrigins = [...new Set([...config.CORS_ALLOWED_ORIGINS, 'capacitor://localhost', 'http://localhost'])];
+  const corsOrigins = [...new Set([...config.CORS_ALLOWED_ORIGINS, 'capacitor://localhost', 'http://localhost', 'https://localhost'])];
   app.enableCors({
     origin: corsOrigins,
     credentials: true

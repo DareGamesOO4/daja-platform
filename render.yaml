@@ -13,7 +13,7 @@ services:
       - key: API_PUBLIC_BASE_URL
         value: https://daja-platform-api.onrender.com
       - key: CORS_ALLOWED_ORIGINS
-        value: http://localhost:5173,http://127.0.0.1:5173,http://localhost,capacitor://localhost,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
+        value: http://localhost:5173,http://127.0.0.1:5173,http://localhost,https://localhost,capacitor://localhost,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -69,7 +69,7 @@ services:
       - key: API_PUBLIC_BASE_URL
         value: https://daja-platform-api.onrender.com
       - key: CORS_ALLOWED_ORIGINS
-        value: http://localhost:5173,http://127.0.0.1:5173,http://localhost,capacitor://localhost,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
+        value: http://localhost:5173,http://127.0.0.1:5173,http://localhost,https://localhost,capacitor://localhost,https://dajashop.rs,https://www.dajashop.rs,https://dajashop.pages.dev
       - key: LOG_LEVEL
         value: info
       - key: DATABASE_URL
