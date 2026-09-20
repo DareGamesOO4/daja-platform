@@ -10,9 +10,10 @@ import {
 import type { Server, Socket } from 'socket.io';
 import { createRequestId } from '@daja/shared';
 import type { AppConfig } from '@daja/config';
+import type { Database } from '@daja/database';
 import { AuthService } from './auth.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
-import { CONFIG } from './tokens.js';
+import { CONFIG, DATABASE } from './tokens.js';
 
 type RealtimeEvent =
   | 'product.updated'
@@ -51,7 +52,8 @@ export class RealtimeGateway {
   constructor(
     @Inject(AuthService) private readonly authService: AuthService,
     @Inject(CustomerAuthService) private readonly customerAuth: CustomerAuthService,
-    @Inject(CONFIG) private readonly config: AppConfig
+    @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(DATABASE) private readonly database: Database
   ) {}
 
   @WebSocketServer()
@@ -74,6 +76,7 @@ export class RealtimeGateway {
         socket.data.userId = ctx.userId;
         socket.data.permissions = ctx.permissions;
         socket.data.locationId = ctx.locationId;
+        socket.data.deviceId = ctx.deviceId;
         void socket.join(orgRoom(ctx.organizationId));
         if (ctx.locationId) {
           void socket.join(locationRoom(ctx.organizationId, ctx.locationId));
@@ -128,6 +131,7 @@ export class RealtimeGateway {
     socket.data.userId = userId;
     socket.data.permissions = permissions;
     socket.data.locationId = locationId;
+    socket.data.deviceId = stringValue(socket.handshake.auth.deviceId) ?? stringValue(socket.handshake.query.deviceId);
     void socket.join(orgRoom(organizationId));
     if (locationId) {
       void socket.join(locationRoom(organizationId, locationId));
@@ -172,12 +176,40 @@ export class RealtimeGateway {
     }
   }
 
+  /** A scan room is a random, per-browser-session capability. It prevents
+   * unrelated admin tabs from receiving another tab's reader result. */
+  @SubscribeMessage('reader.scan.subscribe')
+  async subscribeScan(@ConnectedSocket() socket: Socket, @MessageBody() body: { sessionId?: string } | undefined) {
+    if (!socket.data.organizationId || !body?.sessionId || !/^[0-9a-f-]{36}$/i.test(body.sessionId)) return { ok: false };
+    const allowed = await this.database.query(`SELECT 1 FROM rfid_reader_scan_sessions WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3`, [body.sessionId, socket.data.organizationId, socket.data.userId]);
+    if (!allowed.rows[0]) return { ok: false };
+    void socket.join(scanRoom(socket.data.organizationId, body.sessionId));
+    return { ok: true };
+  }
+
+  @SubscribeMessage('reader.station.subscribe')
+  async subscribeStation(@ConnectedSocket() socket: Socket, @MessageBody() body: { stationId?: string } | undefined) {
+    if (!socket.data.organizationId || !body?.stationId || !/^[0-9a-f-]{36}$/i.test(body.stationId)) return { ok: false };
+    const allowed = await this.database.query(`SELECT 1 FROM rfid_reader_stations WHERE id=$1 AND organization_id=$2 AND device_id=$3`, [body.stationId, socket.data.organizationId, socket.data.deviceId]);
+    if (!allowed.rows[0]) return { ok: false };
+    void socket.join(stationRoom(socket.data.organizationId, body.stationId));
+    return { ok: true };
+  }
+
   publishCustomerEmailVerified(input: { organizationId: string; customerId: string }): void {
     this.server.to(customerRoom(input.organizationId, input.customerId)).emit('customer.email_verified', {
       event: 'customer.email_verified',
       data: { emailVerified: true },
       serverTime: new Date().toISOString()
     });
+  }
+
+  publishToStation(organizationId: string, stationId: string, event: string, data: Record<string, unknown>): void {
+    this.server.to(stationRoom(organizationId, stationId)).emit(event, { event, data, serverTime: new Date().toISOString() });
+  }
+
+  publishToSession(organizationId: string, sessionId: string, event: string, data: Record<string, unknown>): void {
+    this.server.to(scanRoom(organizationId, sessionId)).emit(event, { event, data, serverTime: new Date().toISOString() });
   }
 }
 
@@ -207,6 +239,8 @@ function publicCatalogRoom(organizationId: string): string {
 function customerRoom(organizationId: string, customerId: string): string {
   return `customer:${organizationId}:${customerId}`;
 }
+function stationRoom(organizationId: string, stationId: string): string { return `reader-station:${organizationId}:${stationId}`; }
+function scanRoom(organizationId: string, sessionId: string): string { return `reader-scan:${organizationId}:${sessionId}`; }
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;

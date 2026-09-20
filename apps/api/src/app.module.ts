@@ -15,6 +15,8 @@ import {
   StaffCatalogController
 } from './plan2.controllers.js';
 import { RealtimeGateway } from './realtime.gateway.js';
+import { ReaderStationController } from './reader-station.controller.js';
+import { ReaderStationService } from './reader-station.service.js';
 import { DeviceController, SyncController } from './sync.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
@@ -78,6 +80,7 @@ const logger = createLogger(config, 'api');
     SyncController,
     OfflineInventoryController,
     DevicePluginsController
+    ,ReaderStationController
   ],
   providers: [
     { provide: CONFIG, useValue: config },
@@ -98,6 +101,7 @@ const logger = createLogger(config, 'api');
     PolicyPublicationService,
     PromotionsService,
     RealtimeGateway,
+    ReaderStationService,
     DevicePluginsService
   ]
 })
