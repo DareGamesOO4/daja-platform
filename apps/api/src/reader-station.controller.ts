@@ -6,7 +6,7 @@ import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { ReaderStationService } from './reader-station.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
-const registerSchema=z.object({name:z.string().trim().min(1).max(120),locationId:uuidSchema.optional()});
+const registerSchema=z.object({name:z.string().trim().min(1).max(120),locationId:uuidSchema.optional(),hardwareKey:uuidSchema.optional()});
 const stationPreviewSchema=z.object({name:z.string().trim().min(1).max(240),sku:z.string().trim().max(120).optional(),barcode:z.string().trim().max(256).optional(),imageUrl:z.string().url().max(2000).optional(),description:z.string().trim().max(1000).optional()});
 const startSchema=z.object({stationId:uuidSchema,clientId:uuidSchema,preview:stationPreviewSchema.optional()});
 const epcSchema=z.object({sessionId:uuidSchema,epc:z.string().trim().min(1).max(256)});

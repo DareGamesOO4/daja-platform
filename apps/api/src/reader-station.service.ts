@@ -18,14 +18,24 @@ interface SessionRow {
 export class ReaderStationService {
   constructor(@Inject(DATABASE) private readonly database: Database, private readonly realtime: RealtimeGateway) {}
 
-  async register(ctx: RequestContext, input: { name: string; locationId?: string | undefined }): Promise<Record<string, unknown>> {
+  async register(ctx: RequestContext, input: { name: string; locationId?: string | undefined; hardwareKey?: string | undefined }): Promise<Record<string, unknown>> {
     if (!ctx.deviceId) throw new ValidationFailedError('Reader Station zahteva identitet uređaja.');
-    const id = randomUUID();
+    const hardwareKey = input.hardwareKey ?? ctx.deviceId;
+    const existing = await this.database.query<{ id: string }>(
+      `SELECT id FROM rfid_reader_stations WHERE organization_id=$1 AND (hardware_key=$2 OR (hardware_key IS NULL AND device_id=$3)) ORDER BY last_seen_at DESC LIMIT 1`,
+      [ctx.organizationId, hardwareKey, ctx.deviceId]
+    );
+    const id = existing.rows[0]?.id ?? randomUUID();
     const result = await this.database.query<{ id: string; name: string; location_id: string | null }>(
-      `INSERT INTO rfid_reader_stations (id, organization_id, device_id, name, location_id, registered_by, last_seen_at)
-       VALUES ($1,$2,$3,$4,$5,$6,now())
-       ON CONFLICT (organization_id, device_id) DO UPDATE SET name=EXCLUDED.name, location_id=EXCLUDED.location_id, registered_by=EXCLUDED.registered_by, last_seen_at=now(), updated_at=now()
-       RETURNING id,name,location_id`, [id, ctx.organizationId, ctx.deviceId, input.name, input.locationId ?? null, ctx.userId]
+      `INSERT INTO rfid_reader_stations (id, organization_id, device_id, hardware_key, name, location_id, registered_by, last_seen_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+       ON CONFLICT (id) DO UPDATE SET device_id=EXCLUDED.device_id, hardware_key=EXCLUDED.hardware_key, name=EXCLUDED.name, location_id=EXCLUDED.location_id, registered_by=EXCLUDED.registered_by, last_seen_at=now(), updated_at=now()
+       RETURNING id,name,location_id`, [id, ctx.organizationId, ctx.deviceId, hardwareKey, input.name, input.locationId ?? null, ctx.userId]
+    );
+    await this.database.query(
+      `UPDATE rfid_reader_stations SET last_seen_at=now()-interval '1 day', updated_at=now()
+       WHERE organization_id=$1 AND id<>$2 AND hardware_key IS NULL AND name=$3`,
+      [ctx.organizationId, id, input.name]
     );
     const row = result.rows[0]!;
     return { id: row.id, name: row.name, locationId: row.location_id, online: true };
