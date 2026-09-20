@@ -5,6 +5,10 @@ import type pg from 'pg';
 import { fileURLToPath } from 'node:url';
 
 const MIGRATION_LOCK_ID = 74794652901801;
+// These historic migrations contain only idempotent DDL / conflict-safe seed
+// statements. Older Render releases recorded their checksum before completing
+// the transaction, so replaying them is safe and repairs the history row.
+const RECOVERABLE_MIGRATION_VERSIONS = new Set(['031', '043']);
 
 function checksum(contents: string): string {
   return createHash('sha256').update(contents).digest('hex');
@@ -81,7 +85,7 @@ export async function migrationStatus(pool: pg.Pool): Promise<MigrationStatus[]>
   const appliedByVersion = new Map(applied.rows.map((row) => [row.version, row]));
   return migrations.map((migration) => {
     const row = appliedByVersion.get(migration.version);
-    if (row && !checksumMatches(migration.sql, row.checksum) && migration.version !== '031') {
+    if (row && !checksumMatches(migration.sql, row.checksum) && !RECOVERABLE_MIGRATION_VERSIONS.has(migration.version)) {
       throw new Error(`Checksum mismatch for migration ${migration.version}`);
     }
     return {
@@ -114,12 +118,10 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
       );
       if (existing.rowCount === 1) {
         const checksumMismatch = !checksumMatches(migration.sql, existing.rows[0]?.checksum ?? '');
-        if (checksumMismatch && migration.version !== '031') {
+        if (checksumMismatch && !RECOVERABLE_MIGRATION_VERSIONS.has(migration.version)) {
           throw new Error(`Checksum mismatch for migration ${migration.version}`);
         }
-        if (checksumMismatch && migration.version === '031') {
-          // 031 consists solely of idempotent DDL and conflict-safe seed rows.
-          // An interrupted legacy release recorded it before completing the SQL.
+        if (checksumMismatch && RECOVERABLE_MIGRATION_VERSIONS.has(migration.version)) {
           await client.query(migration.sql);
           await client.query('UPDATE schema_migrations SET checksum = $1 WHERE version = $2', [migration.checksum, migration.version]);
         }
