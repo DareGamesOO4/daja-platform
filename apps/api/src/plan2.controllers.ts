@@ -2271,6 +2271,23 @@ export class InventoryController {
     private readonly productAlerts: ProductAlertService
   ) {}
 
+  private isCatalogContributor(ctx: RequestContext): boolean {
+    return ctx.permissions.includes('catalog.contributor') || ctx.roles.includes('Unosilac kataloga');
+  }
+
+  private async assertContributorOwnsVariant(ctx: RequestContext, variantId: string): Promise<void> {
+    if (!this.isCatalogContributor(ctx)) return;
+    const result = await this.database.pool.query(
+      `SELECT 1
+       FROM product_variants v
+       JOIN products p ON p.id = v.product_id AND p.organization_id = v.organization_id
+       WHERE v.organization_id = $1 AND v.id = $2 AND p.created_by_user_id = $3
+         AND v.deleted_at IS NULL AND p.deleted_at IS NULL`,
+      [ctx.organizationId, variantId, ctx.userId],
+    );
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+  }
+
   @Get('locations')
   async locations(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
@@ -2331,6 +2348,7 @@ export class InventoryController {
       }),
       body
     );
+    await this.assertContributorOwnsVariant(ctx, input.variantId);
     const item = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const item = await new InventoryRepository(client).createItem(ctx, input);
       await new AuditRepository(client).append({
@@ -2381,6 +2399,7 @@ export class InventoryController {
       }),
       body
     );
+    await this.assertContributorOwnsVariant(ctx, input.variantId);
     const balance = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const balance = await new InventoryRepository(client).adjust(ctx, input);
       await new AuditRepository(client).append({
@@ -2434,6 +2453,18 @@ export class InventoryController {
       z.object({ toLocationId: uuidSchema, reason: z.string().trim().min(1) }),
       body
     );
+    if (this.isCatalogContributor(ctx)) {
+      const ownership = await this.database.pool.query(
+        `SELECT 1
+         FROM inventory_items i
+         JOIN product_variants v ON v.id = i.variant_id AND v.organization_id = i.organization_id
+         JOIN products p ON p.id = v.product_id AND p.organization_id = v.organization_id
+         WHERE i.organization_id = $1 AND i.id = $2 AND p.created_by_user_id = $3
+           AND i.deleted_at IS NULL AND v.deleted_at IS NULL AND p.deleted_at IS NULL`,
+        [ctx.organizationId, parseWithSchema(uuidSchema, id), ctx.userId],
+      );
+      if (ownership.rowCount !== 1) throw new TenantAccessDeniedError();
+    }
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const moved = await new InventoryRepository(client).moveItem(ctx, {
         inventoryItemId: parseWithSchema(uuidSchema, id),
@@ -2462,9 +2493,11 @@ export class InventoryController {
   async balances(@Req() request: Request, @Param('variantId') variantId: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'inventory.read');
+    const parsedVariantId = parseWithSchema(uuidSchema, variantId);
+    await this.assertContributorOwnsVariant(ctx, parsedVariantId);
     return new InventoryRepository(this.database.pool).balances(
       ctx,
-      parseWithSchema(uuidSchema, variantId)
+      parsedVariantId
     );
   }
 }
