@@ -55,7 +55,8 @@ const nfcCardIdentifySchema = z.object({ cardId: nfcCardIdSchema });
 const mobileGoogleStartSchema = z.object({
   email: z.string().email().optional(),
   deviceId: z.string().uuid(),
-  state: z.string().min(32).max(200)
+  state: z.string().min(32).max(200),
+  callbackScheme: z.enum(['dajashop-rfid', 'dajashop-reader-station']).optional()
 });
 
 const mobileGoogleExchangeSchema = z.object({

@@ -23,7 +23,7 @@ function callbackUrl(value: string): URL {
     throw new ValidationFailedError('Desktop callback URL is invalid');
   }
   const mobileCallback =
-    url.protocol === 'dajashop-rfid:' &&
+    (url.protocol === 'dajashop-rfid:' || url.protocol === 'dajashop-reader-station:') &&
     url.hostname === 'auth' &&
     (url.pathname === '' || url.pathname === '/');
   if (!mobileCallback && (
@@ -77,7 +77,7 @@ export class DesktopGoogleOAuthService {
     return { authorizationUrl: this.customerAuth.googleAuthorizationUrl(providerState) };
   }
 
-  async startMobile(input: { email?: string | undefined; deviceId: string; state: string }) {
+  async startMobile(input: { email?: string | undefined; deviceId: string; state: string; callbackScheme?: 'dajashop-rfid' | 'dajashop-reader-station' | undefined }) {
     const staff = input.email
       ? await new AuthRepository(this.database.pool).findStaffUserForLogin({ email: input.email })
       : undefined;
@@ -102,7 +102,7 @@ export class DesktopGoogleOAuthService {
     return this.start({
       organizationId,
       deviceId: input.deviceId,
-      callbackUrl: 'dajashop-rfid://auth',
+      callbackUrl: `${input.callbackScheme ?? 'dajashop-rfid'}://auth`,
       state: input.state
     });
   }
