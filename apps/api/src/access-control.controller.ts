@@ -95,6 +95,8 @@ export class AccessControlController {
       const user = await client.query<{ id: string; email: string; displayName: string }>(
         `INSERT INTO users (organization_id, email, display_name, active)
          VALUES ($1, lower($2), $3, true)
+         ON CONFLICT (organization_id, normalized_email)
+         DO UPDATE SET display_name = EXCLUDED.display_name, active = true, updated_at = now()
          RETURNING id, email, display_name AS "displayName"`,
         [ctx.organizationId, input.email, input.displayName]
       );
@@ -102,7 +104,8 @@ export class AccessControlController {
       if (!created) throw new ValidationFailedError('Korisnik nije kreiran.');
       await client.query(
         `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, is_primary)
-         VALUES ($1, $2, $3, 'all_locations', true)`,
+         VALUES ($1, $2, $3, 'all_locations', true)
+         ON CONFLICT DO NOTHING`,
         [ctx.organizationId, created.id, input.roleId]
       );
       return { ...created, assignments: [{ roleId: input.roleId, scope: 'all_locations', primary: true }] };
