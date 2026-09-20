@@ -71,7 +71,8 @@ export class RealtimeGateway {
             stringValue(socket.handshake.auth.locationId) ??
             stringValue(socket.handshake.query.locationId)
         });
-        if (!ctx.permissions.includes('realtime.read')) {
+        const catalogContributor = ctx.permissions.includes('catalog.contributor') || ctx.roles.includes('Unosilac kataloga');
+        if (!ctx.permissions.includes('realtime.read') && !catalogContributor) {
           deny(socket);
           return;
         }
@@ -80,8 +81,11 @@ export class RealtimeGateway {
         socket.data.permissions = ctx.permissions;
         socket.data.locationId = ctx.locationId;
         socket.data.deviceId = ctx.deviceId;
-        void socket.join(orgRoom(ctx.organizationId));
-        if (ctx.locationId) {
+        // Contributors only need their own reader scan room. Do not put them
+        // in the organization-wide room, which contains unrelated staff
+        // events such as orders and inventory updates.
+        if (ctx.permissions.includes('realtime.read')) void socket.join(orgRoom(ctx.organizationId));
+        if (ctx.locationId && ctx.permissions.includes('realtime.read')) {
           void socket.join(locationRoom(ctx.organizationId, ctx.locationId));
         }
         return;
