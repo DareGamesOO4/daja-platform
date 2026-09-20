@@ -100,7 +100,19 @@ const productPatchSchema = productCreateSchema.partial().extend({
 
 const catalogAuditQuerySchema = z.object({
   productId: uuidSchema.optional(),
+  actorUserId: uuidSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).optional()
+});
+
+const workforceQuerySchema = z.object({
+  start: z.string().datetime().optional(),
+  end: z.string().datetime().optional()
+});
+
+const workforceRateSchema = z.object({ rateMinor: z.coerce.number().int().min(0).max(10_000_000) });
+const workforceReviewSchema = z.object({
+  status: z.enum(['approved', 'changes_requested']),
+  note: z.string().trim().max(2_000).optional()
 });
 
 const optionalSkuSchema = z
@@ -403,6 +415,11 @@ export class StaffCatalogController {
     const product = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
         const product = await new CatalogRepository(client).createProduct(ctx, input);
+        await client.query(
+          `UPDATE products SET created_by_user_id = $3
+           WHERE organization_id = $1 AND id = $2`,
+          [ctx.organizationId, product.id, ctx.userId]
+        );
         await new AuditRepository(client).append({
           ctx,
           aggregateType: 'product',
@@ -428,7 +445,7 @@ export class StaffCatalogController {
   async listProducts(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
-    return this.adminProductRows(ctx.organizationId);
+    return this.adminProductRows(ctx.organizationId, undefined, this.isCatalogContributor(ctx) ? ctx.userId : undefined);
   }
 
   @Get('products/:id')
@@ -436,7 +453,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     const productId = parseWithSchema(uuidSchema, id);
-    const product = (await this.adminProductRows(ctx.organizationId, productId))[0];
+    const product = (await this.adminProductRows(ctx.organizationId, productId, this.isCatalogContributor(ctx) ? ctx.userId : undefined))[0];
     if (!product) throw new TenantAccessDeniedError();
     return product;
   }
@@ -458,6 +475,9 @@ export class StaffCatalogController {
              AND variant.product_id = $${values.length}
            )
          )`
+      : '';
+    const actorFilter = input.actorUserId
+      ? `AND audit.actor_user_id = $${values.push(input.actorUserId)}`
       : '';
     values.push(input.limit ?? 50);
 
@@ -501,6 +521,7 @@ export class StaffCatalogController {
           WHERE audit.organization_id = $1
             AND audit.aggregate_type IN ('product', 'variant', 'inventory_balance')
             ${productFilter}
+            ${actorFilter}
           ORDER BY audit.occurred_at DESC, audit.id DESC
           LIMIT $${values.length}`,
         values
@@ -508,17 +529,166 @@ export class StaffCatalogController {
     ).rows;
   }
 
+  @Get('admin/workforce')
+  async workforce(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const input = parseWithSchema(workforceQuerySchema, query);
+    const start = input.start ?? new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const end = input.end ?? new Date().toISOString();
+    return (await this.database.pool.query(
+      `WITH products_with_quality AS (
+         SELECT p.*, (
+           p.name IS NULL OR btrim(p.name) = '' OR p.department_id IS NULL OR p.brand_id IS NULL OR
+           p.primary_category_id IS NULL OR COALESCE(p.description, '') = '' OR
+           NOT EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.sku IS NOT NULL AND v.current_price_amount > 0 AND v.gender IS NOT NULL) OR
+           NOT EXISTS (SELECT 1 FROM product_media pm WHERE pm.product_id = p.id AND pm.organization_id = p.organization_id) OR
+           COALESCE((SELECT count(*) FROM product_variants v CROSS JOIN LATERAL jsonb_object_keys(COALESCE(v.attributes, '{}'::jsonb)) attribute WHERE v.product_id = p.id AND v.organization_id = p.organization_id AND v.deleted_at IS NULL), 0) < 3
+         ) AS incomplete
+         FROM products p
+         WHERE p.organization_id = $1
+       )
+       SELECT u.id, COALESCE(u.display_name, u.email, 'Nepoznat korisnik') AS "name", u.email,
+              count(p.id) FILTER (WHERE p.created_at >= $2::timestamptz AND p.created_at <= $3::timestamptz) AS "createdInPeriod",
+              count(p.id) FILTER (WHERE p.created_at >= date_trunc('day', now() AT TIME ZONE 'Europe/Belgrade') AT TIME ZONE 'Europe/Belgrade') AS "createdToday",
+              count(p.id) FILTER (WHERE p.quality_review_status = 'approved') AS "approvedCount",
+              count(p.id) FILTER (WHERE p.quality_review_status = 'pending') AS "pendingCount",
+              count(p.id) FILTER (WHERE p.quality_review_status = 'changes_requested') AS "changesRequestedCount",
+              count(p.id) FILTER (WHERE p.incomplete AND p.deleted_at IS NULL) AS "incompleteCount",
+              count(p.id) FILTER (WHERE p.deleted_at IS NOT NULL) AS "deletedCount",
+              COALESCE(sum(p.compensation_amount_minor), 0) AS "approvedAmountMinor",
+              COALESCE(rate.rate_minor, settings.default_rate_minor, 0) AS "rateMinor",
+              COALESCE(jsonb_object_agg(hour_bucket.hour, hour_bucket.count) FILTER (WHERE hour_bucket.hour IS NOT NULL), '{}'::jsonb) AS "hourly"
+       FROM users u
+       LEFT JOIN products_with_quality p ON p.created_by_user_id = u.id
+       LEFT JOIN catalog_contributor_rates rate ON rate.organization_id = u.organization_id AND rate.user_id = u.id
+       LEFT JOIN catalog_contributor_settings settings ON settings.organization_id = u.organization_id
+       LEFT JOIN LATERAL (
+         SELECT to_char(date_trunc('hour', created_at AT TIME ZONE 'Europe/Belgrade'), 'HH24') AS hour, count(*)::int AS count
+         FROM products h WHERE h.organization_id = u.organization_id AND h.created_by_user_id = u.id AND h.created_at >= $2::timestamptz AND h.created_at <= $3::timestamptz
+         GROUP BY 1
+       ) hour_bucket ON true
+       WHERE u.organization_id = $1 AND u.active
+       GROUP BY u.id, u.display_name, u.email, rate.rate_minor, settings.default_rate_minor
+       HAVING count(p.id) > 0 OR EXISTS (SELECT 1 FROM user_role_assignments ura JOIN roles r ON r.id = ura.role_id WHERE ura.user_id = u.id AND ura.deleted_at IS NULL AND r.code = 'catalog_contributor')
+       ORDER BY "createdInPeriod" DESC, "name" ASC`,
+      [ctx.organizationId, start, end]
+    )).rows;
+  }
+
+  @Get('admin/workforce/settings')
+  async workforceSettings(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    return (await this.database.pool.query(
+      `SELECT default_rate_minor AS "defaultRateMinor", currency FROM catalog_contributor_settings WHERE organization_id = $1`,
+      [ctx.organizationId]
+    )).rows[0] ?? { defaultRateMinor: 0, currency: 'RSD' };
+  }
+
+  @Patch('admin/workforce/settings')
+  async updateWorkforceSettings(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const input = parseWithSchema(workforceRateSchema, body);
+    return (await this.database.pool.query(
+      `INSERT INTO catalog_contributor_settings (organization_id, default_rate_minor, updated_by_user_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (organization_id) DO UPDATE SET default_rate_minor = EXCLUDED.default_rate_minor, updated_at = now(), updated_by_user_id = EXCLUDED.updated_by_user_id
+       RETURNING default_rate_minor AS "defaultRateMinor", currency`,
+      [ctx.organizationId, input.rateMinor, ctx.userId]
+    )).rows[0];
+  }
+
+  @Patch('admin/workforce/:userId/rate')
+  async updateWorkforceRate(@Req() request: Request, @Param('userId') userId: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const input = parseWithSchema(workforceRateSchema, body);
+    const id = parseWithSchema(uuidSchema, userId);
+    return (await this.database.pool.query(
+      `INSERT INTO catalog_contributor_rates (organization_id, user_id, rate_minor, updated_by_user_id)
+       SELECT $1, id, $3, $4 FROM users WHERE organization_id = $1 AND id = $2
+       ON CONFLICT (organization_id, user_id) DO UPDATE SET rate_minor = EXCLUDED.rate_minor, updated_at = now(), updated_by_user_id = EXCLUDED.updated_by_user_id
+       RETURNING rate_minor AS "rateMinor"`,
+      [ctx.organizationId, id, input.rateMinor, ctx.userId]
+    )).rows[0];
+  }
+
+  @Get('admin/workforce/:userId')
+  async workforceMember(@Req() request: Request, @Param('userId') userId: string) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const id = parseWithSchema(uuidSchema, userId);
+    const rawProducts = await this.adminProductRows(ctx.organizationId, undefined, id, true);
+    const products = await Promise.all(rawProducts.map(async (product) => {
+      if (product.deletedAt) return { ...product, qualityMissing: [] };
+      const quality = await this.productQuality(this.database.pool, ctx.organizationId, product.id);
+      return { ...product, qualityMissing: quality.missing };
+    }));
+    const activity = (await this.database.pool.query(
+      `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
+              audit.before_payload AS "beforePayload", audit.after_payload AS "afterPayload", audit.reason,
+              COALESCE(audit.after_payload ->> 'name', audit.before_payload ->> 'name', 'Artikal') AS "productName"
+       FROM audit_events audit
+       WHERE audit.organization_id = $1 AND audit.actor_user_id = $2 AND audit.aggregate_type IN ('product', 'variant', 'inventory_balance')
+       ORDER BY audit.occurred_at DESC LIMIT 250`, [ctx.organizationId, id]
+    )).rows;
+    return { products, activity };
+  }
+
+  @Patch('admin/workforce/products/:id/review')
+  async reviewContributorProduct(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const productId = parseWithSchema(uuidSchema, id);
+    const input = parseWithSchema(workforceReviewSchema, body);
+    if (input.status === 'changes_requested' && !input.note) throw new ValidationFailedError('Napomena je obavezna kada vraćate proizvod na doradu.');
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const before = await new CatalogRepository(client).getProduct(ctx, productId);
+      const quality = await this.productQuality(client, ctx.organizationId, productId);
+      if (input.status === 'approved' && quality.missing.length) throw new ValidationFailedError(`Proizvod nije kompletan: ${quality.missing.join(', ')}`);
+      const result = await client.query(
+        `UPDATE products SET quality_review_status = $3, quality_review_note = $4, quality_reviewed_by_user_id = $5, quality_reviewed_at = now(),
+           compensation_approved_at = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN now() ELSE compensation_approved_at END,
+           compensation_amount_minor = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN COALESCE((SELECT rate_minor FROM catalog_contributor_rates WHERE organization_id = $1 AND user_id = products.created_by_user_id), (SELECT default_rate_minor FROM catalog_contributor_settings WHERE organization_id = $1), 0) ELSE compensation_amount_minor END
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         RETURNING quality_review_status AS "qualityReviewStatus", quality_review_note AS "qualityReviewNote", compensation_amount_minor AS "compensationAmountMinor"`,
+        [ctx.organizationId, productId, input.status, input.note ?? null, ctx.userId]
+      );
+      if (!result.rows[0]) throw new TenantAccessDeniedError();
+      await new AuditRepository(client).append({
+        ctx,
+        aggregateType: 'product',
+        aggregateId: productId,
+        operation: input.status === 'approved' ? 'quality_approved' : 'quality_changes_requested',
+        beforePayload: before,
+        afterPayload: result.rows[0],
+        ...(input.note ? { reason: input.note } : {})
+      });
+      return result.rows[0];
+    });
+  }
+
   @Patch('products/:id')
   async patchProduct(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
+    await this.assertContributorOwnsProduct(ctx, productId);
     const input = parseWithSchema(productPatchSchema, body);
     const patched = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
         const after = await repository.patchProduct(ctx, productId, input);
+        await client.query(
+          `UPDATE products
+           SET quality_review_status = 'pending', quality_review_note = NULL,
+               quality_reviewed_by_user_id = NULL, quality_reviewed_at = NULL
+           WHERE organization_id = $1 AND id = $2 AND quality_review_status = 'approved'`,
+          [ctx.organizationId, productId]
+        );
         await new StorefrontRepository(client).refreshProductSnapshots({
           organizationId: ctx.organizationId,
           productId
@@ -598,6 +768,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const productId = parseWithSchema(uuidSchema, id);
+    await this.assertContributorOwnsProduct(ctx, productId);
     const input = parseWithSchema(z.object({ active: z.boolean() }), body);
     const changed = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
@@ -639,6 +810,7 @@ export class StaffCatalogController {
   async deleteProduct(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
+    if (this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
     const productId = parseWithSchema(uuidSchema, id);
     const deleted = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
@@ -1565,12 +1737,62 @@ export class StaffCatalogController {
   /** The admin catalog includes internal inventory placement.  Keep it in a
    * single query so a realtime update can reload one product, rather than
    * forcing the dashboard to refresh its whole product list. */
-  private async adminProductRows(organizationId: string, productId?: string) {
+  private isCatalogContributor(ctx: RequestContext): boolean {
+    return ctx.permissions.includes('catalog.contributor') || ctx.roles.includes('Unosilac kataloga');
+  }
+
+  private requireWorkforceManager(ctx: RequestContext): void {
+    if (!ctx.isOwner && !ctx.permissions.includes('catalog.workforce.manage')) {
+      throw new TenantAccessDeniedError();
+    }
+  }
+
+  private async assertContributorOwnsProduct(ctx: RequestContext, productId: string): Promise<void> {
+    if (!this.isCatalogContributor(ctx)) return;
+    const result = await this.database.pool.query(
+      `SELECT 1 FROM products WHERE organization_id = $1 AND id = $2 AND created_by_user_id = $3 AND deleted_at IS NULL`,
+      [ctx.organizationId, productId, ctx.userId]
+    );
+    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+  }
+
+  private async productQuality(client: Pick<Database['pool'], 'query'>, organizationId: string, productId: string): Promise<{ missing: string[] }> {
+    const product = (await client.query<{
+      name: string; description: string | null; department_id: string | null; brand_id: string | null; primary_category_id: string | null;
+      sku: string | null; current_price_amount: number | null; gender: string | null; specs_count: number; media_count: number;
+    }>(
+      `SELECT p.name, p.description, p.department_id, p.brand_id, p.primary_category_id, v.sku, v.current_price_amount, v.gender,
+              COALESCE((SELECT count(*) FROM jsonb_object_keys(COALESCE(v.attributes, '{}'::jsonb))), 0)::int AS specs_count,
+              (SELECT count(*) FROM product_media pm WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)::int AS media_count
+       FROM products p
+       LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id = p.organization_id AND product_id = p.id AND deleted_at IS NULL ORDER BY created_at LIMIT 1) v ON true
+       WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
+      [organizationId, productId]
+    )).rows[0];
+    if (!product) throw new TenantAccessDeniedError();
+    const missing: string[] = [];
+    if (!product.name?.trim()) missing.push('naziv');
+    if (!product.sku?.trim()) missing.push('šifra/SKU');
+    if (!Number(product.current_price_amount)) missing.push('cena');
+    if (!product.department_id) missing.push('odeljenje');
+    if (!product.brand_id) missing.push('brend');
+    if (!product.primary_category_id) missing.push('kategorija');
+    if (!product.gender?.trim()) missing.push('pol');
+    if (!product.description?.trim()) missing.push('opis');
+    if (!product.media_count) missing.push('glavna slika');
+    if (Number(product.specs_count) < 3) missing.push('najmanje 3 specifikacije');
+    return { missing };
+  }
+
+  private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false) {
     return (
       await this.database.pool.query(
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
-              p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", d.slug AS department, b.name AS brand, c.name AS category,
+              p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", p.created_by_user_id AS "createdByUserId",
+              p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
+              p.compensation_amount_minor AS "compensationAmountMinor", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
+              d.slug AS department, b.name AS brand, c.name AS category,
               v.id AS "variantId", v.sku, v.barcode, v.mpn, v.name AS "variantName", v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
@@ -1615,10 +1837,12 @@ export class StaffCatalogController {
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
        ) media ON true
-       WHERE p.organization_id = $1 AND p.deleted_at IS NULL
-       ${productId ? 'AND p.id = $2' : ''}
+       WHERE p.organization_id = $1
+         AND ($2::uuid IS NULL OR p.id = $2)
+         AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
+         AND ($4::boolean OR p.deleted_at IS NULL)
        ORDER BY p.updated_at DESC`,
-        productId ? [organizationId, productId] : [organizationId]
+        [organizationId, productId ?? null, contributorId ?? null, includeDeleted]
       )
     ).rows;
   }

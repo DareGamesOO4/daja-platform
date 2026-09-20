@@ -209,9 +209,7 @@ export class AuthService {
     correlationId?: string | undefined;
   }): Promise<AuthenticatedStaff> {
     const email = input.customer.email?.trim().toLowerCase();
-    if (!email || !this.storefrontAdminEmails().includes(email)) {
-      throw new PermissionDeniedError('admin.access');
-    }
+    if (!email) throw new PermissionDeniedError('admin.access');
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const googleIdentity = await client.query(
@@ -223,11 +221,23 @@ export class AuthService {
       if (googleIdentity.rowCount !== 1) {
         throw new PermissionDeniedError('admin.google_identity');
       }
-      const user = await this.provisionStorefrontAdmin(client, {
-        organizationId: input.customer.organizationId,
-        email,
-        displayName: input.customer.displayName
-      });
+      const configuredAdmin = this.storefrontAdminEmails().includes(email);
+      const user = configuredAdmin
+        ? await this.provisionStorefrontAdmin(client, {
+            organizationId: input.customer.organizationId,
+            email,
+            displayName: input.customer.displayName
+          })
+        : (await client.query<{ id: string; organizationId: string }>(
+            `SELECT u.id, u.organization_id AS "organizationId"
+             FROM users u
+             JOIN user_role_assignments ura ON ura.user_id = u.id AND ura.organization_id = u.organization_id AND ura.deleted_at IS NULL
+             JOIN roles r ON r.id = ura.role_id AND r.organization_id = u.organization_id AND r.code = 'catalog_contributor' AND r.deleted_at IS NULL
+             WHERE u.organization_id = $1 AND u.normalized_email = lower($2) AND u.active
+             LIMIT 1`,
+            [input.customer.organizationId, email]
+          )).rows[0];
+      if (!user) throw new PermissionDeniedError('admin.access');
       const repo = new AuthRepository(client);
       const familyId = randomUUID();
       const refreshJti = randomUUID();
