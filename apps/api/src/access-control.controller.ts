@@ -25,6 +25,11 @@ const assignmentSchema = z.object({
 const assignmentsSchema = z.object({ assignments: z.array(assignmentSchema).max(100) });
 const roleSchema = z.object({ name: z.string().trim().min(1).max(120), description: z.string().trim().max(500).optional() });
 const permissionSchema = z.object({ permissions: z.array(z.string().trim().min(1).max(120)).max(300) });
+const createUserSchema = z.object({
+  email: z.string().trim().email().max(320),
+  displayName: z.string().trim().min(1).max(160),
+  roleId: z.string().uuid()
+});
 
 @Controller('admin/access')
 export class AccessControlController {
@@ -74,6 +79,34 @@ export class AccessControlController {
       [ctx.organizationId, Boolean(ctx.isOwner), await visibleLocationIds(this.database, ctx)]
     );
     return result.rows;
+  }
+
+  @Post('users')
+  async createUser(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requireAnyPermission(ctx, ['users.create', 'admin.users']);
+    const input = parse(createUserSchema, body);
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const role = await client.query<{ id: string }>(
+        `SELECT id FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
+        [input.roleId, ctx.organizationId]
+      );
+      if (role.rowCount !== 1) throw new ValidationFailedError('Uloga ne postoji u organizaciji.');
+      const user = await client.query<{ id: string; email: string; displayName: string }>(
+        `INSERT INTO users (organization_id, email, display_name, active)
+         VALUES ($1, lower($2), $3, true)
+         RETURNING id, email, display_name AS "displayName"`,
+        [ctx.organizationId, input.email, input.displayName]
+      );
+      const created = user.rows[0];
+      if (!created) throw new ValidationFailedError('Korisnik nije kreiran.');
+      await client.query(
+        `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, is_primary)
+         VALUES ($1, $2, $3, 'all_locations', true)`,
+        [ctx.organizationId, created.id, input.roleId]
+      );
+      return { ...created, assignments: [{ roleId: input.roleId, scope: 'all_locations', primary: true }] };
+    });
   }
 
   @Post('roles')
