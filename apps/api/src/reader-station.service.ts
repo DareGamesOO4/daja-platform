@@ -96,6 +96,24 @@ export class ReaderStationService {
     this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.scan.cancelled', payload);
   }
 
+  async abortFromStation(ctx: RequestContext, stationId: string, sessionId: string): Promise<void> {
+    if (!ctx.deviceId) throw new ValidationFailedError('Reader Station zahteva identitet uređaja.');
+    const station = await this.database.query<{ id: string }>(
+      `SELECT id FROM rfid_reader_stations WHERE id=$1 AND organization_id=$2 AND device_id=$3`,
+      [stationId, ctx.organizationId, ctx.deviceId]
+    );
+    if (!station.rows[0]) throw new ValidationFailedError('Ovaj uređaj nije dodeljeni Reader Station.');
+    const result = await this.database.query<SessionRow>(
+      `UPDATE rfid_reader_scan_sessions SET status='cancelled',completed_at=now()
+       WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status IN ('awaiting_epc','awaiting_barcode') RETURNING *`,
+      [sessionId, stationId, ctx.organizationId]
+    );
+    if (!result.rows[0]) return;
+    const payload = { sessionId, status: 'cancelled' };
+    this.realtime.publishToStation(ctx.organizationId, stationId, 'reader.scan.cancelled', payload);
+    this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.scan.cancelled', payload);
+  }
+
   private async stationSession(ctx: RequestContext, stationId: string, sessionId: string, status: ScanStatus): Promise<SessionRow> {
     await this.expire(); await this.heartbeat(ctx, stationId);
     const result = await this.database.query<SessionRow>(`SELECT * FROM rfid_reader_scan_sessions WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status=$4 AND expires_at>now()`, [sessionId,stationId,ctx.organizationId,status]);
