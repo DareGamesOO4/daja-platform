@@ -46,7 +46,10 @@ const allowedEvents: RealtimeEvent[] = [
 
 @WebSocketGateway({
   namespace: '/realtime',
-  cors: { origin: false }
+  // Socket.IO has its own CORS layer, separate from Express. Reflect the
+  // Android Capacitor origin here; connection authorization still requires a
+  // valid access token in handleConnection.
+  cors: { origin: true, credentials: true }
 })
 export class RealtimeGateway {
   constructor(
