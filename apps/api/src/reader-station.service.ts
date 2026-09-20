@@ -38,10 +38,12 @@ export class ReaderStationService {
 
   async list(ctx: RequestContext): Promise<readonly Record<string, unknown>[]> {
     await this.expire();
-    const result = await this.database.query<{ id: string; name: string; location_id: string | null; last_seen_at: string }>(
-      `SELECT id,name,location_id,last_seen_at FROM rfid_reader_stations WHERE organization_id=$1 AND last_seen_at > now() - interval '45 seconds' ORDER BY last_seen_at DESC`, [ctx.organizationId]
+    const result = await this.database.query<{ id: string; name: string; location_id: string | null; last_seen_at: string; busy: boolean }>(
+      `SELECT station.id,station.name,station.location_id,station.last_seen_at,
+              EXISTS(SELECT 1 FROM rfid_reader_scan_sessions session WHERE session.station_id=station.id AND session.status IN ('awaiting_epc','awaiting_barcode') AND session.expires_at>now()) AS busy
+       FROM rfid_reader_stations station WHERE station.organization_id=$1 AND station.last_seen_at > now() - interval '45 seconds' ORDER BY station.last_seen_at DESC`, [ctx.organizationId]
     );
-    return result.rows.map((row) => ({ id: row.id, name: row.name, locationId: row.location_id, online: true, lastSeenAt: row.last_seen_at }));
+    return result.rows.map((row) => ({ id: row.id, name: row.name, locationId: row.location_id, online: true, busy: row.busy, lastSeenAt: row.last_seen_at }));
   }
 
   async start(ctx: RequestContext, input: { stationId: string; clientId: string; preview?: Record<string, unknown> | undefined }): Promise<Record<string, unknown>> {
