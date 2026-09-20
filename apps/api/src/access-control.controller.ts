@@ -38,6 +38,20 @@ export class AccessControlController {
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
+  /** Return the current staff session capabilities for navigation and UI
+   * gating. This is intentionally available to every authenticated staff
+   * member; it does not expose other users or organization data. */
+  @Get('me')
+  async me(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    return {
+      userId: ctx.userId,
+      roles: ctx.roles,
+      permissions: ctx.permissions,
+      isOwner: Boolean(ctx.isOwner),
+    };
+  }
+
   @Get('roles')
   async roles(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
