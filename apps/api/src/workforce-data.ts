@@ -6,18 +6,18 @@ export const meaningfulSpecsSql = `(SELECT count(*) FROM jsonb_each_text(COALESC
  AND a.key NOT IN ('additional_barcodes', '_additionalBarcodes', 'additionalbarcodes', 'rfid_piece_placements', '_rfidPiecePlacements', 'rfidpieceplacements')
  AND left(a.key, 1) <> '_')`;
 
-// Personal category > personal department > personal flat > global category
+// Personal brand > personal department > personal flat > global brand
 // > global department > global flat. Zero is an explicit, valid override.
 export const effectiveRateSql = (alias: string) => `COALESCE(
  (SELECT r.rate_minor FROM catalog_contributor_rate_rules r WHERE r.organization_id = ${alias}.organization_id
    AND r.user_id = ${alias}.created_by_user_id AND r.department_id = ${alias}.department_id
-   AND (r.category_id IS NULL OR r.category_id = ${alias}.primary_category_id)
-   ORDER BY (r.category_id IS NOT NULL) DESC LIMIT 1),
+   AND r.category_id IS NULL AND (r.brand_id IS NULL OR r.brand_id = ${alias}.brand_id)
+   ORDER BY (r.brand_id IS NOT NULL) DESC LIMIT 1),
  (SELECT r.rate_minor FROM catalog_contributor_rates r WHERE r.organization_id = ${alias}.organization_id AND r.user_id = ${alias}.created_by_user_id),
  (SELECT r.rate_minor FROM catalog_contributor_rate_rules r WHERE r.organization_id = ${alias}.organization_id
    AND r.user_id IS NULL AND r.department_id = ${alias}.department_id
-   AND (r.category_id IS NULL OR r.category_id = ${alias}.primary_category_id)
-   ORDER BY (r.category_id IS NOT NULL) DESC LIMIT 1),
+   AND r.category_id IS NULL AND (r.brand_id IS NULL OR r.brand_id = ${alias}.brand_id)
+   ORDER BY (r.brand_id IS NOT NULL) DESC LIMIT 1),
  (SELECT s.default_rate_minor FROM catalog_contributor_settings s WHERE s.organization_id = ${alias}.organization_id), 0)`;
 
 export async function workforceSummary(

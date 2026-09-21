@@ -669,8 +669,8 @@ export class StaffCatalogController {
     this.requireWorkforceManager(ctx);
     const { userId } = parseWithSchema(z.object({ userId: uuidSchema.optional() }), query);
     const [rules, personal, settings] = await Promise.all([
-      this.database.pool.query(`SELECT id, user_id AS "userId", department_id AS "departmentId", category_id AS "categoryId", rate_minor AS "rateMinor"
-        FROM catalog_contributor_rate_rules WHERE organization_id=$1 AND (user_id IS NULL OR user_id=$2) ORDER BY updated_at DESC`, [ctx.organizationId, userId ?? null]),
+      this.database.pool.query(`SELECT id, user_id AS "userId", department_id AS "departmentId", brand_id AS "brandId", rate_minor AS "rateMinor"
+        FROM catalog_contributor_rate_rules WHERE organization_id=$1 AND category_id IS NULL AND (user_id IS NULL OR user_id=$2) ORDER BY updated_at DESC`, [ctx.organizationId, userId ?? null]),
       this.database.pool.query(`SELECT rate_minor AS "rateMinor" FROM catalog_contributor_rates WHERE organization_id=$1 AND user_id=$2`, [ctx.organizationId, userId ?? null]),
       this.database.pool.query(`SELECT default_rate_minor AS "rateMinor" FROM catalog_contributor_settings WHERE organization_id=$1`, [ctx.organizationId]),
     ]);
@@ -681,9 +681,9 @@ export class StaffCatalogController {
   async saveWorkforcePricing(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     this.requireWorkforceManager(ctx);
-    const input = parseWithSchema(z.object({ userId: uuidSchema.optional(), departmentId: uuidSchema.optional(), categoryId: uuidSchema.optional(),
+    const input = parseWithSchema(z.object({ userId: uuidSchema.optional(), departmentId: uuidSchema.optional(), brandId: uuidSchema.optional(),
       rateMinor: z.number().int().min(0).max(10_000_000).nullable() }), body);
-    if (input.categoryId && !input.departmentId) throw new ValidationFailedError('Izaberite odeljenje.');
+    if (input.brandId && !input.departmentId) throw new ValidationFailedError('Izaberite odeljenje.');
     if (!input.userId && !input.departmentId && input.rateMinor === null) throw new ValidationFailedError('Opšta cena ne može biti prazna.');
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       if (input.userId) {
@@ -694,16 +694,16 @@ export class StaffCatalogController {
         const department = await client.query('SELECT 1 FROM departments WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [ctx.organizationId,input.departmentId]);
         if (!department.rowCount) throw new ValidationFailedError('Odeljenje nije dostupno.');
       }
-      if (input.categoryId) {
-        const category = await client.query('SELECT 1 FROM categories WHERE organization_id=$1 AND id=$2 AND department_id=$3 AND deleted_at IS NULL', [ctx.organizationId,input.categoryId,input.departmentId]);
-        if (!category.rowCount) throw new ValidationFailedError('Kategorija ne pripada odeljenju.');
+      if (input.brandId) {
+        const brand = await client.query('SELECT 1 FROM brands WHERE organization_id=$1 AND id=$2 AND department_id=$3 AND deleted_at IS NULL', [ctx.organizationId,input.brandId,input.departmentId]);
+        if (!brand.rowCount) throw new ValidationFailedError('Brend ne pripada odeljenju.');
       }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`workforce-rates:${ctx.organizationId}`]);
       if (input.departmentId) {
         await client.query(`DELETE FROM catalog_contributor_rate_rules WHERE organization_id=$1 AND user_id IS NOT DISTINCT FROM $2::uuid
-          AND department_id=$3 AND category_id IS NOT DISTINCT FROM $4::uuid`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.categoryId ?? null]);
-        if (input.rateMinor !== null) await client.query(`INSERT INTO catalog_contributor_rate_rules (organization_id,user_id,department_id,category_id,rate_minor,updated_by_user_id)
-          VALUES ($1,$2,$3,$4,$5,$6)`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.categoryId ?? null,input.rateMinor,ctx.userId]);
+          AND department_id=$3 AND category_id IS NULL AND brand_id IS NOT DISTINCT FROM $4::uuid`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.brandId ?? null]);
+        if (input.rateMinor !== null) await client.query(`INSERT INTO catalog_contributor_rate_rules (organization_id,user_id,department_id,category_id,brand_id,rate_minor,updated_by_user_id)
+          VALUES ($1,$2,$3,NULL,$4,$5,$6)`, [ctx.organizationId,input.userId ?? null,input.departmentId,input.brandId ?? null,input.rateMinor,ctx.userId]);
       } else if (input.userId) {
         if (input.rateMinor === null) await client.query('DELETE FROM catalog_contributor_rates WHERE organization_id=$1 AND user_id=$2', [ctx.organizationId,input.userId]);
         else await client.query(`INSERT INTO catalog_contributor_rates (organization_id,user_id,rate_minor,updated_by_user_id) VALUES ($1,$2,$3,$4)
