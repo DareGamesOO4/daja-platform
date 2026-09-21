@@ -51,6 +51,17 @@ export interface VariantRecord {
   version: number;
 }
 
+// Stored on a variant for warehouse/RFID handling only. These fields must not
+// be exposed as catalog specifications or in a public product payload.
+const INTERNAL_CATALOG_ATTRIBUTE_KEYS = [
+  'additional_barcodes',
+  '_additionalBarcodes',
+  'additionalbarcodes',
+  'rfid_piece_placements',
+  '_rfidPiecePlacements',
+  'rfidpieceplacements'
+];
+
 export class CatalogRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
 
@@ -245,10 +256,17 @@ export class CatalogRepository {
          WHERE ib.organization_id = p.organization_id
        ) inventory ON true
        LEFT JOIN LATERAL (
-         SELECT jsonb_agg(to_jsonb(v) ORDER BY v.current_price_amount) AS items
-         FROM product_variants v
-         WHERE v.product_id = p.id AND v.organization_id = p.organization_id
-           AND v.deleted_at IS NULL AND v.active AND v.published
+         SELECT jsonb_agg(
+           jsonb_set(
+             to_jsonb(pv),
+             '{attributes}',
+             COALESCE(pv.attributes, '{}'::jsonb) - $3::text[]
+           )
+           ORDER BY pv.current_price_amount
+         ) AS items
+         FROM product_variants pv
+         WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
+           AND pv.deleted_at IS NULL AND pv.active AND pv.published
        ) variants ON true
        LEFT JOIN LATERAL (
          SELECT
@@ -278,7 +296,7 @@ export class CatalogRepository {
        ) media ON true
        WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL AND p.active AND p.published
        LIMIT 1`,
-      [ctx.organizationId, slug]
+      [ctx.organizationId, slug, INTERNAL_CATALOG_ATTRIBUTE_KEYS]
     );
     return result.rows[0] ?? null;
   }
