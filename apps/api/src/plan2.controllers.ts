@@ -755,8 +755,8 @@ export class StaffCatalogController {
     if (input.status === 'changes_requested' && !input.note) throw new ValidationFailedError('Napomena je obavezna kada vraćate proizvod na doradu.');
     const review = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const before = await new CatalogRepository(client).getProduct(ctx, productId);
-      const quality = await this.productQuality(client, ctx.organizationId, productId);
-      if (input.status === 'approved' && quality.missing.length) throw new ValidationFailedError(`Proizvod nije kompletan: ${quality.missing.join(', ')}`);
+      // The checklist is an approval aid, not a hard gate. A workforce manager
+      // can approve compensation for incomplete products when appropriate.
       const result = await client.query(
         `UPDATE products SET quality_review_status = $3, quality_review_note = $4, quality_reviewed_by_user_id = $5, quality_reviewed_at = now(),
            compensation_approved_at = CASE WHEN $3 = 'approved' AND compensation_approved_at IS NULL THEN now() ELSE compensation_approved_at END,
