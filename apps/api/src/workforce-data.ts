@@ -33,8 +33,10 @@ export async function workforceSummary(
  authored AS (
   SELECT p.*, (p.created_at AT TIME ZONE 'Europe/Belgrade')::date AS day,
    (COALESCE(btrim(p.name),'') = '' OR p.department_id IS NULL OR p.brand_id IS NULL OR p.primary_category_id IS NULL
-    OR COALESCE(btrim(p.description),'') = '' OR COALESCE(btrim(v.sku),'') = '' OR COALESCE(v.current_price_amount,0) <= 0
-    OR COALESCE(btrim(v.gender),'') = '' OR ${meaningfulSpecsSql} < 3
+    OR COALESCE(btrim(p.description),'') = '' OR COALESCE(btrim(v.barcode),'') = '' OR COALESCE(v.current_price_amount,0) <= 0
+    OR COALESCE(btrim(v.gender),'') = '' OR ${meaningfulSpecsSql} < 5 OR jsonb_array_length(p.features) < 3
+    OR NOT EXISTS (SELECT 1 FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
+      AND ib.location_id IS NOT NULL AND ib.quantity > 0)
     OR NOT EXISTS (SELECT 1 FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
       WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)) AS incomplete
   FROM products p LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id = p.organization_id

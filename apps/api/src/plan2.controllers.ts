@@ -727,7 +727,7 @@ export class StaffCatalogController {
     const products = await Promise.all(rawProducts.map(async (product) => {
       if (product.deletedAt) return { ...product, qualityMissing: [] };
       const quality = await this.productQuality(this.database.pool, ctx.organizationId, product.id);
-      return { ...product, qualityMissing: quality.missing };
+      return { ...product, qualityMissing: quality.missing, qualityChecks: quality.checks };
     }));
     const activity = (await this.database.pool.query(
       `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
@@ -1869,32 +1869,44 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
   }
 
-  private async productQuality(client: Pick<Database['pool'], 'query'>, organizationId: string, productId: string): Promise<{ missing: string[] }> {
+  private async productQuality(client: Pick<Database['pool'], 'query'>, organizationId: string, productId: string): Promise<{ missing: string[]; checks: Array<{ label: string; complete: boolean }> }> {
     const product = (await client.query<{
       name: string; description: string | null; department_id: string | null; brand_id: string | null; primary_category_id: string | null;
-      sku: string | null; current_price_amount: number | null; gender: string | null; specs_count: number; media_count: number;
+      barcode: string | null; current_price_amount: number | null; gender: string | null; specs_count: number; media_count: number;
+      features_count: number; location_id: string | null; quantity: number | null;
     }>(
-      `SELECT p.name, p.description, p.department_id, p.brand_id, p.primary_category_id, v.sku, v.current_price_amount, v.gender,
+      `SELECT p.name, p.description, p.department_id, p.brand_id, p.primary_category_id, v.barcode, v.current_price_amount, v.gender,
               ${meaningfulSpecsSql}::int AS specs_count,
+              jsonb_array_length(p.features)::int AS features_count,
+              inventory.location_id, inventory.quantity,
               (SELECT count(*) FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready' WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)::int AS media_count
        FROM products p
        LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id = p.organization_id AND product_id = p.id AND deleted_at IS NULL ORDER BY created_at LIMIT 1) v ON true
+       LEFT JOIN LATERAL (
+         SELECT location_id, quantity FROM inventory_balances
+         WHERE organization_id = p.organization_id AND variant_id = v.id
+         ORDER BY updated_at DESC LIMIT 1
+       ) inventory ON true
        WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
       [organizationId, productId]
     )).rows[0];
     if (!product) throw new TenantAccessDeniedError();
-    const missing: string[] = [];
-    if (!product.name?.trim()) missing.push('naziv');
-    if (!product.sku?.trim()) missing.push('šifra/SKU');
-    if (!(Number(product.current_price_amount) > 0)) missing.push('cena');
-    if (!product.department_id) missing.push('odeljenje');
-    if (!product.brand_id) missing.push('brend');
-    if (!product.primary_category_id) missing.push('kategorija');
-    if (!product.gender?.trim()) missing.push('pol');
-    if (!product.description?.trim()) missing.push('opis');
-    if (!product.media_count) missing.push('glavna slika');
-    if (Number(product.specs_count) < 3) missing.push(`najmanje 3 specifikacije (uneto ${product.specs_count})`);
-    return { missing };
+    const checks = [
+      { label: 'Naziv', complete: Boolean(product.name?.trim()) },
+      { label: 'Cena', complete: Number(product.current_price_amount) > 0 },
+      { label: 'GTIN proizvoda', complete: Boolean(product.barcode?.trim()) },
+      { label: 'Opis', complete: Boolean(product.description?.trim()) },
+      { label: 'Odeljenje', complete: Boolean(product.department_id) },
+      { label: 'Brend', complete: Boolean(product.brand_id) },
+      { label: 'Kategorija', complete: Boolean(product.primary_category_id) },
+      { label: 'Pol', complete: Boolean(product.gender?.trim()) },
+      { label: 'Glavna lokacija', complete: Boolean(product.location_id) },
+      { label: 'Količina', complete: Number(product.quantity) > 0 },
+      { label: `Istaknute kartice (${Number(product.features_count)}/3)`, complete: Number(product.features_count) >= 3 },
+      { label: `Specifikacije (${Number(product.specs_count)}/5)`, complete: Number(product.specs_count) >= 5 },
+      { label: `Slike (${Number(product.media_count)}/1)`, complete: Number(product.media_count) >= 1 }
+    ];
+    return { checks, missing: checks.filter((check) => !check.complete).map((check) => check.label) };
   }
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false) {
