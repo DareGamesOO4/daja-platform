@@ -298,7 +298,48 @@ export class CatalogRepository {
        LIMIT 1`,
       [ctx.organizationId, slug, INTERNAL_CATALOG_ATTRIBUTE_KEYS]
     );
-    return result.rows[0] ?? null;
+    const product = result.rows[0] as Record<string, unknown> | undefined;
+    if (!product) return null;
+
+    const reviewStats = await this.client.query<{ rating_count: number; average_rating: number | null }>(
+      `SELECT count(*)::int AS rating_count, avg(rating)::numeric(3,2) AS average_rating
+       FROM product_reviews
+       WHERE organization_id = $1 AND product_id = $2
+         AND status = 'published' AND deleted_at IS NULL`,
+      [ctx.organizationId, product.id]
+    );
+    const reviews = await this.client.query<{
+      id: string;
+      user_name: string;
+      rating: number;
+      comment: string;
+      created_at: Date;
+    }>(
+      `SELECT id, user_name, rating, comment, created_at
+       FROM product_reviews
+       WHERE organization_id = $1 AND product_id = $2
+         AND status = 'published' AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [ctx.organizationId, product.id]
+    );
+    const publishedReviews = reviews.rows.map((review) => ({
+      id: review.id,
+      userName: review.user_name,
+      rating: review.rating,
+      comment: review.comment,
+      createdAt: review.created_at
+    }));
+    const ratingCount = Number(reviewStats.rows[0]?.rating_count ?? 0);
+    const averageRating = reviewStats.rows[0]?.average_rating === null || reviewStats.rows[0]?.average_rating === undefined
+      ? null
+      : Number(Number(reviewStats.rows[0].average_rating).toFixed(1));
+
+    return {
+      ...product,
+      reviews: publishedReviews,
+      reviewSummary: ratingCount ? { ratingCount, averageRating } : null
+    };
   }
 
   async getPublicProductRedirect(

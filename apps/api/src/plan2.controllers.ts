@@ -197,6 +197,24 @@ function sitemapLastmod(value: string | Date): string {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
+function storefrontSiteUrl(config: AppConfig): string {
+  return (
+    config.OAUTH_FRONTEND_REDIRECT_URL ||
+    config.CORS_ALLOWED_ORIGINS.find((origin) => !origin.includes('localhost')) ||
+    config.STOREFRONT_PUBLIC_BASE_URL ||
+    'https://dajashop.rs'
+  ).replace(/\/$/, '');
+}
+
+function merchantDescription(value: unknown, fallback: string): string {
+  const text = String(value || fallback).replace(/\s+/g, ' ').trim();
+  return text.slice(0, 5000);
+}
+
+function merchantCondition(value: unknown): string {
+  return value === 'used' ? 'used' : value === 'refurbished' ? 'refurbished' : 'new';
+}
+
 @Controller('public/catalog')
 export class PublicCatalogController {
   constructor(
@@ -254,10 +272,20 @@ export class PublicCatalogController {
         [ctx.organizationId]
       )
     ).rows;
-    const configuredSiteUrl = this.config.OAUTH_FRONTEND_REDIRECT_URL ||
-      this.config.CORS_ALLOWED_ORIGINS.find((origin) => !origin.includes('localhost')) ||
-      'https://dajashop.rs';
-    const siteUrl = configuredSiteUrl.replace(/\/$/, '');
+    const siteUrl = storefrontSiteUrl(this.config);
+    const staticEntries = [
+      '/',
+      '/catalog',
+      '/naocare',
+      '/baterije',
+      '/daljinski',
+      '/about',
+      '/contact',
+      '/faq',
+      '/usluge'
+    ]
+      .map((path) => `<url><loc>${escapeXml(`${siteUrl}${path}`)}</loc></url>`)
+      .join('');
     const entries = rows
       .map((row) => {
         const productUrl = `${siteUrl}/product/${encodeURIComponent(row.slug)}`;
@@ -268,12 +296,79 @@ export class PublicCatalogController {
         return `<url><loc>${escapeXml(productUrl)}</loc><lastmod>${sitemapLastmod(row.updated_at)}</lastmod>${images}</url>`;
       })
       .join('');
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">${entries}</urlset>`;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">${staticEntries}${entries}</urlset>`;
     await this.redis.client.set(cacheKey, xml, 'EX', 3600);
     response
       .type('application/xml')
       .setHeader('Cache-Control', 'public, max-age=3600')
       .send(xml);
+  }
+
+  @Get('merchant-feed.xml')
+  async merchantFeed(@Req() request: Request, @Res() response: Response): Promise<void> {
+    const ctx = this.publicContext(request);
+    const cacheKey = `catalog:merchant-feed:${ctx.organizationId}`;
+    const cached = await this.redis.client.get(cacheKey);
+    if (cached) {
+      response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(cached);
+      return;
+    }
+
+    const rows = (
+      await this.database.pool.query<{
+        product_id: string; variant_id: string; name: string; slug: string; description: string | null;
+        item_condition: string; brand: string | null; category: string | null; department: string | null;
+        sku: string | null; barcode: string | null; mpn: string | null; price: number; currency: string;
+        available_quantity: number; images: Array<{ url: string }>;
+      }>(
+        `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug, p.description, p.item_condition,
+                b.name AS brand, c.name AS category, d.name AS department, v.sku, v.barcode, v.mpn,
+                COALESCE(active_sale.amount_minor, v.current_price_amount) AS price, v.currency,
+                COALESCE(inventory.quantity, 0)::int AS available_quantity,
+                COALESCE(media.items, '[]'::jsonb) AS images
+         FROM products p
+         JOIN product_variants v ON v.product_id = p.id AND v.organization_id = p.organization_id
+           AND v.deleted_at IS NULL AND v.active AND v.published
+         LEFT JOIN LATERAL (
+           SELECT amount_minor FROM variant_prices
+           WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
+             AND valid_from <= now() AND cancelled_at IS NULL AND (valid_until IS NULL OR valid_until > now())
+           ORDER BY valid_from DESC, created_at DESC LIMIT 1
+         ) active_sale ON true
+         LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
+         LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
+         LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
+         LEFT JOIN LATERAL (
+           SELECT SUM(quantity)::integer AS quantity FROM inventory_balances
+           WHERE organization_id = p.organization_id AND variant_id = v.id
+         ) inventory ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(jsonb_build_object('url', ma.public_url) ORDER BY pm.is_primary DESC, pm.position ASC, pm.id) AS items
+           FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+           WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         ) media ON true
+         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published
+         ORDER BY p.updated_at DESC, p.id, v.id`,
+        [ctx.organizationId]
+      )
+    ).rows;
+    const siteUrl = storefrontSiteUrl(this.config);
+    const items = rows
+      .map((row) => {
+        const title = [row.brand, row.name].filter(Boolean).join(' ').trim();
+        const images = Array.isArray(row.images) ? row.images.map((image) => image?.url).filter(Boolean) : [];
+        const primaryImage = images[0];
+        const additionalImages = images.slice(1).map((image) => `<g:additional_image_link>${escapeXml(image)}</g:additional_image_link>`).join('');
+        const productType = [row.department, row.category].filter(Boolean).join(' > ');
+        const identifier = row.barcode
+          ? `<g:gtin>${escapeXml(row.barcode)}</g:gtin>`
+          : '<g:identifier_exists>false</g:identifier_exists>';
+        return `<item><g:id>${escapeXml(row.variant_id)}</g:id><g:item_group_id>${escapeXml(row.product_id)}</g:item_group_id><title>${escapeXml(title)}</title><description>${escapeXml(merchantDescription(row.description, title))}</description><link>${escapeXml(`${siteUrl}/product/${encodeURIComponent(row.slug)}`)}</link>${primaryImage ? `<g:image_link>${escapeXml(primaryImage)}</g:image_link>` : ''}${additionalImages}<g:availability>${row.available_quantity > 0 ? 'in_stock' : 'out_of_stock'}</g:availability><g:price>${escapeXml(`${(row.price / 100).toFixed(2)} ${row.currency}`)}</g:price><g:condition>${merchantCondition(row.item_condition)}</g:condition>${row.brand ? `<g:brand>${escapeXml(row.brand)}</g:brand>` : ''}${identifier}${row.mpn ? `<g:mpn>${escapeXml(row.mpn)}</g:mpn>` : ''}${row.sku ? `<g:sku>${escapeXml(row.sku)}</g:sku>` : ''}${productType ? `<g:product_type>${escapeXml(productType)}</g:product_type>` : ''}<g:shipping><g:country>RS</g:country><g:service>Standardna dostava</g:service><g:price>${this.config.STOREFRONT_SHIPPING_COST_RSD.toFixed(2)} RSD</g:price></g:shipping></item>`;
+      })
+      .join('');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>DajaShop Merchant Feed</title><link>${escapeXml(siteUrl)}</link><description>DajaShop proizvodi</description>${items}</channel></rss>`;
+    await this.redis.client.set(cacheKey, xml, 'EX', 3600);
+    response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(xml);
   }
 
   @Get('products/:slug')
@@ -1976,6 +2071,7 @@ export class StaffCatalogController {
     const validSlugs = slugs.filter((slug): slug is string => Boolean(slug));
     const keys = [
       `catalog:sitemap:${organizationId}`,
+      `catalog:merchant-feed:${organizationId}`,
       ...validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`)
     ];
     await this.redis.client.del(...keys);
