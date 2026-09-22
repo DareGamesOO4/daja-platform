@@ -327,56 +327,43 @@ export class SyncRepository {
          SELECT COALESCE(
                   jsonb_agg(
                     jsonb_build_object(
-                      'tagId', piece.tag_id,
-                      'epc', piece.epc,
-                      'tagStatus', piece.tag_status,
-                      'locationId', piece.location_id,
-                      'zoneId', COALESCE(piece_bin.zone_id, piece.zone_id),
-                      'binId', piece.bin_id
-                    ) ORDER BY piece.updated_at DESC, piece.inventory_item_id NULLS LAST
+                      'tagId', t.id,
+                      'epc', t.epc,
+                      'tagStatus', t.status,
+                      'locationId', COALESCE(latest_event.location_id, ii.current_location_id),
+                      'zoneId', COALESCE(piece_bin.zone_id, ii.current_zone_id),
+                      'binId', CASE
+                        WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                          THEN latest_event.metadata ->> 'binId'
+                        ELSE ii.current_bin_id::text
+                      END
+                    ) ORDER BY t.updated_at DESC
                   ),
                   '[]'::jsonb
                 ) AS "rfidPieces"
-         FROM (
-           SELECT ii.id AS inventory_item_id, t.id AS tag_id, t.epc, t.status AS tag_status,
-                  ii.current_location_id AS location_id, ii.current_zone_id AS zone_id,
-                  ii.current_bin_id AS bin_id, COALESCE(t.updated_at, ii.updated_at) AS updated_at
-           FROM inventory_items ii
-           LEFT JOIN LATERAL (
-             SELECT id, epc, status, updated_at
-             FROM rfid_tags
-             WHERE organization_id = ii.organization_id AND inventory_item_id = ii.id
-               AND deleted_at IS NULL
-             ORDER BY updated_at DESC
-             LIMIT 1
-           ) t ON true
-           WHERE ii.organization_id = p.organization_id AND ii.variant_id = v.id
-             AND ii.deleted_at IS NULL
-           UNION ALL
-           SELECT NULL::uuid AS inventory_item_id, t.id AS tag_id, t.epc, t.status AS tag_status,
-                  latest_event.location_id, NULL::uuid AS zone_id,
-                  CASE
-                    WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-                      THEN (latest_event.metadata ->> 'binId')::uuid
-                    ELSE NULL
-                  END AS bin_id,
-                  t.updated_at
-           FROM rfid_tags t
-           LEFT JOIN LATERAL (
-             SELECT location_id, metadata
-             FROM rfid_tag_events
-             WHERE organization_id = t.organization_id AND tag_id = t.id
-               AND event_type IN ('assigned', 'moved')
-             ORDER BY occurred_at DESC, id DESC
-             LIMIT 1
-           ) latest_event ON true
-           WHERE t.organization_id = p.organization_id AND t.variant_id = v.id
-             AND t.deleted_at IS NULL
-         ) piece
+         FROM rfid_tags t
+         LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
+         LEFT JOIN LATERAL (
+           SELECT location_id, metadata
+           FROM rfid_tag_events
+           WHERE organization_id = t.organization_id AND tag_id = t.id
+             AND event_type IN ('assigned', 'moved')
+           ORDER BY occurred_at DESC, id DESC
+           LIMIT 1
+         ) latest_event ON true
          LEFT JOIN warehouse_bins piece_bin
-           ON piece_bin.organization_id = p.organization_id
+           ON piece_bin.organization_id = t.organization_id
           AND piece_bin.deleted_at IS NULL
-          AND piece_bin.id = piece.bin_id
+          AND piece_bin.id = COALESCE(
+            CASE
+              WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                THEN (latest_event.metadata ->> 'binId')::uuid
+              ELSE NULL
+            END,
+            ii.current_bin_id
+          )
+         WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
+           AND (t.variant_id = v.id OR ii.variant_id = v.id)
        ) tag_pieces ON true
        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
        ORDER BY p.id
