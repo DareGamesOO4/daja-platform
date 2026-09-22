@@ -194,6 +194,15 @@ export class RealtimeGateway {
     return { ok: true };
   }
 
+  @SubscribeMessage('reader.find.subscribe')
+  async subscribeFind(@ConnectedSocket() socket: Socket, @MessageBody() body: { sessionId?: string } | undefined) {
+    if (!socket.data.organizationId || !body?.sessionId || !/^[0-9a-f-]{36}$/i.test(body.sessionId)) return { ok: false };
+    const allowed = await this.database.query(`SELECT 1 FROM rfid_reader_find_sessions WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3`, [body.sessionId, socket.data.organizationId, socket.data.userId]);
+    if (!allowed.rows[0]) return { ok: false };
+    void socket.join(scanRoom(socket.data.organizationId, body.sessionId));
+    return { ok: true };
+  }
+
   @SubscribeMessage('reader.station.subscribe')
   async subscribeStation(@ConnectedSocket() socket: Socket, @MessageBody() body: { stationId?: string } | undefined) {
     if (!socket.data.organizationId || !body?.stationId || !/^[0-9a-f-]{36}$/i.test(body.stationId)) return { ok: false };

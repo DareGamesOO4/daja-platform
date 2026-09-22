@@ -13,6 +13,7 @@ interface SessionRow {
   id: string; station_id: string; requester_user_id: string; requester_client_id: string; status: ScanStatus;
   epc: string | null; barcode: string | null; product: Record<string, unknown> | null; expires_at: string;
 }
+interface FindSessionRow { id:string; station_id:string; requester_user_id:string; status:'active'|'completed'|'cancelled'|'expired'; epc:string; product:Record<string,unknown>|null; last_proximity:Record<string,unknown>|null; expires_at:string }
 
 @Injectable()
 export class ReaderStationService {
@@ -50,7 +51,7 @@ export class ReaderStationService {
     await this.expire();
     const result = await this.database.query<{ id: string; name: string; location_id: string | null; last_seen_at: string; busy: boolean }>(
       `SELECT station.id,station.name,station.location_id,station.last_seen_at,
-              EXISTS(SELECT 1 FROM rfid_reader_scan_sessions session WHERE session.station_id=station.id AND session.status IN ('awaiting_epc','awaiting_barcode') AND session.expires_at>now()) AS busy
+              (EXISTS(SELECT 1 FROM rfid_reader_scan_sessions session WHERE session.station_id=station.id AND session.status IN ('awaiting_epc','awaiting_barcode') AND session.expires_at>now()) OR EXISTS(SELECT 1 FROM rfid_reader_find_sessions find_session WHERE find_session.station_id=station.id AND find_session.status='active' AND find_session.expires_at>now())) AS busy
        FROM rfid_reader_stations station WHERE station.organization_id=$1 AND station.last_seen_at > now() - interval '45 seconds' ORDER BY station.last_seen_at DESC`, [ctx.organizationId]
     );
     return result.rows.map((row) => ({ id: row.id, name: row.name, locationId: row.location_id, online: true, busy: row.busy, lastSeenAt: row.last_seen_at }));
@@ -64,7 +65,7 @@ export class ReaderStationService {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [input.stationId]);
       const station = await client.query<{ id: string }>(`SELECT id FROM rfid_reader_stations WHERE id=$1 AND organization_id=$2 AND last_seen_at > now() - interval '45 seconds'`, [input.stationId, ctx.organizationId]);
       if (!station.rows[0]) throw new ValidationFailedError('Izabrani G2 čitač nije online.');
-      const active = await client.query(`SELECT 1 FROM rfid_reader_scan_sessions WHERE station_id=$1 AND status IN ('awaiting_epc','awaiting_barcode') AND expires_at > now()`, [input.stationId]);
+      const active = await client.query(`SELECT 1 WHERE EXISTS(SELECT 1 FROM rfid_reader_scan_sessions WHERE station_id=$1 AND status IN ('awaiting_epc','awaiting_barcode') AND expires_at > now()) OR EXISTS(SELECT 1 FROM rfid_reader_find_sessions WHERE station_id=$1 AND status='active' AND expires_at > now())`, [input.stationId]);
       if (active.rows[0]) throw new ResourceConflictError('Čitač je zauzet. Sačekajte da se trenutna sesija završi.');
       const id = randomUUID();
       const preview = input.preview ? { found: true, ...input.preview } : null;
@@ -74,6 +75,24 @@ export class ReaderStationService {
       return { id, stationId: input.stationId, status: 'awaiting_epc', expiresInSeconds: 30 };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
+
+  async startFind(ctx: RequestContext, input: { stationId:string; clientId:string; epc:string; preview?:Record<string,unknown> }): Promise<Record<string,unknown>> {
+    await this.expire(); const client=await this.database.pool.connect();
+    try { await client.query('BEGIN'); await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[input.stationId]);
+      const station=await client.query<{id:string}>(`SELECT id FROM rfid_reader_stations WHERE id=$1 AND organization_id=$2 AND last_seen_at>now()-interval '45 seconds'`,[input.stationId,ctx.organizationId]);
+      if(!station.rows[0]) throw new ValidationFailedError('Izabrani G2 čitač nije online.');
+      const active=await client.query(`SELECT 1 WHERE EXISTS(SELECT 1 FROM rfid_reader_scan_sessions WHERE station_id=$1 AND status IN ('awaiting_epc','awaiting_barcode') AND expires_at>now()) OR EXISTS(SELECT 1 FROM rfid_reader_find_sessions WHERE station_id=$1 AND status='active' AND expires_at>now())`,[input.stationId]);
+      if(active.rows[0]) throw new ResourceConflictError('Čitač je zauzet. Sačekajte da se trenutna sesija završi.');
+      const id=randomUUID(), epc=input.epc.replace(/[\s:._-]/g,'').toUpperCase(), product=input.preview?{found:true,...input.preview}:null;
+      await client.query(`INSERT INTO rfid_reader_find_sessions (id,organization_id,station_id,requester_user_id,requester_client_id,epc,product,status,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'active',now()+interval '5 minutes')`,[id,ctx.organizationId,input.stationId,ctx.userId,input.clientId,epc,JSON.stringify(product)]); await client.query('COMMIT');
+      const payload={sessionId:id,epc,product,expiresInSeconds:300}; this.realtime.publishToStation(ctx.organizationId,input.stationId,'reader.find.start',payload); return {...payload,status:'active'};
+    } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
+
+  async findProximity(ctx:RequestContext,stationId:string,input:{sessionId:string;epc:string;rssi:number;proximity:number}):Promise<Record<string,unknown>> { await this.expire(); await this.heartbeat(ctx,stationId); const row=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET last_proximity=$4::jsonb WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' AND expires_at>now() RETURNING *`,[input.sessionId,stationId,ctx.organizationId,JSON.stringify({epc:input.epc,rssi:input.rssi,proximity:input.proximity,seenAt:new Date().toISOString()})]); if(!row.rows[0]) throw new ValidationFailedError('Sesija pronalaženja nije aktivna.'); const payload={sessionId:input.sessionId,...row.rows[0].last_proximity!}; this.realtime.publishToSession(ctx.organizationId,input.sessionId,'reader.find.proximity',payload); return payload; }
+  async completeFind(ctx:RequestContext,stationId:string,sessionId:string):Promise<void> { const result=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET status='completed',completed_at=now() WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' RETURNING *`,[sessionId,stationId,ctx.organizationId]); const row=result.rows[0]; if(!row)return; const payload={sessionId,status:'completed'}; this.realtime.publishToStation(ctx.organizationId,stationId,'reader.find.completed',payload); this.realtime.publishToSession(ctx.organizationId,sessionId,'reader.find.completed',payload); }
+  async cancelFind(ctx:RequestContext,sessionId:string):Promise<void> { const result=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET status='cancelled',completed_at=now() WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3 AND status='active' RETURNING *`,[sessionId,ctx.organizationId,ctx.userId]); const row=result.rows[0]; if(!row)return; const payload={sessionId,status:'cancelled'}; this.realtime.publishToStation(ctx.organizationId,row.station_id,'reader.find.cancelled',payload); this.realtime.publishToSession(ctx.organizationId,sessionId,'reader.find.cancelled',payload); }
+  async findSession(ctx:RequestContext,sessionId:string):Promise<Record<string,unknown>> { await this.expire(); const result=await this.database.query<FindSessionRow>(`SELECT id,station_id,requester_user_id,status,epc,product,last_proximity,expires_at FROM rfid_reader_find_sessions WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3`,[sessionId,ctx.organizationId,ctx.userId]); const row=result.rows[0]; if(!row)throw new ValidationFailedError('Sesija pronalaženja nije pronađena.'); return {id:row.id,stationId:row.station_id,status:row.status,epc:row.epc,product:row.product,lastProximity:row.last_proximity,expiresAt:row.expires_at}; }
 
   async epc(ctx: RequestContext, stationId: string, sessionId: string, rawEpc: string): Promise<Record<string, unknown>> {
     const session = await this.stationSession(ctx, stationId, sessionId, 'awaiting_epc');
@@ -156,6 +175,7 @@ export class ReaderStationService {
 
   private async expire(): Promise<void> {
     await this.database.query(`UPDATE rfid_reader_scan_sessions SET status='expired',completed_at=now() WHERE status IN ('awaiting_epc','awaiting_barcode') AND expires_at<=now()`);
+    await this.database.query(`UPDATE rfid_reader_find_sessions SET status='expired',completed_at=now() WHERE status='active' AND expires_at<=now()`);
   }
 
   private async stationProduct(organizationId: string, resolved: Record<string, unknown>): Promise<Record<string, unknown>> {
