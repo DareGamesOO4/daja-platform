@@ -330,11 +330,12 @@ export class SyncRepository {
                       'tagId', t.id,
                       'epc', t.epc,
                       'tagStatus', t.status,
-                      'locationId', latest_event.location_id,
+                      'locationId', COALESCE(latest_event.location_id, ii.current_location_id),
+                      'zoneId', COALESCE(piece_bin.zone_id, ii.current_zone_id),
                       'binId', CASE
                         WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
                           THEN latest_event.metadata ->> 'binId'
-                        ELSE NULL
+                        ELSE ii.current_bin_id::text
                       END
                     ) ORDER BY t.updated_at DESC
                   ),
@@ -350,6 +351,17 @@ export class SyncRepository {
            ORDER BY occurred_at DESC, id DESC
            LIMIT 1
          ) latest_event ON true
+         LEFT JOIN warehouse_bins piece_bin
+           ON piece_bin.organization_id = t.organization_id
+          AND piece_bin.deleted_at IS NULL
+          AND piece_bin.id = COALESCE(
+            CASE
+              WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                THEN (latest_event.metadata ->> 'binId')::uuid
+              ELSE NULL
+            END,
+            ii.current_bin_id
+          )
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
            AND (t.variant_id = v.id OR ii.variant_id = v.id)
        ) tag_pieces ON true
