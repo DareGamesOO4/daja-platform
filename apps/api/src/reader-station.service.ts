@@ -76,7 +76,7 @@ export class ReaderStationService {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async startFind(ctx: RequestContext, input: { stationId:string; clientId:string; epc:string; preview?:Record<string,unknown> }): Promise<Record<string,unknown>> {
+  async startFind(ctx: RequestContext, input: { stationId:string; clientId:string; epc:string; preview?:Record<string,unknown> | undefined }): Promise<Record<string,unknown>> {
     await this.expire(); const client=await this.database.pool.connect();
     try { await client.query('BEGIN'); await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[input.stationId]);
       const station=await client.query<{id:string}>(`SELECT id FROM rfid_reader_stations WHERE id=$1 AND organization_id=$2 AND last_seen_at>now()-interval '45 seconds'`,[input.stationId,ctx.organizationId]);
