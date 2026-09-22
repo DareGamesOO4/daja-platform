@@ -276,6 +276,8 @@ export class PublicCatalogController {
     const staticEntries = [
       '/',
       '/catalog',
+      '/muski-satovi',
+      '/zenski-satovi',
       '/naocare',
       '/baterije',
       '/daljinski',
