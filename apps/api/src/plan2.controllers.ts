@@ -173,6 +173,7 @@ const specKeySchema = z.object({
   departmentId: uuidSchema,
   unit: z.string().trim().max(80).nullable().optional(),
   dataType: z.string().trim().min(1).max(80).optional(),
+  optionValues: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
   active: z.boolean().optional()
 });
 
@@ -1854,7 +1855,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     const result = await this.database.pool.query(
-      `SELECT id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
+      `SELECT id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
               created_at AS "createdAt", updated_at AS "updatedAt"
        FROM spec_keys
        WHERE organization_id = $1 AND deleted_at IS NULL
@@ -1871,9 +1872,9 @@ export class StaffCatalogController {
     const input = parseWithSchema(specKeySchema, body);
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId);
     const result = await this.database.pool.query(
-      `INSERT INTO spec_keys (organization_id, name, slug, department_id, unit, data_type, active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
+      `INSERT INTO spec_keys (organization_id, name, slug, department_id, unit, data_type, option_values, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
                  created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
@@ -1882,6 +1883,7 @@ export class StaffCatalogController {
         input.departmentId,
         input.unit ?? null,
         input.dataType ?? 'text',
+        JSON.stringify([...new Set(input.optionValues ?? [])]),
         input.active ?? true
       ]
     );
@@ -1896,7 +1898,7 @@ export class StaffCatalogController {
     const specKeyId = parseWithSchema(uuidSchema, id);
     const input = parseWithSchema(specKeySchema.partial(), body);
     const current = await this.database.pool.query(
-      `SELECT name, slug, department_id, unit, data_type, active
+      `SELECT name, slug, department_id, unit, data_type, option_values, active
        FROM spec_keys WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [ctx.organizationId, specKeyId]
     );
@@ -1907,10 +1909,10 @@ export class StaffCatalogController {
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
     const result = await this.database.pool.query(
       `UPDATE spec_keys
-       SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, active = $8,
+       SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, option_values = $8::jsonb, active = $9,
            version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", active, version,
+       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
                  created_at AS "createdAt", updated_at AS "updatedAt"`,
       [
         ctx.organizationId,
@@ -1920,6 +1922,7 @@ export class StaffCatalogController {
         input.departmentId ?? row.department_id,
         input.unit === undefined ? row.unit : input.unit,
         input.dataType ?? row.data_type,
+        JSON.stringify([...new Set(input.optionValues ?? row.option_values ?? [])]),
         input.active ?? row.active
       ]
     );

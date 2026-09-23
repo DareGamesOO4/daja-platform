@@ -1826,12 +1826,17 @@ export class OperationalSyncProjector {
     const requestedDepartmentId = text(command.payload, 'departmentId');
     const rawUnit = command.payload.unit;
     const unit = typeof rawUnit === 'string' ? rawUnit.trim() : undefined;
+    const rawOptionValues = command.payload.optionValues;
+    const optionValues = Array.isArray(rawOptionValues)
+      ? [...new Set(rawOptionValues.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter((value) => value.length > 0 && value.length <= 160))].slice(0, 100)
+      : undefined;
     if (
       !name ||
       name.length > 240 ||
       !uuid(requestedDepartmentId) ||
       (rawUnit !== undefined && typeof rawUnit !== 'string') ||
-      (unit !== undefined && unit.length > 80)
+      (unit !== undefined && unit.length > 80) ||
+      (rawOptionValues !== undefined && optionValues === undefined)
     ) {
       throw new ValidationFailedError('Desktop specification command is incomplete');
     }
@@ -1846,19 +1851,21 @@ export class OperationalSyncProjector {
         name: string;
         departmentId: string;
         unit: string | null;
+        optionValues: string[];
       }>(
         `UPDATE spec_keys
-         SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = 'text', active = true,
+         SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = 'text', option_values = $7::jsonb, active = true,
              deleted_at = NULL, version = version + 1, updated_at = now()
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-         RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
+         RETURNING id, slug AS key, name, department_id AS "departmentId", unit, option_values AS "optionValues"`,
         [
           ctx.organizationId,
           specificationId,
           name,
           catalogSlug(name, specificationId),
           departmentId,
-          unit || null
+          unit || null,
+          JSON.stringify(optionValues ?? [])
         ]
       );
       if (!updated.rows[0]) {
@@ -1873,8 +1880,9 @@ export class OperationalSyncProjector {
       name: string;
       departmentId: string;
       unit: string | null;
+      optionValues: string[];
     }>(
-      `SELECT id, slug AS key, name, department_id AS "departmentId", unit
+      `SELECT id, slug AS key, name, department_id AS "departmentId", unit, option_values AS "optionValues"
        FROM spec_keys
        WHERE organization_id = $1 AND deleted_at IS NULL
          AND (id = $2 OR slug = $3)
@@ -1900,15 +1908,16 @@ export class OperationalSyncProjector {
       name: string;
       departmentId: string;
       unit: string | null;
+      optionValues: string[];
     }>(
-      `INSERT INTO spec_keys (id, organization_id, name, slug, department_id, unit, data_type, active)
-       VALUES ($1, $2, $3, $4, $5, $6, 'text', true)
+      `INSERT INTO spec_keys (id, organization_id, name, slug, department_id, unit, data_type, option_values, active)
+       VALUES ($1, $2, $3, $4, $5, $6, 'text', $7::jsonb, true)
        ON CONFLICT (id) DO UPDATE
        SET name = EXCLUDED.name, slug = EXCLUDED.slug, department_id = EXCLUDED.department_id,
-           unit = EXCLUDED.unit, data_type = 'text', active = true, deleted_at = NULL,
+           unit = EXCLUDED.unit, data_type = 'text', option_values = EXCLUDED.option_values, active = true, deleted_at = NULL,
            version = spec_keys.version + 1, updated_at = now()
-       RETURNING id, slug AS key, name, department_id AS "departmentId", unit`,
-      [specificationId, ctx.organizationId, name, specificationSlug, departmentId, unit || null]
+       RETURNING id, slug AS key, name, department_id AS "departmentId", unit, option_values AS "optionValues"`,
+      [specificationId, ctx.organizationId, name, specificationSlug, departmentId, unit || null, JSON.stringify(optionValues ?? [])]
     );
     if (!result.rows[0])
       throw new ValidationFailedError('Desktop specification could not be saved');
@@ -2046,13 +2055,32 @@ export class OperationalSyncProjector {
     const requestedSku = nullableText(input, 'sku');
     const name = text(input, 'name');
     const inputAttributes = record(input.attributes) ?? {};
+    const savedCatalogOptions = record(inputAttributes._catalogSpecOptions) ?? {};
     // `_variantName` keeps newly deployed renderer code compatible with an
     // already-running desktop main process that still has the prior strict
     // command schema. It is transport-only and never stored as a catalog spec.
     const variantName = text(input, 'variantName') ?? text(inputAttributes, '_variantName') ?? name;
     const variantAttributes = Object.fromEntries(
-      Object.entries(inputAttributes).filter(([key]) => key !== '_variantName')
+      Object.entries(inputAttributes).filter(
+        ([key]) => key !== '_variantName' && key !== '_catalogSpecOptions'
+      )
     );
+    const persistSavedCatalogOptions = async (): Promise<void> => {
+      for (const [key, rawValues] of Object.entries(savedCatalogOptions)) {
+        if (!/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(key) || !Array.isArray(rawValues)) continue;
+        const values = [...new Set(rawValues.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter((value) => value.length > 0 && value.length <= 160))].slice(0, 100);
+        if (!values.length) continue;
+        await this.client.query(
+          `UPDATE spec_keys SET option_values = (
+             SELECT COALESCE(jsonb_agg(value), '[]'::jsonb) FROM (
+               SELECT DISTINCT value FROM jsonb_array_elements_text(option_values || $3::jsonb) AS values(value)
+             ) merged
+           ), version = version + 1, updated_at = now()
+           WHERE organization_id = $1 AND slug = $2 AND deleted_at IS NULL`,
+          [ctx.organizationId, key, JSON.stringify(values)]
+        );
+      }
+    };
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
     const variantId =
@@ -2168,6 +2196,7 @@ export class OperationalSyncProjector {
       );
       await this.addCatalogPrices(ctx, resolvedVariantId, input, currency);
       await this.setImages(ctx.organizationId, resolvedProductId, input);
+      await persistSavedCatalogOptions();
       return {
         ...(await this.catalogSnapshot(ctx.organizationId, resolvedProductId, resolvedVariantId)),
         sourceProductId,
@@ -2320,6 +2349,7 @@ export class OperationalSyncProjector {
     );
     await this.addCatalogPrices(ctx, variantId, input, currency);
     await this.setImages(ctx.organizationId, row.product_id, input);
+    await persistSavedCatalogOptions();
     if (input.epc === null || input.trackByTag === false) {
       // Desktop sends null when the EPC field is explicitly cleared. Older
       // desktop builds express the same intent by disabling tag tracking, so
