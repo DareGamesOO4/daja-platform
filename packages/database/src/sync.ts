@@ -343,7 +343,7 @@ export class SyncRepository {
         [ctx.organizationId]
       ),
       this.client.query(
-        `SELECT id, slug AS key, name, department_id AS "departmentId", unit FROM spec_keys WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
+        `SELECT id, slug AS key, name, department_id AS "departmentId", unit, option_values AS "optionValues" FROM spec_keys WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY name`,
         [ctx.organizationId]
       ),
       this.client.query(
