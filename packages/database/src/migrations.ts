@@ -5,11 +5,10 @@ import type pg from 'pg';
 import { fileURLToPath } from 'node:url';
 
 const MIGRATION_LOCK_ID = 74794652901801;
-// These historic migrations contain idempotent DDL, conflict-safe seeds, or
-// cleanup of short-lived OAuth grants. Older Render releases recorded their
-// checksum before completing the transaction, so replaying them is safe and
-// repairs the history row.
-const RECOVERABLE_MIGRATION_VERSIONS = new Set(['031', '043', '053']);
+// These historic migrations contain only idempotent DDL / conflict-safe seed
+// statements. Older Render releases recorded their checksum before completing
+// the transaction, so replaying them is safe and repairs the history row.
+const RECOVERABLE_MIGRATION_VERSIONS = new Set(['031', '043']);
 
 function checksum(contents: string): string {
   return createHash('sha256').update(contents).digest('hex');
