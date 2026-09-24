@@ -2066,6 +2066,14 @@ export class OperationalSyncProjector {
            updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`,
       [ctx.organizationId, JSON.stringify(salesConfiguration.services), JSON.stringify(salesConfiguration.staff), JSON.stringify(salesConfiguration.shifts), JSON.stringify(salesConfiguration.shiftOverrides), ctx.userId]
     );
+    await this.client.query(`DELETE FROM organization_sales_staff WHERE organization_id = $1`, [ctx.organizationId]);
+    await this.client.query(
+      `INSERT INTO organization_sales_staff (id, organization_id, name, active)
+       SELECT (staff->>'id')::uuid, $1, staff->>'name', COALESCE((staff->>'active')::boolean, true)
+       FROM jsonb_array_elements($2::jsonb) AS staff
+       WHERE staff ? 'id' AND staff ? 'name' AND length(trim(staff->>'name')) > 0`,
+      [ctx.organizationId, JSON.stringify(salesConfiguration.staff)]
+    );
     return { kind: 'organization.settings', organization: result.rows[0], salesConfiguration };
   }
 
