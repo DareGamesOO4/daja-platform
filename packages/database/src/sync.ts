@@ -378,7 +378,7 @@ export class SyncRepository {
         [ctx.organizationId]
       ),
       this.client.query(
-        `SELECT services, staff, shifts FROM organization_sales_configuration WHERE organization_id = $1`,
+        `SELECT services, staff, shifts, shift_overrides AS "shiftOverrides" FROM organization_sales_configuration WHERE organization_id = $1`,
         [ctx.organizationId]
       )
     ]);
@@ -397,7 +397,7 @@ export class SyncRepository {
         zones: zones.rows,
         bins: bins.rows
       },
-      salesConfiguration: salesConfiguration.rows[0] ?? { services: [], staff: [], shifts: [] },
+      salesConfiguration: salesConfiguration.rows[0] ?? { services: [], staff: [], shifts: [], shiftOverrides: [] },
       nextCursor: result.rows.length > input.limit ? rows.at(-1)?.productId : null,
       hasMore: result.rows.length > input.limit
     };

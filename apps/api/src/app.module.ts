@@ -18,6 +18,7 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { ReaderStationController } from './reader-station.controller.js';
 import { ReaderStationService } from './reader-station.service.js';
 import { DeviceController, SyncController } from './sync.controller.js';
+import { InternalSalesReportController } from './internal-sales-report.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
 import { AuthService } from './auth.service.js';
@@ -78,6 +79,7 @@ const logger = createLogger(config, 'api');
     ImportsController,
     DeviceController,
     SyncController,
+    InternalSalesReportController,
     OfflineInventoryController,
     DevicePluginsController
     ,ReaderStationController

@@ -2055,15 +2055,16 @@ export class OperationalSyncProjector {
     const salesConfiguration = {
       services: Array.isArray(values['sales.services']) ? values['sales.services'] : [],
       staff: Array.isArray(values['sales.staff']) ? values['sales.staff'] : [],
-      shifts: Array.isArray(values['sales.shifts']) ? values['sales.shifts'] : []
+      shifts: Array.isArray(values['sales.shifts']) ? values['sales.shifts'] : [],
+      shiftOverrides: Array.isArray(values['sales.shiftOverrides']) ? values['sales.shiftOverrides'] : []
     };
     await this.client.query(
-      `INSERT INTO organization_sales_configuration (organization_id, services, staff, shifts, updated_by_user_id)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5)
+      `INSERT INTO organization_sales_configuration (organization_id, services, staff, shifts, shift_overrides, updated_by_user_id)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6)
        ON CONFLICT (organization_id) DO UPDATE
-       SET services = EXCLUDED.services, staff = EXCLUDED.staff, shifts = EXCLUDED.shifts,
+       SET services = EXCLUDED.services, staff = EXCLUDED.staff, shifts = EXCLUDED.shifts, shift_overrides = EXCLUDED.shift_overrides,
            updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`,
-      [ctx.organizationId, JSON.stringify(salesConfiguration.services), JSON.stringify(salesConfiguration.staff), JSON.stringify(salesConfiguration.shifts), ctx.userId]
+      [ctx.organizationId, JSON.stringify(salesConfiguration.services), JSON.stringify(salesConfiguration.staff), JSON.stringify(salesConfiguration.shifts), JSON.stringify(salesConfiguration.shiftOverrides), ctx.userId]
     );
     return { kind: 'organization.settings', organization: result.rows[0], salesConfiguration };
   }
