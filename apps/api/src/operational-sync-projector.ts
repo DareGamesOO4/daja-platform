@@ -48,6 +48,7 @@ type InventoryCommand = {
 
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
 type SaleCommand = { kind: 'sale.confirm'; payload: Record<string, unknown> };
+type ReturnCommand = { kind: 'return.confirm'; payload: Record<string, unknown> };
 type CatalogBrandCommand = {
   kind: 'catalog.brand.create' | 'catalog.brand.update' | 'catalog.brand.delete';
   payload: Record<string, unknown>;
@@ -306,6 +307,10 @@ export class OperationalSyncProjector {
     }
     if (kind === 'sale.confirm') {
       const snapshot = await this.sale(ctx, { kind: 'sale.confirm', payload: commandPayload });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'return.confirm') {
+      const snapshot = await this.returnSale(ctx, { kind: 'return.confirm', payload: commandPayload });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (
@@ -2140,6 +2145,45 @@ export class OperationalSyncProjector {
     await insertPayment('cash', cashPaidMinor); await insertPayment('card', cardPaidMinor);
     for (const cheque of chequeLines) await insertPayment('cheque', cheque.count! * cheque.nominalMinor!, { count: cheque.count!, nominalMinor: cheque.nominalMinor! });
     return { kind: 'internal.sale', sale: { id: saleId, locationId, sellerName: sellerName ?? null, totalMinor, cashPaidMinor, cardPaidMinor, chequeTotal, serviceLineCount: normalizedServices.length } };
+  }
+
+  private async returnSale(ctx: RequestContext, command: ReturnCommand): Promise<Record<string, unknown>> {
+    const payload = command.payload;
+    const returnId = text(payload, 'returnId');
+    const saleId = text(payload, 'saleId');
+    const locationId = text(payload, 'locationId');
+    const items = records(payload.items).map((item) => ({ productVariantId: text(item, 'productVariantId'), rfidTagId: text(item, 'rfidTagId'), quantity: integer(item, 'quantity'), reason: text(item, 'reason') }));
+    const serviceItems = records(payload.serviceItems).map((item) => ({ serviceId: text(item, 'serviceId'), serviceName: text(item, 'serviceName'), consumableProductVariantId: text(item, 'consumableProductVariantId'), quantity: integer(item, 'quantity'), reason: text(item, 'reason') }));
+    if (!returnId || !saleId || !locationId || (items.length === 0 && serviceItems.length === 0) || items.some((item) => !item.productVariantId || !item.quantity || item.quantity < 1 || !item.reason) || serviceItems.some((item) => !item.serviceId || !item.serviceName || !item.quantity || item.quantity < 1 || !item.reason)) throw new ValidationFailedError('Internal sale return is incomplete');
+    const existing = await this.client.query<{ id: string }>(`SELECT id FROM internal_sale_returns WHERE organization_id = $1 AND id = $2`, [ctx.organizationId, returnId]);
+    if (existing.rows[0]) return { kind: 'internal.sale.return', return: existing.rows[0], duplicate: true };
+    const sale = await this.client.query<{ id: string }>(`SELECT id FROM internal_sales WHERE organization_id = $1 AND id = $2 AND location_id = $3`, [ctx.organizationId, saleId, locationId]);
+    if (!sale.rows[0]) throw new ValidationFailedError('Original internal sale was not found');
+    await this.client.query(`INSERT INTO internal_sale_returns (id, organization_id, sale_id, location_id, actor_user_id) VALUES ($1, $2, $3, $4, $5)`, [returnId, ctx.organizationId, saleId, locationId, ctx.userId]);
+    for (const item of items) {
+      const sold = await this.client.query<{ quantity: number }>(`SELECT COALESCE(SUM(quantity), 0)::int AS quantity FROM internal_sale_lines WHERE sale_id = $1 AND product_variant_id = $2`, [saleId, item.productVariantId]);
+      const returned = await this.client.query<{ quantity: number }>(`SELECT COALESCE(SUM(line.quantity), 0)::int AS quantity FROM internal_sale_return_lines line JOIN internal_sale_returns ret ON ret.id = line.return_id WHERE ret.sale_id = $1 AND line.product_variant_id = $2`, [saleId, item.productVariantId]);
+      if ((returned.rows[0]?.quantity ?? 0) + item.quantity! > (sold.rows[0]?.quantity ?? 0)) throw new ValidationFailedError('Requested return exceeds sold quantity');
+      await this.client.query(`INSERT INTO internal_sale_return_lines (id, return_id, product_variant_id, rfid_tag_id, quantity, reason) VALUES ($1, $2, $3, $4, $5, $6)`, [randomUUID(), returnId, item.productVariantId, item.rfidTagId ?? null, item.quantity, item.reason]);
+      await this.client.query(`INSERT INTO inventory_balances (organization_id, location_id, variant_id, quantity) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, location_id, variant_id) DO UPDATE SET quantity = inventory_balances.quantity + EXCLUDED.quantity, version = inventory_balances.version + 1, updated_at = now()`, [ctx.organizationId, locationId, item.productVariantId, item.quantity]);
+      await this.client.query(`INSERT INTO inventory_events (organization_id, variant_id, event_type, quantity_delta, to_location_id, source_type, source_id, actor_user_id, metadata) VALUES ($1, $2, 'returned', $3, $4, 'internal_sale_return', $5, $6, $7::jsonb)`, [ctx.organizationId, item.productVariantId, item.quantity, locationId, returnId, ctx.userId, JSON.stringify({ saleId, reason: item.reason })]);
+      if (item.rfidTagId) {
+        const tag = await this.client.query(`UPDATE rfid_tags SET status = 'returned', version = version + 1, updated_at = now() WHERE organization_id = $1 AND id = $2 AND status = 'sold' RETURNING id`, [ctx.organizationId, item.rfidTagId]);
+        if (tag.rowCount !== 1) throw new ValidationFailedError('RFID tag cannot be returned');
+        await this.client.query(`INSERT INTO rfid_tag_events (organization_id, tag_id, location_id, event_type, metadata) VALUES ($1, $2, $3, 'returned', $4::jsonb)`, [ctx.organizationId, item.rfidTagId, locationId, JSON.stringify({ returnId, saleId })]);
+      }
+    }
+    for (const item of serviceItems) {
+      const sold = await this.client.query<{ quantity: number }>(`SELECT COALESCE(SUM(quantity), 0)::int AS quantity FROM internal_sale_service_lines WHERE sale_id = $1 AND service_id = $2`, [saleId, item.serviceId]);
+      const returned = await this.client.query<{ quantity: number }>(`SELECT COALESCE(SUM(line.quantity), 0)::int AS quantity FROM internal_sale_service_returns line JOIN internal_sale_returns ret ON ret.id = line.return_id WHERE ret.sale_id = $1 AND line.service_id = $2`, [saleId, item.serviceId]);
+      if ((returned.rows[0]?.quantity ?? 0) + item.quantity! > (sold.rows[0]?.quantity ?? 0)) throw new ValidationFailedError('Requested service return exceeds sold quantity');
+      await this.client.query(`INSERT INTO internal_sale_service_returns (id, return_id, service_id, service_name, consumable_product_variant_id, quantity, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [randomUUID(), returnId, item.serviceId, item.serviceName, item.consumableProductVariantId ?? null, item.quantity, item.reason]);
+      if (!item.consumableProductVariantId) continue;
+      await this.client.query(`INSERT INTO inventory_balances (organization_id, location_id, variant_id, quantity) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, location_id, variant_id) DO UPDATE SET quantity = inventory_balances.quantity + EXCLUDED.quantity, version = inventory_balances.version + 1, updated_at = now()`, [ctx.organizationId, locationId, item.consumableProductVariantId, item.quantity]);
+      await this.client.query(`INSERT INTO inventory_events (organization_id, variant_id, event_type, quantity_delta, to_location_id, source_type, source_id, actor_user_id, metadata) VALUES ($1, $2, 'returned', $3, $4, 'internal_service_return', $5, $6, $7::jsonb)`, [ctx.organizationId, item.consumableProductVariantId, item.quantity, locationId, returnId, ctx.userId, JSON.stringify({ saleId, serviceId: item.serviceId, reason: item.reason })]);
+    }
+    await this.client.query(`UPDATE internal_sales SET status = 'partially_returned', updated_at = now() WHERE organization_id = $1 AND id = $2`, [ctx.organizationId, saleId]);
+    return { kind: 'internal.sale.return', return: { id: returnId, saleId, locationId, itemCount: items.length, serviceItemCount: serviceItems.length } };
   }
 
   private async item(
