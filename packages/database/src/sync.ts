@@ -329,7 +329,7 @@ export class SyncRepository {
       [ctx.organizationId, cursor, input.limit + 1]
     );
     const rows = result.rows.slice(0, input.limit);
-    const [departments, brands, categories, specificationKeys, locations, warehouses, zones, bins] = await Promise.all([
+    const [departments, brands, categories, specificationKeys, locations, warehouses, zones, bins, salesConfiguration] = await Promise.all([
       this.client.query(
         `SELECT id, name FROM departments WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY sort_order, name`,
         [ctx.organizationId]
@@ -376,6 +376,10 @@ export class SyncRepository {
          WHERE organization_id = $1 AND deleted_at IS NULL
          ORDER BY zone_id, display_order, code, name`,
         [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT services, staff, shifts FROM organization_sales_configuration WHERE organization_id = $1`,
+        [ctx.organizationId]
       )
     ]);
     return {
@@ -393,6 +397,7 @@ export class SyncRepository {
         zones: zones.rows,
         bins: bins.rows
       },
+      salesConfiguration: salesConfiguration.rows[0] ?? { services: [], staff: [], shifts: [] },
       nextCursor: result.rows.length > input.limit ? rows.at(-1)?.productId : null,
       hasMore: result.rows.length > input.limit
     };

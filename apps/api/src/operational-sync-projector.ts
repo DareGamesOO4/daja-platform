@@ -47,6 +47,7 @@ type InventoryCommand = {
 };
 
 type SettingsCommand = { kind: 'settings.update'; payload: Record<string, unknown> };
+type SaleCommand = { kind: 'sale.confirm'; payload: Record<string, unknown> };
 type CatalogBrandCommand = {
   kind: 'catalog.brand.create' | 'catalog.brand.update' | 'catalog.brand.delete';
   payload: Record<string, unknown>;
@@ -301,6 +302,10 @@ export class OperationalSyncProjector {
         kind,
         payload: commandPayload
       });
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
+    if (kind === 'sale.confirm') {
+      const snapshot = await this.sale(ctx, { kind: 'sale.confirm', payload: commandPayload });
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (
@@ -2042,7 +2047,99 @@ export class OperationalSyncProjector {
     );
     if (!result.rows[0])
       throw new ValidationFailedError('Desktop organization does not exist on Platform');
-    return { kind: 'organization.settings', organization: result.rows[0] };
+    const salesConfiguration = {
+      services: Array.isArray(values['sales.services']) ? values['sales.services'] : [],
+      staff: Array.isArray(values['sales.staff']) ? values['sales.staff'] : [],
+      shifts: Array.isArray(values['sales.shifts']) ? values['sales.shifts'] : []
+    };
+    await this.client.query(
+      `INSERT INTO organization_sales_configuration (organization_id, services, staff, shifts, updated_by_user_id)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5)
+       ON CONFLICT (organization_id) DO UPDATE
+       SET services = EXCLUDED.services, staff = EXCLUDED.staff, shifts = EXCLUDED.shifts,
+           updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`,
+      [ctx.organizationId, JSON.stringify(salesConfiguration.services), JSON.stringify(salesConfiguration.staff), JSON.stringify(salesConfiguration.shifts), ctx.userId]
+    );
+    return { kind: 'organization.settings', organization: result.rows[0], salesConfiguration };
+  }
+
+  private async sale(
+    ctx: RequestContext,
+    command: SaleCommand
+  ): Promise<Record<string, unknown>> {
+    const payload = command.payload;
+    const saleId = text(payload, 'saleId');
+    const locationId = text(payload, 'locationId');
+    const paymentMethod = text(payload, 'paymentMethod');
+    const physicalLines = records(payload.lines);
+    const serviceLines = records(payload.serviceLines);
+    const cashPaidMinor = integer(payload, 'cashPaidMinor') ?? 0;
+    const cashTenderedMinor = integer(payload, 'cashTenderedMinor') ?? cashPaidMinor;
+    const cardPaidMinor = integer(payload, 'cardPaidMinor') ?? 0;
+    const sellerName = text(payload, 'sellerName');
+    if (!saleId || !locationId || !['cash', 'card', 'mixed'].includes(paymentMethod ?? '') || (physicalLines.length === 0 && serviceLines.length === 0)) {
+      throw new ValidationFailedError('Internal sale command is incomplete');
+    }
+    if ([cashPaidMinor, cashTenderedMinor, cardPaidMinor].some((amount) => amount < 0)) {
+      throw new ValidationFailedError('Internal sale payment cannot be negative');
+    }
+    const normalizedPhysical = physicalLines.map((line) => ({
+      productVariantId: text(line, 'productVariantId'),
+      rfidTagId: text(line, 'rfidTagId'),
+      quantity: integer(line, 'quantity'),
+      unitPriceMinor: integer(line, 'unitPriceMinor')
+    }));
+    const normalizedServices = serviceLines.map((line) => ({
+      serviceId: text(line, 'serviceId'), serviceName: text(line, 'serviceName'),
+      quantity: integer(line, 'quantity'), unitPriceMinor: integer(line, 'unitPriceMinor'),
+      consumableProductVariantId: text(line, 'consumableProductVariantId')
+    }));
+    if (normalizedPhysical.some((line) => !line.productVariantId || !line.quantity || line.quantity < 1 || line.unitPriceMinor === undefined || line.unitPriceMinor < 0) || normalizedServices.some((line) => !line.serviceId || !line.serviceName || !line.quantity || line.quantity < 1 || line.unitPriceMinor === undefined || line.unitPriceMinor < 0)) {
+      throw new ValidationFailedError('Internal sale line is invalid');
+    }
+    const chequeLines = records(payload.chequeLines).map((line) => ({ count: integer(line, 'count'), nominalMinor: integer(line, 'nominalMinor') }));
+    if (chequeLines.some((line) => !line.count || line.count < 1 || line.nominalMinor === undefined || line.nominalMinor < 0)) throw new ValidationFailedError('Cheque line is invalid');
+    const totalMinor = [...normalizedPhysical, ...normalizedServices].reduce((sum, line) => sum + line.quantity! * line.unitPriceMinor!, 0);
+    const chequeTotal = chequeLines.reduce((sum, line) => sum + line.count! * line.nominalMinor!, 0);
+    if (cashPaidMinor + cardPaidMinor + chequeTotal < totalMinor) throw new ValidationFailedError('Internal sale payment is insufficient');
+    const existing = await this.client.query<{ id: string; totalMinor: number }>(`SELECT id, total_minor AS "totalMinor" FROM internal_sales WHERE organization_id = $1 AND id = $2`, [ctx.organizationId, saleId]);
+    if (existing.rows[0]) return { kind: 'internal.sale', sale: existing.rows[0], duplicate: true };
+    await this.client.query(
+      `INSERT INTO internal_sales (id, organization_id, location_id, seller_name, actor_user_id, payment_method, total_minor, cash_paid_minor, cash_tendered_minor, card_paid_minor)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [saleId, ctx.organizationId, locationId, sellerName ?? null, ctx.userId, paymentMethod, totalMinor, cashPaidMinor, cashTenderedMinor, cardPaidMinor]
+    );
+    for (const line of normalizedPhysical) {
+      const balance = await this.client.query<{ quantity: number }>(`SELECT quantity FROM inventory_balances WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3 FOR UPDATE`, [ctx.organizationId, locationId, line.productVariantId]);
+      if ((balance.rows[0]?.quantity ?? 0) < line.quantity!) throw new ValidationFailedError('Physical item is no longer available in this store');
+      await this.client.query(`INSERT INTO internal_sale_lines (id, sale_id, product_variant_id, rfid_tag_id, quantity, unit_price_minor) VALUES ($1, $2, $3, $4, $5, $6)`, [randomUUID(), saleId, line.productVariantId, line.rfidTagId ?? null, line.quantity, line.unitPriceMinor]);
+      await this.client.query(`UPDATE inventory_balances SET quantity = quantity - $4, version = version + 1, updated_at = now() WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3`, [ctx.organizationId, locationId, line.productVariantId, line.quantity]);
+      await this.client.query(`INSERT INTO inventory_events (organization_id, variant_id, event_type, quantity_delta, from_location_id, source_type, source_id, actor_user_id, metadata) VALUES ($1, $2, 'sold', $3, $4, 'internal_sale', $5, $6, '{}'::jsonb)`, [ctx.organizationId, line.productVariantId, -line.quantity!, locationId, saleId, ctx.userId]);
+      if (line.rfidTagId) {
+        const tag = await this.client.query(`UPDATE rfid_tags SET status = 'sold', version = version + 1, updated_at = now() WHERE organization_id = $1 AND id = $2 AND status IN ('in_stock', 'returned', 'transferred') RETURNING id`, [ctx.organizationId, line.rfidTagId]);
+        if (tag.rowCount !== 1) throw new ValidationFailedError('RFID tag is no longer available');
+        await this.client.query(`INSERT INTO rfid_tag_events (organization_id, tag_id, location_id, event_type, metadata) VALUES ($1, $2, $3, 'sold', $4::jsonb)`, [ctx.organizationId, line.rfidTagId, locationId, JSON.stringify({ saleId })]);
+      }
+    }
+    for (const line of normalizedServices) {
+      await this.client.query(`INSERT INTO internal_sale_service_lines (id, sale_id, service_id, service_name, quantity, unit_price_minor, consumable_product_variant_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [randomUUID(), saleId, line.serviceId, line.serviceName, line.quantity, line.unitPriceMinor, line.consumableProductVariantId ?? null]);
+      if (!line.consumableProductVariantId) continue;
+      const balance = await this.client.query<{ quantity: number }>(`SELECT quantity FROM inventory_balances WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3 FOR UPDATE`, [ctx.organizationId, locationId, line.consumableProductVariantId]);
+      const available = balance.rows[0]?.quantity ?? 0;
+      const fulfilled = Math.min(available, line.quantity!);
+      if (fulfilled > 0) {
+        await this.client.query(`UPDATE inventory_balances SET quantity = quantity - $4, version = version + 1, updated_at = now() WHERE organization_id = $1 AND location_id = $2 AND variant_id = $3`, [ctx.organizationId, locationId, line.consumableProductVariantId, fulfilled]);
+        await this.client.query(`INSERT INTO inventory_events (organization_id, variant_id, event_type, quantity_delta, from_location_id, source_type, source_id, actor_user_id, metadata) VALUES ($1, $2, 'sold', $3, $4, 'internal_service', $5, $6, $7::jsonb)`, [ctx.organizationId, line.consumableProductVariantId, -fulfilled, locationId, saleId, ctx.userId, JSON.stringify({ serviceId: line.serviceId })]);
+      }
+      if (fulfilled < line.quantity!) await this.client.query(`INSERT INTO internal_sale_shortages (id, sale_id, product_variant_id, requested_quantity, available_quantity, missing_quantity) VALUES ($1, $2, $3, $4, $5, $6)`, [randomUUID(), saleId, line.consumableProductVariantId, line.quantity, available, line.quantity! - fulfilled]);
+    }
+    const insertPayment = async (method: 'cash' | 'card' | 'cheque', amountMinor: number, cheque?: { count: number; nominalMinor: number }): Promise<void> => {
+      if (amountMinor <= 0) return;
+      await this.client.query(`INSERT INTO internal_sale_payment_parts (id, sale_id, method, amount_minor, cheque_count, cheque_nominal_minor) VALUES ($1, $2, $3, $4, $5, $6)`, [randomUUID(), saleId, method, amountMinor, cheque?.count ?? null, cheque?.nominalMinor ?? null]);
+    };
+    await insertPayment('cash', cashPaidMinor); await insertPayment('card', cardPaidMinor);
+    for (const cheque of chequeLines) await insertPayment('cheque', cheque.count! * cheque.nominalMinor!, { count: cheque.count!, nominalMinor: cheque.nominalMinor! });
+    return { kind: 'internal.sale', sale: { id: saleId, locationId, sellerName: sellerName ?? null, totalMinor, cashPaidMinor, cardPaidMinor, chequeTotal, serviceLineCount: normalizedServices.length } };
   }
 
   private async item(
