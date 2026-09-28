@@ -1979,6 +1979,7 @@ export class StaffCatalogController {
           nextSlug,
           input.departmentId ?? row.department_id,
           input.unit === undefined ? row.unit : input.unit,
+          input.dataType ?? row.data_type,
           JSON.stringify([...new Set(input.optionValues ?? row.option_values ?? [])]),
           input.active ?? row.active
         ]
