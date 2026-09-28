@@ -1938,9 +1938,10 @@ export class StaffCatalogController {
     const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
     const nextAttributeKey = specificationAttributeKey(nextName);
     const updated = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const affected = oldAttributeKeys.includes(nextAttributeKey)
-        ? []
-        : await client.query<{ product_id: string }>(
+      let affected: Array<{ product_id: string }> = [];
+      if (!oldAttributeKeys.includes(nextAttributeKey)) {
+        affected = (
+          await client.query<{ product_id: string }>(
             `UPDATE product_variants
              SET attributes = (COALESCE(attributes, '{}'::jsonb) - $3::text[]) || jsonb_build_object(
                    $4,
@@ -1950,7 +1951,9 @@ export class StaffCatalogController {
              WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
              RETURNING product_id`,
             [ctx.organizationId, oldAttributeKeys, nextAttributeKey, primaryAttributeKey, secondaryAttributeKey, legacyAttributeKey]
-          );
+          )
+        ).rows;
+      }
       const result = await client.query(
         `UPDATE spec_keys
          SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, option_values = $8::jsonb, active = $9,
@@ -1969,7 +1972,7 @@ export class StaffCatalogController {
           input.active ?? row.active
         ]
       );
-      return { specKey: result.rows[0], productIds: [...new Set(affected.rows.map((item) => item.product_id))] };
+      return { specKey: result.rows[0], productIds: [...new Set(affected.map((item) => item.product_id))] };
     });
     await this.publishSpecificationAttributeChanges(ctx, updated.productIds);
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
@@ -1986,8 +1989,9 @@ export class StaffCatalogController {
         `SELECT name, slug FROM spec_keys WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
         [ctx.organizationId, specKeyId]
       );
-      if (current.rowCount !== 1) throw new TenantAccessDeniedError();
-      const attributeKeys = specificationAttributeKeys(current.rows[0].name, current.rows[0].slug);
+      const currentSpecKey = current.rows[0];
+      if (!currentSpecKey) throw new TenantAccessDeniedError();
+      const attributeKeys = specificationAttributeKeys(currentSpecKey.name, currentSpecKey.slug);
       const affected = await client.query<{ product_id: string }>(
         `UPDATE product_variants
          SET attributes = COALESCE(attributes, '{}'::jsonb) - $3::text[], version = version + 1, updated_at = now()

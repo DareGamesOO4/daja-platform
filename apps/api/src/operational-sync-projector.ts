@@ -1893,15 +1893,17 @@ export class OperationalSyncProjector {
          WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
         [ctx.organizationId, specificationId]
       );
-      if (!current.rows[0]) {
+      const currentSpecification = current.rows[0];
+      if (!currentSpecification) {
         throw new ValidationFailedError('Desktop specification does not exist on Platform');
       }
-      const oldAttributeKeys = specificationAttributeKeys(current.rows[0].name, current.rows[0].slug);
+      const oldAttributeKeys = specificationAttributeKeys(currentSpecification.name, currentSpecification.slug);
       const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
       const nextAttributeKey = specificationAttributeKey(name);
-      const affected = oldAttributeKeys.includes(nextAttributeKey)
-        ? []
-        : await this.client.query<{ productId: string; variantId: string }>(
+      let affected: Array<{ productId: string; variantId: string }> = [];
+      if (!oldAttributeKeys.includes(nextAttributeKey)) {
+        affected = (
+          await this.client.query<{ productId: string; variantId: string }>(
             `UPDATE product_variants
              SET attributes = (COALESCE(attributes, '{}'::jsonb) - $3::text[]) || jsonb_build_object(
                    $4,
@@ -1918,7 +1920,9 @@ export class OperationalSyncProjector {
               secondaryAttributeKey,
               legacyAttributeKey
             ]
-          );
+          )
+        ).rows;
+      }
       const updated = await this.client.query<{
         id: string;
         key: string;
@@ -1945,7 +1949,7 @@ export class OperationalSyncProjector {
       if (!updated.rows[0]) {
         throw new ValidationFailedError('Desktop specification does not exist on Platform');
       }
-      await this.publishSpecificationAttributeChanges(ctx, affected.rows);
+      await this.publishSpecificationAttributeChanges(ctx, affected);
       return { kind: 'catalog.specification', specification: updated.rows[0] };
     }
     const specificationSlug = catalogSlug(name, specificationId);
