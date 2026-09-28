@@ -10,6 +10,8 @@ services:
         value: production
       - key: LOG_LEVEL
         value: info
+      - key: ACCESS_TOKEN_TTL_SECONDS
+        value: '14400'
       - key: API_PUBLIC_BASE_URL
         value: https://daja-platform-api.onrender.com
       - key: CORS_ALLOWED_ORIGINS

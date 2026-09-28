@@ -25,7 +25,7 @@ const envSchema = z.object({
   DB_SLOW_QUERY_MS: z.coerce.number().int().positive().default(250),
   JWT_ACCESS_SECRET: optionalPreparedSecret,
   JWT_REFRESH_SECRET: optionalPreparedSecret,
-  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(14_400),
   REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
   TRUSTED_IDENTITY_HEADERS: z
     .enum(['true', 'false'])
