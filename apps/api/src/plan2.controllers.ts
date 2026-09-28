@@ -1907,42 +1907,82 @@ export class StaffCatalogController {
     }
     const row = current.rows[0];
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
-    const result = await this.database.pool.query(
-      `UPDATE spec_keys
-       SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, option_values = $8::jsonb, active = $9,
-           version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
-       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
-                 created_at AS "createdAt", updated_at AS "updatedAt"`,
-      [
-        ctx.organizationId,
-        specKeyId,
-        input.name ?? row.name,
-        input.slug ?? row.slug,
-        input.departmentId ?? row.department_id,
-        input.unit === undefined ? row.unit : input.unit,
-        input.dataType ?? row.data_type,
-        JSON.stringify([...new Set(input.optionValues ?? row.option_values ?? [])]),
-        input.active ?? row.active
-      ]
-    );
+    const nextName = input.name ?? row.name;
+    const nextSlug = input.slug ?? (input.name === undefined ? row.slug : slugifyLocal(nextName));
+    const oldAttributeKeys = specificationAttributeKeys(row.name, row.slug);
+    const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
+    const nextAttributeKey = specificationAttributeKey(nextName);
+    const updated = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const affected = oldAttributeKeys.includes(nextAttributeKey)
+        ? []
+        : await client.query<{ product_id: string }>(
+            `UPDATE product_variants
+             SET attributes = (COALESCE(attributes, '{}'::jsonb) - $3::text[]) || jsonb_build_object(
+                   $4,
+                   COALESCE(attributes -> $5, attributes -> $6, attributes -> $7)
+                 ),
+                 version = version + 1, updated_at = now()
+             WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+             RETURNING product_id`,
+            [ctx.organizationId, oldAttributeKeys, nextAttributeKey, primaryAttributeKey, secondaryAttributeKey, legacyAttributeKey]
+          );
+      const result = await client.query(
+        `UPDATE spec_keys
+         SET name = $3, slug = $4, department_id = $5, unit = $6, data_type = $7, option_values = $8::jsonb, active = $9,
+             version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
+                   created_at AS "createdAt", updated_at AS "updatedAt"`,
+        [
+          ctx.organizationId,
+          specKeyId,
+          nextName,
+          nextSlug,
+          input.departmentId ?? row.department_id,
+          input.unit === undefined ? row.unit : input.unit,
+          JSON.stringify([...new Set(input.optionValues ?? row.option_values ?? [])]),
+          input.active ?? row.active
+        ]
+      );
+      return { specKey: result.rows[0], productIds: [...new Set(affected.rows.map((item) => item.product_id))] };
+    });
+    await this.publishSpecificationAttributeChanges(ctx, updated.productIds);
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
-    return result.rows[0];
+    return updated.specKey;
   }
 
   @Delete('spec_keys/:id')
   async deleteSpecKey(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
-    const result = await this.database.pool.query(
-      `UPDATE spec_keys
-       SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [ctx.organizationId, parseWithSchema(uuidSchema, id)]
-    );
-    if (result.rowCount !== 1) {
-      throw new TenantAccessDeniedError();
-    }
+    const specKeyId = parseWithSchema(uuidSchema, id);
+    const deletedProductIds = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const current = await client.query<{ name: string; slug: string }>(
+        `SELECT name, slug FROM spec_keys WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+        [ctx.organizationId, specKeyId]
+      );
+      if (current.rowCount !== 1) throw new TenantAccessDeniedError();
+      const attributeKeys = specificationAttributeKeys(current.rows[0].name, current.rows[0].slug);
+      const affected = await client.query<{ product_id: string }>(
+        `UPDATE product_variants
+         SET attributes = COALESCE(attributes, '{}'::jsonb) - $3::text[], version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+         RETURNING product_id`,
+        [ctx.organizationId, specKeyId, attributeKeys]
+      );
+      await client.query(
+        `DELETE FROM variant_specification_values WHERE organization_id = $1 AND spec_key_id = $2`,
+        [ctx.organizationId, specKeyId]
+      );
+      await client.query(
+        `UPDATE spec_keys
+         SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, specKeyId]
+      );
+      return [...new Set(affected.rows.map((item) => item.product_id))];
+    });
+    await this.publishSpecificationAttributeChanges(ctx, deletedProductIds);
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return { deleted: true };
   }
@@ -2501,6 +2541,19 @@ export class InventoryController {
     return !ctx.isOwner && ctx.roles.includes('Unosilac kataloga');
   }
 
+  private async publishSpecificationAttributeChanges(ctx: RequestContext, productIds: string[]): Promise<void> {
+    if (!productIds.length) return;
+    const products = await this.database.pool.query<{ id: string; slug: string }>(
+      `SELECT id, slug FROM products
+       WHERE organization_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+      [ctx.organizationId, productIds]
+    );
+    for (const product of products.rows) {
+      await this.publishProductSnapshots(ctx, product.id);
+      await this.invalidateCatalog(ctx.organizationId, product.slug);
+    }
+  }
+
   private async assertContributorOwnsVariant(ctx: RequestContext, variantId: string): Promise<void> {
     if (!this.isCatalogContributor(ctx)) return;
     const result = await this.database.pool.query(
@@ -2808,4 +2861,17 @@ function slugifyLocal(value: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 120);
   return slug || `item-${Date.now()}`;
+}
+
+function specificationAttributeKey(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'specification';
+}
+
+function specificationAttributeKeys(name: string, slug: string): string[] {
+  return [...new Set([specificationAttributeKey(name), slug.replace(/-/g, '_'), name])];
 }
