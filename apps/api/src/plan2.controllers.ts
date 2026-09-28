@@ -375,7 +375,11 @@ export class PublicCatalogController {
   }
 
   @Get('products/:slug')
-  async productBySlug(@Req() request: Request, @Param('slug') slug: string) {
+  async productBySlug(
+    @Req() request: Request,
+    @Param('slug') slug: string,
+    @Query('realtime') realtime?: string
+  ) {
     const ctx = this.publicContext(request);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
     const cacheKey = `catalog:slug:${ctx.organizationId}:${normalizedSlug}`;
@@ -387,6 +391,10 @@ export class PublicCatalogController {
     const product = await repository.getPublicProductBySlug(ctx, normalizedSlug);
     if (!product) {
       const redirectTo = await repository.getPublicProductRedirect(ctx, normalizedSlug);
+      // A product can disappear between a realtime event and this refresh.
+      // That refresh is not a direct visitor navigation, so return a normal
+      // empty payload instead of making an expected race visible as a 404.
+      if (!redirectTo && realtime === '1') return null;
       if (!redirectTo) throw new NotFoundException('Product not found');
       // Return an absolute site path, not only a slug: both the SPA and the
       // Pages worker can then replace/redirect without depending on the
