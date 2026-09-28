@@ -1879,22 +1879,39 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.write');
     const input = parseWithSchema(specKeySchema, body);
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId);
-    const result = await this.database.pool.query(
-      `INSERT INTO spec_keys (organization_id, name, slug, department_id, unit, data_type, option_values, active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-       RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
-                 created_at AS "createdAt", updated_at AS "updatedAt"`,
-      [
-        ctx.organizationId,
-        input.name,
-        input.slug ?? slugifyLocal(input.name),
-        input.departmentId,
-        input.unit ?? null,
-        input.dataType ?? 'text',
-        JSON.stringify([...new Set(input.optionValues ?? [])]),
-        input.active ?? true
-      ]
+    const slug = input.slug ?? slugifyLocal(input.name);
+    const existing = await this.database.pool.query(
+      `SELECT id
+       FROM spec_keys
+       WHERE organization_id = $1 AND deleted_at IS NULL AND (lower(name) = lower($2) OR slug = $3)
+       LIMIT 1`,
+      [ctx.organizationId, input.name, slug]
     );
+    if (existing.rowCount) {
+      throw new ResourceConflictError('Specifikacija sa ovim nazivom ili internim ključem već postoji.');
+    }
+    const result = await this.database.pool.query(
+        `INSERT INTO spec_keys (organization_id, name, slug, department_id, unit, data_type, option_values, active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+         RETURNING id, name, slug, department_id AS "departmentId", unit, data_type AS "dataType", option_values AS "optionValues", active, version,
+                   created_at AS "createdAt", updated_at AS "updatedAt"`,
+        [
+          ctx.organizationId,
+          input.name,
+          slug,
+          input.departmentId,
+          input.unit ?? null,
+          input.dataType ?? 'text',
+          JSON.stringify([...new Set(input.optionValues ?? [])]),
+          input.active ?? true
+        ]
+      )
+      .catch((error: { code?: string }) => {
+        if (error.code === '23505') {
+          throw new ResourceConflictError('Specifikacija sa ovim nazivom ili internim ključem već postoji.');
+        }
+        throw error;
+      });
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return result.rows[0];
   }
@@ -1916,7 +1933,7 @@ export class StaffCatalogController {
     const row = current.rows[0];
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
     const nextName = input.name ?? row.name;
-    const nextSlug = input.slug ?? (input.name === undefined ? row.slug : slugifyLocal(nextName));
+    const nextSlug = input.name === undefined ? (input.slug ?? row.slug) : slugifyLocal(nextName);
     const oldAttributeKeys = specificationAttributeKeys(row.name, row.slug);
     const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
     const nextAttributeKey = specificationAttributeKey(nextName);
