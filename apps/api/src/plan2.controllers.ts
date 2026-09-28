@@ -2153,6 +2153,19 @@ export class StaffCatalogController {
     }
   }
 
+  private async publishSpecificationAttributeChanges(ctx: RequestContext, productIds: string[]): Promise<void> {
+    if (!productIds.length) return;
+    const products = await this.database.pool.query<{ id: string; slug: string }>(
+      `SELECT id, slug FROM products
+       WHERE organization_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+      [ctx.organizationId, productIds]
+    );
+    for (const product of products.rows) {
+      await this.publishProductSnapshots(ctx, product.id);
+      await this.invalidateCatalog(ctx.organizationId, product.slug);
+    }
+  }
+
   private async assertActiveDepartment(organizationId: string, departmentId: string) {
     const result = await this.database.pool.query(
       `SELECT 1 FROM departments WHERE organization_id = $1 AND id = $2 AND active AND deleted_at IS NULL`,
@@ -2539,19 +2552,6 @@ export class InventoryController {
 
   private isCatalogContributor(ctx: RequestContext): boolean {
     return !ctx.isOwner && ctx.roles.includes('Unosilac kataloga');
-  }
-
-  private async publishSpecificationAttributeChanges(ctx: RequestContext, productIds: string[]): Promise<void> {
-    if (!productIds.length) return;
-    const products = await this.database.pool.query<{ id: string; slug: string }>(
-      `SELECT id, slug FROM products
-       WHERE organization_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL`,
-      [ctx.organizationId, productIds]
-    );
-    for (const product of products.rows) {
-      await this.publishProductSnapshots(ctx, product.id);
-      await this.invalidateCatalog(ctx.organizationId, product.slug);
-    }
   }
 
   private async assertContributorOwnsVariant(ctx: RequestContext, variantId: string): Promise<void> {

@@ -170,6 +170,19 @@ function catalogSlug(value: string, fallbackId: string): string {
   return normalized || `item-${fallbackId.slice(0, 8)}`;
 }
 
+function specificationAttributeKey(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'specification';
+}
+
+function specificationAttributeKeys(name: string, slugValue: string): string[] {
+  return [...new Set([specificationAttributeKey(name), slugValue.replace(/-/g, '_'), name])];
+}
+
 function uuid(value: string | undefined): value is string {
   return (
     value !== undefined &&
@@ -1821,6 +1834,25 @@ export class OperationalSyncProjector {
       );
     }
     if (command.kind === 'catalog.specification.delete') {
+      const current = await this.client.query<{ name: string; slug: string }>(
+        `SELECT name, slug FROM spec_keys
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, specificationId]
+      );
+      if (!current.rows[0]) {
+        throw new ValidationFailedError('Desktop specification does not exist on Platform');
+      }
+      const affected = await this.client.query<{ productId: string; variantId: string }>(
+        `UPDATE product_variants
+         SET attributes = COALESCE(attributes, '{}'::jsonb) - $3::text[], version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+         RETURNING product_id AS "productId", id AS "variantId"`,
+        [ctx.organizationId, specificationId, specificationAttributeKeys(current.rows[0].name, current.rows[0].slug)]
+      );
+      await this.client.query(
+        `DELETE FROM variant_specification_values WHERE organization_id = $1 AND spec_key_id = $2`,
+        [ctx.organizationId, specificationId]
+      );
       const deleted = await this.client.query(
         `UPDATE spec_keys
          SET deleted_at = now(), active = false, version = version + 1, updated_at = now()
@@ -1830,6 +1862,7 @@ export class OperationalSyncProjector {
       if (deleted.rowCount !== 1) {
         throw new ValidationFailedError('Desktop specification does not exist on Platform');
       }
+      await this.publishSpecificationAttributeChanges(ctx, affected.rows);
       return { kind: 'catalog.specification', id: specificationId, deleted: true };
     }
     const name = text(command.payload, 'name');
@@ -1855,6 +1888,37 @@ export class OperationalSyncProjector {
       throw new ValidationFailedError('Selected specification department is not active');
     }
     if (command.kind === 'catalog.specification.update') {
+      const current = await this.client.query<{ name: string; slug: string }>(
+        `SELECT name, slug FROM spec_keys
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+        [ctx.organizationId, specificationId]
+      );
+      if (!current.rows[0]) {
+        throw new ValidationFailedError('Desktop specification does not exist on Platform');
+      }
+      const oldAttributeKeys = specificationAttributeKeys(current.rows[0].name, current.rows[0].slug);
+      const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
+      const nextAttributeKey = specificationAttributeKey(name);
+      const affected = oldAttributeKeys.includes(nextAttributeKey)
+        ? []
+        : await this.client.query<{ productId: string; variantId: string }>(
+            `UPDATE product_variants
+             SET attributes = (COALESCE(attributes, '{}'::jsonb) - $3::text[]) || jsonb_build_object(
+                   $4,
+                   COALESCE(attributes -> $5, attributes -> $6, attributes -> $7)
+                 ),
+                 version = version + 1, updated_at = now()
+             WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+             RETURNING product_id AS "productId", id AS "variantId"`,
+            [
+              ctx.organizationId,
+              oldAttributeKeys,
+              nextAttributeKey,
+              primaryAttributeKey,
+              secondaryAttributeKey,
+              legacyAttributeKey
+            ]
+          );
       const updated = await this.client.query<{
         id: string;
         key: string;
@@ -1881,6 +1945,7 @@ export class OperationalSyncProjector {
       if (!updated.rows[0]) {
         throw new ValidationFailedError('Desktop specification does not exist on Platform');
       }
+      await this.publishSpecificationAttributeChanges(ctx, affected.rows);
       return { kind: 'catalog.specification', specification: updated.rows[0] };
     }
     const specificationSlug = catalogSlug(name, specificationId);
@@ -2852,6 +2917,15 @@ export class OperationalSyncProjector {
       mediaId,
       this.mediaStorage
     );
+  }
+
+  private async publishSpecificationAttributeChanges(
+    ctx: RequestContext,
+    variants: ReadonlyArray<{ productId: string; variantId: string }>
+  ): Promise<void> {
+    for (const variant of variants) {
+      await this.publishProductChange(ctx, variant.productId, variant.variantId);
+    }
   }
 
   async catalogSnapshot(
