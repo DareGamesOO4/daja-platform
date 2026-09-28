@@ -1943,12 +1943,12 @@ export class StaffCatalogController {
         affected = (
           await client.query<{ product_id: string }>(
             `UPDATE product_variants
-             SET attributes = (COALESCE(attributes, '{}'::jsonb) - $3::text[]) || jsonb_build_object(
-                   $4,
-                   COALESCE(attributes -> $5, attributes -> $6, attributes -> $7)
+             SET attributes = (COALESCE(attributes, '{}'::jsonb) - $2::text[]) || jsonb_build_object(
+                   $3::text,
+                   COALESCE(attributes -> $4::text, attributes -> $5::text, attributes -> $6::text)
                  ),
                  version = version + 1, updated_at = now()
-             WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+             WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $2::text[]
              RETURNING product_id`,
             [ctx.organizationId, oldAttributeKeys, nextAttributeKey, primaryAttributeKey, secondaryAttributeKey, legacyAttributeKey]
           )
@@ -1994,10 +1994,10 @@ export class StaffCatalogController {
       const attributeKeys = specificationAttributeKeys(currentSpecKey.name, currentSpecKey.slug);
       const affected = await client.query<{ product_id: string }>(
         `UPDATE product_variants
-         SET attributes = COALESCE(attributes, '{}'::jsonb) - $3::text[], version = version + 1, updated_at = now()
-         WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $3::text[]
+         SET attributes = COALESCE(attributes, '{}'::jsonb) - $2::text[], version = version + 1, updated_at = now()
+         WHERE organization_id = $1 AND deleted_at IS NULL AND attributes ?| $2::text[]
          RETURNING product_id`,
-        [ctx.organizationId, specKeyId, attributeKeys]
+        [ctx.organizationId, attributeKeys]
       );
       await client.query(
         `DELETE FROM variant_specification_values WHERE organization_id = $1 AND spec_key_id = $2`,
