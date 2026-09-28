@@ -123,11 +123,14 @@ export class CatalogRepository {
         `(p.updated_at, p.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
       );
     }
+    params.push(INTERNAL_CATALOG_ATTRIBUTE_KEYS);
+    const internalAttributesParam = params.length;
 
     const result = await this.client.query<PublicProductRow>(
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
               p.brand_id, p.primary_category_id, p.marketing_flags, d.slug AS department,
               b.name AS brand, c.name AS category,
+              v.gender, COALESCE(v.attributes, '{}'::jsonb) - $${internalAttributesParam}::text[] AS attributes,
               v.current_price_amount AS regular_price,
               COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,
               active_sale.amount_minor AS sale_price,
@@ -712,6 +715,8 @@ export interface PublicProductCard {
   marketingFlags: string[];
   brand: string | null;
   category: string | null;
+  gender: string | null;
+  attributes: Record<string, unknown>;
   price: number;
   salePrice: number | null;
   saleValidUntil: string | null;
@@ -742,6 +747,8 @@ interface PublicProductRow {
   marketing_flags: string[];
   brand: string | null;
   category: string | null;
+  gender: string | null;
+  attributes: Record<string, unknown>;
   price: number;
   regular_price: number;
   sale_price: number | null;
@@ -861,6 +868,8 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     marketingFlags: row.marketing_flags ?? [],
     brand: row.brand,
     category: row.category,
+    gender: row.gender,
+    attributes: row.attributes,
     price: row.regular_price,
     salePrice: row.sale_price === null ? null : row.price,
     saleValidUntil: row.sale_valid_until?.toISOString() ?? null,
