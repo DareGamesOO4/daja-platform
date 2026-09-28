@@ -109,6 +109,6 @@ const logger = createLogger(config, 'api');
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(AuthMiddleware).forRoutes('*');
+    consumer.apply(AuthMiddleware).forRoutes('{*path}');
   }
 }
