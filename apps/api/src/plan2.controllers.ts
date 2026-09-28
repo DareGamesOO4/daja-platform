@@ -1991,7 +1991,17 @@ export class StaffCatalogController {
       }
       throw error;
     });
-    await this.publishSpecificationAttributeChanges(ctx, updated.productIds);
+    // The specification and its product attributes are already committed above.
+    // An operational snapshot is a follow-up notification; it must not turn a
+    // successful rename in the web admin into a 500 response.
+    try {
+      await this.publishSpecificationAttributeChanges(ctx, updated.productIds);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, organizationId: ctx.organizationId, specKeyId, productIds: updated.productIds },
+        'Specification saved but operational propagation failed'
+      );
+    }
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return updated.specKey;
   }
@@ -2028,7 +2038,14 @@ export class StaffCatalogController {
       );
       return [...new Set(affected.rows.map((item) => item.product_id))];
     });
-    await this.publishSpecificationAttributeChanges(ctx, deletedProductIds);
+    try {
+      await this.publishSpecificationAttributeChanges(ctx, deletedProductIds);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, organizationId: ctx.organizationId, specKeyId, productIds: deletedProductIds },
+        'Specification deleted but operational propagation failed'
+      );
+    }
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
     return { deleted: true };
   }
