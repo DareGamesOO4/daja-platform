@@ -38,6 +38,7 @@ import type { Logger } from '@daja/observability';
 import {
   requirePermission,
   ResourceConflictError,
+  ResourceNotFoundError,
   TenantAccessDeniedError,
   ValidationFailedError
 } from '@daja/security';
@@ -1928,7 +1929,7 @@ export class StaffCatalogController {
       [ctx.organizationId, specKeyId]
     );
     if (current.rowCount !== 1) {
-      throw new TenantAccessDeniedError();
+      throw new ResourceNotFoundError('specification');
     }
     const row = current.rows[0];
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
