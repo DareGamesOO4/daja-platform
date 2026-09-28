@@ -2134,7 +2134,9 @@ export class StaffCatalogController {
         event: 'product.updated',
         payload: {
           slug,
-          ...(productIdBySlug.get(slug) ? { productId: productIdBySlug.get(slug) } : {})
+          ...(productIdBySlug.get(slug)
+            ? { productId: productIdBySlug.get(slug) }
+            : { deleted: true })
         }
       });
     }
