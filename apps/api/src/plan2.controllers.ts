@@ -1935,6 +1935,16 @@ export class StaffCatalogController {
     await this.assertActiveDepartment(ctx.organizationId, input.departmentId ?? row.department_id);
     const nextName = input.name ?? row.name;
     const nextSlug = input.name === undefined ? (input.slug ?? row.slug) : slugifyLocal(nextName);
+    const conflict = await this.database.pool.query<{ id: string }>(
+      `SELECT id
+       FROM spec_keys
+       WHERE organization_id = $1 AND slug = $2 AND id <> $3 AND deleted_at IS NULL
+       LIMIT 1`,
+      [ctx.organizationId, nextSlug, specKeyId]
+    );
+    if (conflict.rowCount) {
+      throw new ResourceConflictError('Specifikacija sa ovim internim ključem već postoji.');
+    }
     const oldAttributeKeys = specificationAttributeKeys(row.name, row.slug);
     const [primaryAttributeKey, secondaryAttributeKey = '', legacyAttributeKey = ''] = oldAttributeKeys;
     const nextAttributeKey = specificationAttributeKey(nextName);
@@ -1974,6 +1984,12 @@ export class StaffCatalogController {
         ]
       );
       return { specKey: result.rows[0], productIds: [...new Set(affected.map((item) => item.product_id))] };
+    }).catch((error: unknown) => {
+      this.logger.error({ err: error, organizationId: ctx.organizationId, specKeyId }, 'Specification update failed');
+      if ((error as { code?: string }).code === '23505') {
+        throw new ResourceConflictError('Specifikacija sa ovim internim ključem već postoji.');
+      }
+      throw error;
     });
     await this.publishSpecificationAttributeChanges(ctx, updated.productIds);
     this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
