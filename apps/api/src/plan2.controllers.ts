@@ -57,10 +57,13 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
 import { ProductAlertService } from './product-alert.service.js';
-import { saveBultimeLink, saveEkkaLink } from './supplier-links.js';
+import { saveBultimeLink, saveEkkaLink, saveLinkelLink } from './supplier-links.js';
+import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl } from './supplier-links.js';
+import { previewSupplierLink } from './supplier-checks.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
+  linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
   bultimeUrl: z.string().trim().max(2048).url().nullable().optional(),
   supplierUrl: z.string().trim().max(2048).url().refine((value) => {
     try {
@@ -453,6 +456,19 @@ export class StaffCatalogController {
     private readonly productAlerts: ProductAlertService
   ) {}
 
+  @Post('supplier-links/preview')
+  async previewSupplier(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const input = z.object({ provider: z.enum(['ekka', 'bultime', 'linkel']), url: z.string().trim().url() }).parse(body);
+    const url = input.provider === 'ekka'
+      ? normalizeEkkaUrl(input.url)
+      : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : normalizeLinkelUrl(input.url);
+    if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
+    const result = await previewSupplierLink(input.provider, url);
+    return { ...result, url };
+  }
+
   private publishCatalogTaxonomy(
     organizationId: string,
     collection: 'departments' | 'brands' | 'categories' | 'spec_keys'
@@ -533,6 +549,7 @@ export class StaffCatalogController {
         const product = await new CatalogRepository(client).createProduct(ctx, input);
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, product.id, input.supplierUrl);
         if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, product.id, input.bultimeUrl);
+        if (input.linkelUrl !== undefined) await saveLinkelLink(client, ctx.organizationId, product.id, input.linkelUrl);
         await client.query(
           `UPDATE products SET created_by_user_id = $3
            WHERE organization_id = $1 AND id = $2`,
@@ -914,6 +931,7 @@ export class StaffCatalogController {
         const after = await repository.patchProduct(ctx, productId, input);
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, productId, input.supplierUrl);
         if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, productId, input.bultimeUrl);
+        if (input.linkelUrl !== undefined) await saveLinkelLink(client, ctx.organizationId, productId, input.linkelUrl);
         await client.query(
           `UPDATE products
            SET quality_review_status = 'pending', quality_review_note = NULL,
@@ -2135,12 +2153,17 @@ export class StaffCatalogController {
               CASE WHEN provider.paused_until > now() OR supplier.last_error IS NOT NULL THEN 'deferred'
                    WHEN supplier.missing_count > 0 AND supplier.check_status <> 'missing' THEN 'checking'
                    ELSE supplier.check_status END AS "supplierStatus",
-              supplier.last_checked_at AS "supplierLastCheckedAt", supplier.missing_count AS "supplierMissingCount",
-              bultime.url AS "bultimeUrl", bultime.stock_status AS "bultimeStockStatus",
+              supplier.last_checked_at AS "supplierLastCheckedAt", supplier.missing_count AS "supplierMissingCount", supplier.price_amount AS "supplierPriceAmount", supplier.price_currency AS "supplierPriceCurrency",
+              bultime.url AS "bultimeUrl", bultime.stock_status AS "bultimeStockStatus", bultime.price_amount AS "bultimePriceAmount", bultime.price_currency AS "bultimePriceCurrency",
               CASE WHEN bultime_provider.paused_until > now() OR bultime.last_error IS NOT NULL THEN 'deferred'
                    WHEN bultime.missing_count > 0 AND bultime.check_status <> 'missing' THEN 'checking'
                    ELSE bultime.check_status END AS "bultimeStatus",
               bultime.last_checked_at AS "bultimeLastCheckedAt", bultime.missing_count AS "bultimeMissingCount",
+              linkel.url AS "linkelUrl", linkel.stock_status AS "linkelStockStatus", linkel.price_amount AS "linkelPriceAmount", linkel.price_currency AS "linkelPriceCurrency",
+              CASE WHEN linkel_provider.paused_until > now() OR linkel.last_error IS NOT NULL THEN 'deferred'
+                   WHEN linkel.missing_count > 0 AND linkel.check_status <> 'missing' THEN 'checking'
+                   ELSE linkel.check_status END AS "linkelStatus",
+              linkel.last_checked_at AS "linkelLastCheckedAt", linkel.missing_count AS "linkelMissingCount",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
@@ -2155,6 +2178,8 @@ export class StaffCatalogController {
        LEFT JOIN supplier_provider_checks provider ON provider.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
        LEFT JOIN supplier_provider_checks bultime_provider ON bultime_provider.provider_code = 'bultime'
+       LEFT JOIN supplier_product_links linkel ON linkel.organization_id = p.organization_id AND linkel.product_id = p.id AND linkel.provider_code = 'linkel'
+       LEFT JOIN supplier_provider_checks linkel_provider ON linkel_provider.provider_code = 'linkel'
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
