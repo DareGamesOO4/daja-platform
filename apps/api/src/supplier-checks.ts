@@ -89,7 +89,14 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
     }
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
-    if (!/<body\b[^>]*\bid=["']product["']/i.test(body) || !/<link\s+rel=["']canonical["'][^>]*>/i.test(body)) return { status: 'error' };
+    // Linkel's canonical tag is not stable across templates (its attributes
+    // can be reordered), while the product body marker and numeric URL ID are
+    // stable. Use those markers so a valid product is not rejected merely
+    // because the canonical tag formatting changed.
+    const productId = url.pathname.split('/').find((part) => /^\d+$/.test(part));
+    const hasProductBody = /<body\b[^>]*\bid=["']product["']/i.test(body);
+    const hasMatchingProductId = !productId || new RegExp(`product-id-${productId}(?:\\D|$)`, 'i').test(body);
+    if (!hasProductBody || !hasMatchingProductId) return { status: 'error' };
     const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
     const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
     const visible = body.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
