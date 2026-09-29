@@ -11,7 +11,7 @@ import { requirePermission, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
-import { saveEkkaLink } from './supplier-links.js';
+import { saveBultimeLink, saveEkkaLink } from './supplier-links.js';
 
 type ItemCommand = {
   kind: 'item.create' | 'item.update' | 'item.archive' | 'item.delete';
@@ -2412,6 +2412,9 @@ export class OperationalSyncProjector {
       if (input.supplierUrl !== undefined) {
         await saveEkkaLink(this.client, ctx.organizationId, resolvedProductId, nullableText(input, 'supplierUrl') ?? null);
       }
+      if (input.bultimeUrl !== undefined) {
+        await saveBultimeLink(this.client, ctx.organizationId, resolvedProductId, nullableText(input, 'bultimeUrl') ?? null);
+      }
       await this.client.query(
         `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
          VALUES ($1, $2, $3, $4, 'sell', $5)`,
@@ -2563,6 +2566,9 @@ export class OperationalSyncProjector {
     );
     if (input.supplierUrl !== undefined) {
       await saveEkkaLink(this.client, ctx.organizationId, row.product_id, nullableText(input, 'supplierUrl') ?? null);
+    }
+    if (input.bultimeUrl !== undefined) {
+      await saveBultimeLink(this.client, ctx.organizationId, row.product_id, nullableText(input, 'bultimeUrl') ?? null);
     }
     await this.client.query(
       `UPDATE variant_prices SET valid_until = now() WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sell' AND valid_until IS NULL`,
@@ -2947,6 +2953,7 @@ export class OperationalSyncProjector {
     const result = await this.client.query(
       `SELECT p.id AS "productId", p.external_id AS "externalId", p.name AS "productName", p.slug, p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
               supplier.url AS "supplierUrl", supplier.check_status AS "supplierStatus", supplier.last_checked_at AS "supplierLastCheckedAt",
+              bultime.url AS "bultimeUrl", bultime.check_status AS "bultimeStatus", bultime.stock_status AS "bultimeStockStatus", bultime.last_checked_at AS "bultimeLastCheckedAt",
               p.created_at AS "productCreatedAt", p.updated_at AS "productUpdatedAt",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
@@ -2964,6 +2971,7 @@ export class OperationalSyncProjector {
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
+       LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL

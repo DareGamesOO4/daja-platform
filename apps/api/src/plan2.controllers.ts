@@ -57,10 +57,11 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
 import { ProductAlertService } from './product-alert.service.js';
-import { saveEkkaLink } from './supplier-links.js';
+import { saveBultimeLink, saveEkkaLink } from './supplier-links.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
+  bultimeUrl: z.string().trim().max(2048).url().nullable().optional(),
   supplierUrl: z.string().trim().max(2048).url().refine((value) => {
     try {
       const url = new URL(value);
@@ -531,6 +532,7 @@ export class StaffCatalogController {
       async (client) => {
         const product = await new CatalogRepository(client).createProduct(ctx, input);
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, product.id, input.supplierUrl);
+        if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, product.id, input.bultimeUrl);
         await client.query(
           `UPDATE products SET created_by_user_id = $3
            WHERE organization_id = $1 AND id = $2`,
@@ -911,6 +913,7 @@ export class StaffCatalogController {
         const before = await repository.getProduct(ctx, productId);
         const after = await repository.patchProduct(ctx, productId, input);
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, productId, input.supplierUrl);
+        if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, productId, input.bultimeUrl);
         await client.query(
           `UPDATE products
            SET quality_review_status = 'pending', quality_review_note = NULL,
@@ -2133,6 +2136,11 @@ export class StaffCatalogController {
                    WHEN supplier.missing_count > 0 AND supplier.check_status <> 'missing' THEN 'checking'
                    ELSE supplier.check_status END AS "supplierStatus",
               supplier.last_checked_at AS "supplierLastCheckedAt", supplier.missing_count AS "supplierMissingCount",
+              bultime.url AS "bultimeUrl", bultime.stock_status AS "bultimeStockStatus",
+              CASE WHEN bultime_provider.paused_until > now() OR bultime.last_error IS NOT NULL THEN 'deferred'
+                   WHEN bultime.missing_count > 0 AND bultime.check_status <> 'missing' THEN 'checking'
+                   ELSE bultime.check_status END AS "bultimeStatus",
+              bultime.last_checked_at AS "bultimeLastCheckedAt", bultime.missing_count AS "bultimeMissingCount",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
@@ -2145,6 +2153,8 @@ export class StaffCatalogController {
        FROM products p
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_provider_checks provider ON provider.provider_code = 'ekka'
+       LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
+       LEFT JOIN supplier_provider_checks bultime_provider ON bultime_provider.provider_code = 'bultime'
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
