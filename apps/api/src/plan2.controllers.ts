@@ -60,6 +60,7 @@ import { ProductAlertService } from './product-alert.service.js';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink } from './supplier-links.js';
 import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl } from './supplier-links.js';
 import { previewSupplierLink } from './supplier-checks.js';
+import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
@@ -467,6 +468,13 @@ export class StaffCatalogController {
     if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
     const result = await previewSupplierLink(input.provider, url);
     return { ...result, url };
+  }
+
+  @Get('supplier-links/exchange-rate')
+  async supplierExchangeRate(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return { base: 'EUR', quote: 'RSD', middleRate: await currentEurRsdMiddleRate(), source: 'NBS' };
   }
 
   private publishCatalogTaxonomy(
