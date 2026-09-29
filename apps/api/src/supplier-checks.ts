@@ -60,7 +60,9 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
     }
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
-    if (!body.includes('route-product-product') || !body.includes(`product_id=${productId}`) || !/<h1\b[^>]*>[^<]+<\/h1>/i.test(body) || !body.includes('product-model')) return { status: 'error' };
+    if (!body.includes('route-product-product') || !body.includes(`product_id=${productId}`) ||
+        !/<h1\b[^>]*>\s*(?:<span[^>]*>)?[^<]+(?:<\/span>)?\s*<\/h1>/i.test(body) ||
+        !body.includes('product-model')) return { status: 'error' };
     const stock = body.match(/<li\b[^>]*class=["'][^"']*\bproduct-stock\b[^"']*["'][^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1]?.trim();
     return { status: 'available', stockStatus: stock === 'В наличност' ? 'in_stock' : stock === 'Няма наличност' ? 'out_of_stock' : null };
   }
@@ -132,8 +134,8 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
         if (saved.rowCount) await publishStatus(database, link, count >= 3 ? 'missing' : 'checking');
       } else {
         await database.pool.query(
-          `UPDATE supplier_product_links SET last_error = 'Ekka provera nije uspela', next_check_at = now() + interval '24 hours', updated_at = now()
-           WHERE id = $1 AND url = $2`, [link.id, link.url]
+          `UPDATE supplier_product_links SET last_error = $3, next_check_at = now() + interval '24 hours', updated_at = now()
+           WHERE id = $1 AND url = $2`, [link.id, link.url, `${link.provider_code === 'ekka' ? 'Ekka' : 'Bultime'} provera nije uspela`]
         );
         const failures = await database.pool.query<{ consecutive_errors: number }>(
           `UPDATE supplier_provider_checks SET consecutive_errors = consecutive_errors + 1 WHERE provider_code = $1 RETURNING consecutive_errors`,
