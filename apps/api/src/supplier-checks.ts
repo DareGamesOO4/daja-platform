@@ -89,14 +89,11 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
     }
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
-    // Linkel's canonical tag is not stable across templates (its attributes
-    // can be reordered), while the product body marker and numeric URL ID are
-    // stable. Use those markers so a valid product is not rejected merely
-    // because the canonical tag formatting changed.
-    const productId = url.pathname.split('/').find((part) => /^\d+$/.test(part));
+    // Linkel's canonical tag and product-id class are not stable across
+    // templates. The product body marker is stable, so do not reject a valid
+    // product merely because those optional HTML details changed.
     const hasProductBody = /<body\b[^>]*\bid=["']product["']/i.test(body);
-    const hasMatchingProductId = !productId || new RegExp(`product-id-${productId}(?:\\D|$)`, 'i').test(body);
-    if (!hasProductBody || !hasMatchingProductId) return { status: 'error' };
+    if (!hasProductBody) return { status: 'error' };
     const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
     const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
     const visible = body.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
