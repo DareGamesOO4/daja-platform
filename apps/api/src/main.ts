@@ -3,7 +3,10 @@ import 'reflect-metadata';
 import { fileURLToPath } from 'node:url';
 import { NestFactory } from '@nestjs/core';
 import { loadConfig } from '@daja/config';
+import { type Database } from '@daja/database';
 import { createLogger } from '@daja/observability';
+import { DATABASE } from './tokens.js';
+import { startSupplierChecks } from './supplier-checks.js';
 
 loadEnvironment({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
@@ -26,4 +29,5 @@ const app = await NestFactory.create(AppModule, { bufferLogs: true });
 configureApiApp(app, config, logger);
 
 await app.listen(config.PORT);
+startSupplierChecks(app.get<Database>(DATABASE), logger);
 logger.info({ port: config.PORT }, 'DAJA API listening');

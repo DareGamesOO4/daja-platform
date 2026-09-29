@@ -14,7 +14,6 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { startSupplierChecks } from './supplier-checks.js';
 
 export const FOUNDATION_QUEUE_NAME = 'daja-foundation';
 export const POLICY_NOTIFICATION_QUEUE_NAME = 'privacy-policy-notifications';
@@ -95,7 +94,6 @@ export function createPlatformWorkers(
   config: AppConfig,
   logger: Logger
 ): WorkerRuntime {
-  const stopSupplierChecks = startSupplierChecks(database, logger);
   const foundation = createFoundationWorker(redis, logger);
   const mediaConnection = redis.duplicate();
   const mediaEventsConnection = redis.duplicate();
@@ -133,7 +131,6 @@ export function createPlatformWorkers(
     workers: [foundation.worker, mediaWorker, privacyWorker],
     queueEvents: [foundation.queueEvents, mediaEvents, privacyEvents],
     close: async () => {
-      stopSupplierChecks();
       await privacyWorker.close();
       await privacyEvents.close();
       await privacyConnection.quit();
