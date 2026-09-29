@@ -113,7 +113,12 @@ export async function saveLinkelLink(
        SET url = EXCLUDED.url, check_status = 'unverified', stock_status = NULL, price_amount = NULL,
            price_currency = NULL, missing_count = 0, external_reference = NULL,
            last_checked_at = NULL, last_seen_at = NULL, next_check_at = now(), last_error = NULL, updated_at = now()
-     WHERE supplier_product_links.url IS DISTINCT FROM EXCLUDED.url`,
+     `,
     [organizationId, productId, url]
+  );
+  await client.query(
+    `UPDATE supplier_provider_checks
+     SET paused_until = NULL, consecutive_errors = 0, next_request_at = now(), updated_at = now()
+     WHERE provider_code = 'linkel'`,
   );
 }
