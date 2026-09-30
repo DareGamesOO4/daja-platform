@@ -4,7 +4,9 @@ import type { Database } from '@daja/database';
 import { TransactionManager } from '@daja/database';
 import { ValidationFailedError, requirePermission } from '@daja/security';
 import { z } from 'zod';
-import { DATABASE, LOGGER } from './tokens.js';
+import type { AppConfig } from '@daja/config';
+import { canManageSupplierChecks } from './supplier-access.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import type { Logger } from '@daja/observability';
 import { resolveRequestContext } from './runtime/request-context.js';
 
@@ -34,6 +36,7 @@ const createUserSchema = z.object({
 @Controller('admin/access')
 export class AccessControlController {
   constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
@@ -49,6 +52,7 @@ export class AccessControlController {
       roles: ctx.roles,
       permissions: ctx.permissions,
       isOwner: Boolean(ctx.isOwner),
+      canManageSupplierChecks: await canManageSupplierChecks(this.database, ctx, this.config.STOREFRONT_ADMIN_EMAILS),
     };
   }
 

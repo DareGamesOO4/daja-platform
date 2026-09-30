@@ -63,6 +63,7 @@ import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl, normalizeAdd
 import { previewSupplierLink } from './supplier-checks.js';
 import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
 import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
+import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
@@ -493,28 +494,28 @@ export class StaffCatalogController {
     return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit,input.includeLegacy==='true');
   }
 
-  private supplierOwner(request: Request) {
+  private async supplierManager(request: Request) {
     const ctx=resolveRequestContext(request);
-    if(!ctx.isOwner) throw new ForbiddenException('Samo vlasnik može da upravlja proverama dobavljača');
+    if(!await canManageSupplierChecks(this.database, ctx, this.config.STOREFRONT_ADMIN_EMAILS)) throw new ForbiddenException('Nemate dozvolu za upravljanje proverama dobavljača');
     return ctx;
   }
 
   @Post('supplier-links/:id/reactivate')
   async supplierReactivate(@Req() request: Request, @Param('id') id: string) {
-    const ctx=this.supplierOwner(request);
+    const ctx=await this.supplierManager(request);
     return supplierLinkActions(this.database.pool,ctx.organizationId,{action:'reactivate',ids:[z.string().uuid().parse(id)]});
   }
 
   @Post('supplier-links/providers/:code/probe')
   async supplierProbe(@Req() request: Request, @Param('code') code: string) {
-    this.supplierOwner(request);
+    await this.supplierManager(request);
     await requestSupplierProbe(this.database.pool,code);
     return {accepted:true};
   }
 
   @Post('supplier-links/providers/pause')
   async supplierPause(@Req() request: Request,@Body() body:unknown) {
-    const ctx=this.supplierOwner(request);
+    const ctx=await this.supplierManager(request);
     const input=z.object({providers:z.array(z.enum(ALL_PROVIDERS)).min(1).max(6),mode:z.enum(['all','schedule']),until:z.string().datetime({offset:true}).nullable(),reason:z.string().trim().max(500).optional()}).parse(body);
     await pauseSuppliers(this.database.pool,input,ctx.userId);
     return {accepted:true};
@@ -522,7 +523,7 @@ export class StaffCatalogController {
 
   @Post('supplier-links/providers/resume')
   async supplierResume(@Req() request:Request,@Body() body:unknown) {
-    this.supplierOwner(request);
+    await this.supplierManager(request);
     const input=z.object({providers:z.array(z.enum(ALL_PROVIDERS)).min(1).max(6)}).parse(body);
     await resumeSuppliers(this.database.pool,input.providers);
     return {accepted:true};
@@ -530,7 +531,7 @@ export class StaffCatalogController {
 
   @Post('supplier-links/actions')
   async supplierActions(@Req() request:Request,@Body() body:unknown) {
-    const ctx=this.supplierOwner(request);
+    const ctx=await this.supplierManager(request);
     const input=z.object({ids:z.array(z.string().uuid()).min(1).max(50),action:z.enum(['check','disable','reactivate']),reason:z.string().trim().max(500).optional()}).parse(body);
     return supplierLinkActions(this.database.pool,ctx.organizationId,input);
   }
