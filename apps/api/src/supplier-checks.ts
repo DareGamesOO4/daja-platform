@@ -7,7 +7,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 type Provider = 'ekka' | 'bultime' | 'linkel';
 type Link = { id: string; url: string; provider_code: Provider; organization_id: string; product_id: string; missing_count: number };
-type Outcome = { status: 'available'; stockStatus: 'in_stock' | 'out_of_stock' | null; priceAmount?: number | null; priceCurrency?: string | null } | { status: 'missing' | 'error' };
+type Outcome = { status: 'available'; stockStatus: 'in_stock' | 'out_of_stock' | null; priceAmount?: number | null; priceCurrency?: string | null } | { status: 'missing' | 'error'; message?: string };
 
 async function ekkaPage(urlValue: string): Promise<Outcome> {
   let url = new URL(urlValue);
@@ -75,32 +75,33 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
 async function linkelPage(urlValue: string): Promise<Outcome> {
   let url = new URL(urlValue);
   for (let redirects = 0; redirects < 4; redirects += 1) {
-    if (url.protocol !== 'https:' || !['linkel.rs', 'www.linkel.rs'].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error' };
+    if (url.protocol !== 'https:' || !['linkel.rs', 'www.linkel.rs'].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error', message: 'Linkel je preusmerio na drugu adresu.' };
     let response: Response;
     try { response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } }); }
-    catch { return { status: 'error' }; }
+    catch { return { status: 'error', message: 'Server trenutno ne može da pristupi Linkel sajtu.' }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
-      if (!location) return { status: 'error' };
+      if (!location) return { status: 'error', message: 'Linkel je vratio preusmerenje bez adrese.' };
       url = new URL(location, url);
       if (url.pathname === '/' || url.pathname === '/sr/' || url.pathname.includes('controller=404')) return { status: 'missing' };
       continue;
     }
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
+    if (!response.ok) return { status: 'error', message: `Linkel je serveru vratio HTTP ${response.status}.` };
+    if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error', message: 'Linkel nije vratio HTML stranicu.' };
     const body = (await response.text()).slice(0, 1_000_000);
     // Linkel's canonical tag and product-id class are not stable across
     // templates. The product body marker is stable, so do not reject a valid
     // product merely because those optional HTML details changed.
     const hasProductBody = /<body\b[^>]*\bid=["']product["']/i.test(body);
-    if (!hasProductBody) return { status: 'error' };
+    if (!hasProductBody) return { status: 'error', message: 'Linkel stranica nema očekivanu oznaku proizvoda.' };
     const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
     const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
     const visible = body.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
     const stockStatus = /Nije na stanju/i.test(visible) ? 'out_of_stock' : /Na stanju/i.test(visible) ? 'in_stock' : null;
     return { status: 'available', stockStatus, priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
   }
-  return { status: 'error' };
+  return { status: 'error', message: 'Linkel je vratio previše preusmerenja.' };
 }
 
 async function homeHealthy(provider: Provider): Promise<boolean> {
@@ -117,13 +118,13 @@ async function homeHealthy(provider: Provider): Promise<boolean> {
   } catch { return false; }
 }
 
-export async function previewSupplierLink(provider: Provider, url: string): Promise<Outcome | { status: 'unverified' }> {
+export async function previewSupplierLink(provider: Provider, url: string): Promise<Outcome | { status: 'unverified'; message?: string }> {
   if (provider === 'ekka') return ekkaPage(url);
   if (provider === 'bultime') return bultimePage(url);
   const result = await linkelPage(url);
   // A failed fetch or an unfamiliar supplier response cannot establish that
   // the product URL is invalid. Keep the saved link eligible for later checks.
-  return result.status === 'error' ? { status: 'unverified' } : result;
+  return result.status === 'error' ? { status: 'unverified', message: result.message } : result;
 }
 
 export function startSupplierChecks(database: Database, logger: Logger): () => void {
