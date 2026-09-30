@@ -6,6 +6,7 @@ import {
   Get,
   Inject,
   NotFoundException,
+  ForbiddenException,
   Param,
   Patch,
   Post,
@@ -60,7 +61,8 @@ import { ProductAlertService } from './product-alert.service.js';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl, normalizeAdditionalUrl } from './supplier-links.js';
 import { previewSupplierLink } from './supplier-checks.js';
-import { acquireSupplierLease, reactivateSupplierLink, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
+import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
+import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
@@ -471,7 +473,7 @@ export class StaffCatalogController {
       : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : input.provider === 'linkel' ? normalizeLinkelUrl(input.url) : normalizeAdditionalUrl(input.provider, input.url);
     if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
     const lease=await acquireSupplierLease(this.database.pool,input.provider,'preview');
-    if (!lease) return {status:'unverified',url,message:'Provera je odložena; trenutno je aktivno 20 provera.'};
+    if (!lease) return {status:'unverified',url,message:'Provera je odložena zbog ručne pauze ili zauzetosti sistema.'};
     try {
       const result = await previewSupplierLink(input.provider, url);
       return { ...result, url };
@@ -487,22 +489,84 @@ export class StaffCatalogController {
   @Get('supplier-links/states')
   async supplierCurrentStates(@Req() request: Request, @Query() query: Record<string,string>) {
     const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
-    const input=z.object({afterRevision:z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),limit:z.coerce.number().int().min(1).max(500).default(100)}).parse(query);
-    return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit);
+    const input=z.object({afterRevision:z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),limit:z.coerce.number().int().min(1).max(500).default(100),includeLegacy:z.enum(['true','false']).default('false')}).parse(query);
+    return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit,input.includeLegacy==='true');
+  }
+
+  private supplierOwner(request: Request) {
+    const ctx=resolveRequestContext(request);
+    if(!ctx.isOwner) throw new ForbiddenException('Samo vlasnik može da upravlja proverama dobavljača');
+    return ctx;
   }
 
   @Post('supplier-links/:id/reactivate')
   async supplierReactivate(@Req() request: Request, @Param('id') id: string) {
-    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write');
-    await reactivateSupplierLink(this.database.pool,ctx.organizationId,z.string().uuid().parse(id));
-    return {accepted:true};
+    const ctx=this.supplierOwner(request);
+    return supplierLinkActions(this.database.pool,ctx.organizationId,{action:'reactivate',ids:[z.string().uuid().parse(id)]});
   }
 
   @Post('supplier-links/providers/:code/probe')
   async supplierProbe(@Req() request: Request, @Param('code') code: string) {
-    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write');
+    this.supplierOwner(request);
     await requestSupplierProbe(this.database.pool,code);
     return {accepted:true};
+  }
+
+  @Post('supplier-links/providers/pause')
+  async supplierPause(@Req() request: Request,@Body() body:unknown) {
+    const ctx=this.supplierOwner(request);
+    const input=z.object({providers:z.array(z.enum(ALL_PROVIDERS)).min(1).max(6),mode:z.enum(['all','schedule']),until:z.string().datetime({offset:true}).nullable(),reason:z.string().trim().max(500).optional()}).parse(body);
+    await pauseSuppliers(this.database.pool,input,ctx.userId);
+    return {accepted:true};
+  }
+
+  @Post('supplier-links/providers/resume')
+  async supplierResume(@Req() request:Request,@Body() body:unknown) {
+    this.supplierOwner(request);
+    const input=z.object({providers:z.array(z.enum(ALL_PROVIDERS)).min(1).max(6)}).parse(body);
+    await resumeSuppliers(this.database.pool,input.providers);
+    return {accepted:true};
+  }
+
+  @Post('supplier-links/actions')
+  async supplierActions(@Req() request:Request,@Body() body:unknown) {
+    const ctx=this.supplierOwner(request);
+    const input=z.object({ids:z.array(z.string().uuid()).min(1).max(50),action:z.enum(['check','disable','reactivate']),reason:z.string().trim().max(500).optional()}).parse(body);
+    return supplierLinkActions(this.database.pool,ctx.organizationId,input);
+  }
+
+  private supplierFilters(query:Record<string,string>) {
+    return z.object({provider:z.enum(ALL_PROVIDERS).optional(),status:z.enum(['available','missing','unverified','disabled','checking','paused','waiting_confirmation']).optional(),search:z.string().max(240).optional(),
+      attention:z.enum(['true','false']).optional().transform(value=>value==='true'),sort:z.enum(['name','number','last','next']).default('next'),direction:z.enum(['asc','desc']).default('asc'),page:z.coerce.number().int().min(1).max(100000).default(1)}).parse(query);
+  }
+
+  @Get('supplier-links/links')
+  async supplierLinks(@Req() request:Request,@Query() query:Record<string,string>) {
+    const ctx=resolveRequestContext(request);requirePermission(ctx,'catalog.read');
+    return supplierLinksList(this.database.pool,ctx.organizationId,this.supplierFilters(query));
+  }
+
+  @Get('supplier-links/links/export')
+  async supplierLinksExport(@Req() request:Request,@Query() query:Record<string,string>,@Res() response:Response) {
+    const ctx=resolveRequestContext(request);requirePermission(ctx,'catalog.read');
+    const result=await supplierLinksList(this.database.pool,ctx.organizationId,this.supplierFilters(query),true);
+    response.setHeader('Content-Type','text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition','attachment; filename="dobavljaci.csv"');
+    response.send(supplierCsv(result.items));
+  }
+
+  @Get('supplier-links/providers/:code/statistics')
+  async supplierStatistics(@Req() request:Request,@Param('code') code:string,@Query() query:Record<string,string>) {
+    const ctx=resolveRequestContext(request);requirePermission(ctx,'catalog.read');
+    const provider=z.enum(['all',...ALL_PROVIDERS]).parse(code);
+    const period=z.enum(['24h','7d','30d']).default('24h').parse(query.period);
+    return supplierStatistics(this.database.pool,ctx.organizationId,provider,period);
+  }
+
+  @Get('supplier-links/timeline')
+  async supplierTimeline(@Req() request:Request,@Query() query:Record<string,string>) {
+    const ctx=resolveRequestContext(request);requirePermission(ctx,'catalog.read');
+    return supplierTimeline(this.database.pool,ctx.organizationId,z.coerce.number().int().min(1).max(60).default(60).parse(query.minutes));
   }
 
   @Get('supplier-links/exchange-rate')

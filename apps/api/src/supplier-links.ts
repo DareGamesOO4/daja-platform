@@ -75,7 +75,7 @@ export async function saveAdditionalLink(
   const url = normalizeAdditionalUrl(provider, value);
   if (provider === 'timezone' || provider === 'qandq') return saveNumberedLink(client, organizationId, productId, provider, url);
   if (!url) {
-    await client.query(`DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = $3`, [organizationId, productId, provider]);
+    await client.query(`UPDATE supplier_product_links SET url=NULL,removed=true,checks_enabled=false WHERE organization_id = $1 AND product_id = $2 AND provider_code = $3 AND NOT removed`, [organizationId, productId, provider]);
     return;
   }
   await client.query(
@@ -118,7 +118,7 @@ export async function saveLinkelLink(
   const url = normalizeLinkelUrl(supplierUrl);
   if (!url) {
     await client.query(
-      `DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = 'linkel'`,
+      `UPDATE supplier_product_links SET url=NULL,removed=true,checks_enabled=false WHERE organization_id = $1 AND product_id = $2 AND provider_code = 'linkel' AND NOT removed`,
       [organizationId, productId]
     );
     return;
@@ -137,7 +137,7 @@ export async function saveLinkelLink(
   if (saved.rowCount) {
     await client.query(
       `UPDATE supplier_provider_checks
-       SET paused_until = NULL, consecutive_errors = 0, next_request_at = now(), updated_at = now()
+       SET next_request_at = now(), updated_at = now()
        WHERE provider_code = 'linkel'`,
     );
   }
