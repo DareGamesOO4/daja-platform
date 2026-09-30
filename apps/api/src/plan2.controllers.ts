@@ -57,14 +57,17 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
 import { ProductAlertService } from './product-alert.service.js';
-import { saveBultimeLink, saveEkkaLink, saveLinkelLink } from './supplier-links.js';
-import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl } from './supplier-links.js';
+import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
+import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl, normalizeAdditionalUrl } from './supplier-links.js';
 import { previewSupplierLink } from './supplier-checks.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
   linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
+  milanoUrl: z.string().trim().max(2048).url().nullable().optional(),
+  timezoneUrl: z.string().trim().max(2048).url().nullable().optional(),
+  qandqUrl: z.string().trim().max(2048).url().nullable().optional(),
   bultimeUrl: z.string().trim().max(2048).url().nullable().optional(),
   supplierUrl: z.string().trim().max(2048).url().refine((value) => {
     try {
@@ -461,10 +464,10 @@ export class StaffCatalogController {
   async previewSupplier(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
-    const input = z.object({ provider: z.enum(['ekka', 'bultime', 'linkel']), url: z.string().trim().url() }).parse(body);
+    const input = z.object({ provider: z.enum(['ekka', 'bultime', 'linkel', 'milano', 'timezone', 'qandq']), url: z.string().trim().url() }).parse(body);
     const url = input.provider === 'ekka'
       ? normalizeEkkaUrl(input.url)
-      : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : normalizeLinkelUrl(input.url);
+      : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : input.provider === 'linkel' ? normalizeLinkelUrl(input.url) : normalizeAdditionalUrl(input.provider, input.url);
     if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
     const result = await previewSupplierLink(input.provider, url);
     return { ...result, url };
@@ -558,6 +561,9 @@ export class StaffCatalogController {
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, product.id, input.supplierUrl);
         if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, product.id, input.bultimeUrl);
         if (input.linkelUrl !== undefined) await saveLinkelLink(client, ctx.organizationId, product.id, input.linkelUrl);
+        if (input.milanoUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, product.id, 'milano', input.milanoUrl);
+        if (input.timezoneUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, product.id, 'timezone', input.timezoneUrl);
+        if (input.qandqUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, product.id, 'qandq', input.qandqUrl);
         await client.query(
           `UPDATE products SET created_by_user_id = $3
            WHERE organization_id = $1 AND id = $2`,
@@ -940,6 +946,9 @@ export class StaffCatalogController {
         if (input.supplierUrl !== undefined) await saveEkkaLink(client, ctx.organizationId, productId, input.supplierUrl);
         if (input.bultimeUrl !== undefined) await saveBultimeLink(client, ctx.organizationId, productId, input.bultimeUrl);
         if (input.linkelUrl !== undefined) await saveLinkelLink(client, ctx.organizationId, productId, input.linkelUrl);
+        if (input.milanoUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, productId, 'milano', input.milanoUrl);
+        if (input.timezoneUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, productId, 'timezone', input.timezoneUrl);
+        if (input.qandqUrl !== undefined) await saveAdditionalLink(client, ctx.organizationId, productId, 'qandq', input.qandqUrl);
         await client.query(
           `UPDATE products
            SET quality_review_status = 'pending', quality_review_note = NULL,
@@ -2172,6 +2181,12 @@ export class StaffCatalogController {
                    WHEN linkel.missing_count > 0 AND linkel.check_status <> 'missing' THEN 'checking'
                    ELSE linkel.check_status END AS "linkelStatus",
               linkel.last_checked_at AS "linkelLastCheckedAt", linkel.missing_count AS "linkelMissingCount",
+              milano.url AS "milanoUrl", milano.stock_status AS "milanoStockStatus", milano.price_amount AS "milanoPriceAmount", milano.price_currency AS "milanoPriceCurrency",
+              CASE WHEN milano_provider.paused_until > now() OR milano.last_error IS NOT NULL THEN 'deferred' WHEN milano.missing_count > 0 AND milano.check_status <> 'missing' THEN 'checking' ELSE milano.check_status END AS "milanoStatus", milano.last_checked_at AS "milanoLastCheckedAt",
+              timezone.url AS "timezoneUrl", timezone.stock_status AS "timezoneStockStatus", timezone.price_amount AS "timezonePriceAmount", timezone.price_currency AS "timezonePriceCurrency",
+              CASE WHEN timezone_provider.paused_until > now() OR timezone.last_error IS NOT NULL THEN 'deferred' WHEN timezone.missing_count > 0 AND timezone.check_status <> 'missing' THEN 'checking' ELSE timezone.check_status END AS "timezoneStatus", timezone.last_checked_at AS "timezoneLastCheckedAt",
+              qandq.url AS "qandqUrl", qandq.stock_status AS "qandqStockStatus", qandq.price_amount AS "qandqPriceAmount", qandq.price_currency AS "qandqPriceCurrency",
+              CASE WHEN qandq_provider.paused_until > now() OR qandq.last_error IS NOT NULL THEN 'deferred' WHEN qandq.missing_count > 0 AND qandq.check_status <> 'missing' THEN 'checking' ELSE qandq.check_status END AS "qandqStatus", qandq.last_checked_at AS "qandqLastCheckedAt",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
@@ -2188,6 +2203,12 @@ export class StaffCatalogController {
        LEFT JOIN supplier_provider_checks bultime_provider ON bultime_provider.provider_code = 'bultime'
        LEFT JOIN supplier_product_links linkel ON linkel.organization_id = p.organization_id AND linkel.product_id = p.id AND linkel.provider_code = 'linkel'
        LEFT JOIN supplier_provider_checks linkel_provider ON linkel_provider.provider_code = 'linkel'
+       LEFT JOIN supplier_product_links milano ON milano.organization_id = p.organization_id AND milano.product_id = p.id AND milano.provider_code = 'milano'
+       LEFT JOIN supplier_provider_checks milano_provider ON milano_provider.provider_code = 'milano'
+       LEFT JOIN supplier_product_links timezone ON timezone.organization_id = p.organization_id AND timezone.product_id = p.id AND timezone.provider_code = 'timezone'
+       LEFT JOIN supplier_provider_checks timezone_provider ON timezone_provider.provider_code = 'timezone'
+       LEFT JOIN supplier_product_links qandq ON qandq.organization_id = p.organization_id AND qandq.product_id = p.id AND qandq.provider_code = 'qandq'
+       LEFT JOIN supplier_provider_checks qandq_provider ON qandq_provider.provider_code = 'qandq'
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id

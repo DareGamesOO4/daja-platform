@@ -40,6 +40,53 @@ export function normalizeLinkelUrl(value: string | null): string | null {
   return url.toString();
 }
 
+export type AdditionalProvider = 'milano' | 'timezone' | 'qandq';
+
+export function normalizeAdditionalUrl(provider: AdditionalProvider, value: string | null): string | null {
+  if (value === null || value.trim() === '') return null;
+  let url: URL;
+  try { url = new URL(value.trim()); }
+  catch { throw new ValidationFailedError('Link dobavljača nije ispravna URL adresa'); }
+  const hosts: Record<AdditionalProvider, string[]> = {
+    milano: ['milanogroup.eu', 'www.milanogroup.eu'],
+    timezone: ['timezone-bg.com', 'www.timezone-bg.com'],
+    qandq: ['qandq-casio.com', 'www.qandq-casio.com'],
+  };
+  const validPath = provider === 'qandq'
+    ? url.pathname === '/product.php' && /^[1-9]\d*$/.test(url.searchParams.get('id') ?? '')
+    : provider === 'milano' ? /^\/shop\/.+\/.+/.test(url.pathname) : /^\/product\/.+/.test(url.pathname);
+  if (url.protocol !== 'https:' || !hosts[provider].includes(url.hostname.toLowerCase()) ||
+      url.username || url.password || url.port || !validPath) {
+    throw new ValidationFailedError('Link mora biti direktna HTTPS adresa artikla kod izabranog dobavljača');
+  }
+  if (provider === 'qandq') return `https://www.qandq-casio.com/product.php?id=${url.searchParams.get('id')}`;
+  url.hash = '';
+  return url.toString();
+}
+
+export async function saveAdditionalLink(
+  client: Pick<pg.Pool | pg.PoolClient, 'query'>,
+  organizationId: string,
+  productId: string,
+  provider: AdditionalProvider,
+  value: string | null
+): Promise<void> {
+  const url = normalizeAdditionalUrl(provider, value);
+  if (!url) {
+    await client.query(`DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = $3`, [organizationId, productId, provider]);
+    return;
+  }
+  await client.query(
+    `INSERT INTO supplier_product_links (organization_id, product_id, provider_code, url) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (organization_id, product_id, provider_code) DO UPDATE
+       SET url = EXCLUDED.url, check_status = 'unverified', stock_status = NULL, price_amount = NULL,
+           price_currency = NULL, missing_count = 0, last_checked_at = NULL, last_seen_at = NULL,
+           next_check_at = now(), last_error = NULL, updated_at = now()
+     WHERE supplier_product_links.url IS DISTINCT FROM EXCLUDED.url`,
+    [organizationId, productId, provider, url]
+  );
+}
+
 export async function saveEkkaLink(
   client: Pick<pg.Pool | pg.PoolClient, 'query'>,
   organizationId: string,

@@ -11,7 +11,7 @@ import { requirePermission, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
-import { saveBultimeLink, saveEkkaLink, saveLinkelLink } from './supplier-links.js';
+import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 
 type ItemCommand = {
   kind: 'item.create' | 'item.update' | 'item.archive' | 'item.delete';
@@ -2418,6 +2418,10 @@ export class OperationalSyncProjector {
       if (input.linkelUrl !== undefined) {
         await saveLinkelLink(this.client, ctx.organizationId, resolvedProductId, nullableText(input, 'linkelUrl') ?? null);
       }
+      for (const provider of ['milano', 'timezone', 'qandq'] as const) {
+        const key = `${provider}Url`;
+        if (input[key] !== undefined) await saveAdditionalLink(this.client, ctx.organizationId, resolvedProductId, provider, nullableText(input, key) ?? null);
+      }
       await this.client.query(
         `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
          VALUES ($1, $2, $3, $4, 'sell', $5)`,
@@ -2575,6 +2579,10 @@ export class OperationalSyncProjector {
     }
     if (input.linkelUrl !== undefined) {
       await saveLinkelLink(this.client, ctx.organizationId, row.product_id, nullableText(input, 'linkelUrl') ?? null);
+    }
+    for (const provider of ['milano', 'timezone', 'qandq'] as const) {
+      const key = `${provider}Url`;
+      if (input[key] !== undefined) await saveAdditionalLink(this.client, ctx.organizationId, row.product_id, provider, nullableText(input, key) ?? null);
     }
     await this.client.query(
       `UPDATE variant_prices SET valid_until = now() WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sell' AND valid_until IS NULL`,
@@ -2961,6 +2969,9 @@ export class OperationalSyncProjector {
               supplier.url AS "supplierUrl", supplier.check_status AS "supplierStatus", supplier.last_checked_at AS "supplierLastCheckedAt",
               bultime.url AS "bultimeUrl", bultime.check_status AS "bultimeStatus", bultime.stock_status AS "bultimeStockStatus", bultime.last_checked_at AS "bultimeLastCheckedAt",
               linkel.url AS "linkelUrl", linkel.check_status AS "linkelStatus", linkel.stock_status AS "linkelStockStatus", linkel.price_amount AS "linkelPriceAmount", linkel.price_currency AS "linkelPriceCurrency", linkel.last_checked_at AS "linkelLastCheckedAt",
+              milano.url AS "milanoUrl", milano.check_status AS "milanoStatus", milano.stock_status AS "milanoStockStatus", milano.price_amount AS "milanoPriceAmount", milano.price_currency AS "milanoPriceCurrency", milano.last_checked_at AS "milanoLastCheckedAt",
+              timezone.url AS "timezoneUrl", timezone.check_status AS "timezoneStatus", timezone.stock_status AS "timezoneStockStatus", timezone.price_amount AS "timezonePriceAmount", timezone.price_currency AS "timezonePriceCurrency", timezone.last_checked_at AS "timezoneLastCheckedAt",
+              qandq.url AS "qandqUrl", qandq.check_status AS "qandqStatus", qandq.stock_status AS "qandqStockStatus", qandq.price_amount AS "qandqPriceAmount", qandq.price_currency AS "qandqPriceCurrency", qandq.last_checked_at AS "qandqLastCheckedAt",
               p.created_at AS "productCreatedAt", p.updated_at AS "productUpdatedAt",
               p.department_id AS "departmentId", d.name AS "departmentName",
               p.brand_id AS "brandId", b.name AS "brandName",
@@ -2980,6 +2991,9 @@ export class OperationalSyncProjector {
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
        LEFT JOIN supplier_product_links linkel ON linkel.organization_id = p.organization_id AND linkel.product_id = p.id AND linkel.provider_code = 'linkel'
+       LEFT JOIN supplier_product_links milano ON milano.organization_id = p.organization_id AND milano.product_id = p.id AND milano.provider_code = 'milano'
+       LEFT JOIN supplier_product_links timezone ON timezone.organization_id = p.organization_id AND timezone.product_id = p.id AND timezone.provider_code = 'timezone'
+       LEFT JOIN supplier_product_links qandq ON qandq.organization_id = p.organization_id AND qandq.product_id = p.id AND qandq.provider_code = 'qandq'
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-type Provider = 'ekka' | 'bultime' | 'linkel';
+type Provider = 'ekka' | 'bultime' | 'linkel' | 'milano' | 'timezone' | 'qandq';
 type Link = { id: string; url: string; provider_code: Provider; organization_id: string; product_id: string; missing_count: number };
 type Outcome = { status: 'available'; stockStatus: 'in_stock' | 'out_of_stock' | null; priceAmount?: number | null; priceCurrency?: string | null } | { status: 'missing' | 'error'; message?: string };
 
@@ -117,8 +117,55 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
   return { status: 'error', message: 'Linkel je vratio previše preusmerenja.' };
 }
 
+async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValue: string): Promise<Outcome> {
+  const domains = { milano: ['milanogroup.eu', 'www.milanogroup.eu'], timezone: ['timezone-bg.com', 'www.timezone-bg.com'], qandq: ['qandq-casio.com', 'www.qandq-casio.com'] };
+  let url = new URL(urlValue);
+  const requestedId = provider === 'qandq' ? url.searchParams.get('id') : null;
+  for (let redirects = 0; redirects < 4; redirects += 1) {
+    if (url.protocol !== 'https:' || !domains[provider].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error' };
+    let response: Response;
+    try { response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } }); }
+    catch { return { status: 'error', message: 'Server trenutno ne može da pristupi sajtu dobavljača.' }; }
+    if (response.status === 404 || response.status === 410) return { status: 'missing' };
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) return { status: 'error' };
+      url = new URL(location, url);
+      if (url.pathname === '/' || (provider === 'qandq' && url.searchParams.get('id') !== requestedId)) return { status: 'missing' };
+      continue;
+    }
+    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error', message: `Dobavljač je serveru vratio HTTP ${response.status}.` };
+    const body = (await response.text()).slice(0, 1_000_000);
+    if (provider === 'milano') {
+      if (!/property=["']product:price:amount["']/.test(body) || !/property=["']product:availability["']/.test(body)) return { status: 'error' };
+      const price = body.match(/<meta\b[^>]*property=["']product:price:amount["'][^>]*content=["']([0-9.]+)["']/i)?.[1];
+      const stock = body.match(/<meta\b[^>]*property=["']product:availability["'][^>]*content=["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!price) return { status: 'error' };
+      return { status: 'available', stockStatus: stock === 'instock' ? 'in_stock' : stock === 'outofstock' ? 'out_of_stock' : null, priceAmount: Number(price), priceCurrency: 'EUR' };
+    }
+    if (provider === 'timezone') {
+      if (!/class=["']product-price["']/.test(body) || !/itemprop=["']availability["']/.test(body)) return { status: 'error' };
+      const price = body.match(/<li\b[^>]*class=["']product-price["'][^>]*>\s*([0-9.,]+)\s*€/i)?.[1];
+      const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
+      if (!price) return { status: 'error' };
+      return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
+    }
+    const product = body.split('id="product_info"')[1];
+    if (!product || !/Модел|Model/i.test(product.slice(0, 20000))) return { status: 'error' };
+    const price = product.match(/<b\b[^>]*>\s*([0-9.,]+)\s*(?:&euro;|€)\s*<\/b>/i)?.[1];
+    if (!price) return { status: 'error' };
+    return { status: 'available', stockStatus: null, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
+  }
+  return { status: 'error' };
+}
+
 async function homeHealthy(provider: Provider): Promise<boolean> {
   if (provider === 'ekka') return ekkaHomeHealthy();
+  if (provider === 'milano' || provider === 'timezone' || provider === 'qandq') {
+    const home = { milano: 'https://milanogroup.eu/', timezone: 'https://timezone-bg.com/', qandq: 'https://www.qandq-casio.com/' }[provider];
+    try { const response = await fetch(home, { signal: AbortSignal.timeout(15000) }); return response.ok && (await response.text()).includes('<html'); }
+    catch { return false; }
+  }
   if (provider === 'linkel') {
     try {
       const response = await fetch('https://www.linkel.rs/sr/', { signal: AbortSignal.timeout(15000), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } });
@@ -134,7 +181,7 @@ async function homeHealthy(provider: Provider): Promise<boolean> {
 export async function previewSupplierLink(provider: Provider, url: string): Promise<Outcome | { status: 'unverified'; message?: string }> {
   if (provider === 'ekka') return ekkaPage(url);
   if (provider === 'bultime') return bultimePage(url);
-  const result = await linkelPage(url);
+  const result = provider === 'linkel' ? await linkelPage(url) : await additionalPage(provider, url);
   // A failed fetch or an unfamiliar supplier response cannot establish that
   // the product URL is invalid. Keep the saved link eligible for later checks.
   return result.status === 'error'
@@ -152,7 +199,7 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
       const due = await database.pool.query<Link>(
         `SELECT link.id, link.url, link.provider_code, link.organization_id, link.product_id, link.missing_count
          FROM supplier_product_links link JOIN products product ON product.id = link.product_id AND product.organization_id = link.organization_id
-         WHERE link.provider_code IN ('ekka', 'bultime', 'linkel') AND link.next_check_at <= now() AND product.deleted_at IS NULL
+         WHERE link.provider_code IN ('ekka', 'bultime', 'linkel', 'milano', 'timezone', 'qandq') AND link.next_check_at <= now() AND product.deleted_at IS NULL
            AND EXISTS (SELECT 1 FROM supplier_provider_checks provider WHERE provider.provider_code = link.provider_code
                        AND provider.next_request_at <= now() AND (provider.paused_until IS NULL OR provider.paused_until <= now()))
          ORDER BY link.next_check_at, link.id LIMIT 1`
@@ -174,7 +221,7 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
       if (!claim.rows[0]) return;
       const outcome: Outcome = link.provider_code === 'ekka'
         ? await ekkaPage(link.url)
-        : link.provider_code === 'bultime' ? await bultimePage(link.url) : await linkelPage(link.url);
+        : link.provider_code === 'bultime' ? await bultimePage(link.url) : link.provider_code === 'linkel' ? await linkelPage(link.url) : await additionalPage(link.provider_code, link.url);
       if (outcome.status === 'available') {
         const saved = await database.pool.query(
           `UPDATE supplier_product_links SET check_status = 'available', stock_status = $3, price_amount = $4, price_currency = $5, missing_count = 0, last_checked_at = now(), last_seen_at = now(), last_error = NULL, next_check_at = now() + interval '7 days', updated_at = now()
@@ -202,7 +249,7 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
       } else {
         await database.pool.query(
           `UPDATE supplier_product_links SET last_error = $3, next_check_at = now() + interval '24 hours', updated_at = now()
-           WHERE id = $1 AND url = $2`, [link.id, link.url, `${link.provider_code === 'ekka' ? 'Ekka' : link.provider_code === 'bultime' ? 'Bultime' : 'Linkel'} provera nije uspela`]
+           WHERE id = $1 AND url = $2`, [link.id, link.url, `${link.provider_code} provera nije uspela`]
         );
         const failures = await database.pool.query<{ consecutive_errors: number }>(
           `UPDATE supplier_provider_checks SET consecutive_errors = consecutive_errors + 1 WHERE provider_code = $1 RETURNING consecutive_errors`,
