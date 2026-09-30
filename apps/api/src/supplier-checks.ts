@@ -27,6 +27,25 @@ function explicitStock(markup: string): 'in_stock' | 'out_of_stock' | null {
   return null;
 }
 
+function ekkaStock(body: string): 'in_stock' | 'out_of_stock' | null {
+  // PrestaShop includes its out-of-stock placeholder even when the whole
+  // availability paragraph is hidden. Anonymous quantities can also be zero
+  // while ordering is enabled, so neither is evidence that stock is absent.
+  const paragraph = body.match(/<p\b[^>]*id=["']availability_statut["'][^>]*>[\s\S]*?<\/p>/i)?.[0] || '';
+  const value = paragraph.match(/<span\b[^>]*id=["']availability_value["'][^>]*>[\s\S]*?<\/span>/i)?.[0] || '';
+  const hidden = (element: string): boolean => {
+    const tag = element.match(/^<[^>]*>/)?.[0] || '';
+    const style = tag.match(/\bstyle\s*=\s*(["'])([\s\S]*?)\1/i)?.[2] || '';
+    const classes = tag.match(/\bclass\s*=\s*(["'])([\s\S]*?)\1/i)?.[2] || '';
+    return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i.test(style)
+      || /\shidden(?:\s|=|>)/i.test(tag)
+      || /(?:^|\s)(?:hidden|hide|d-none)(?:\s|$)/i.test(classes);
+  };
+  const metadata = body.match(/<[^>]*(?:itemprop=["']availability["']|property=["']product:availability["'])[^>]*>/gi)?.join(' ') || '';
+  const visibleValue = paragraph && value && !hidden(paragraph) && !hidden(value) ? value : '';
+  return explicitStock(metadata + visibleValue);
+}
+
 async function ekkaPage(urlValue: string): Promise<Outcome> {
   let url = new URL(urlValue);
   for (let redirects = 0; redirects < 4; redirects += 1) {
@@ -48,9 +67,9 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
     if (!/<h1\b[^>]*>[^<]+<\/h1>/i.test(body) || !/Referenca/i.test(body) || !/Stanje proizvoda/i.test(body)) return { status: 'error' };
     const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
     const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
-    const availability=body.match(/<[^>]*id=["']availability_value["'][^>]*>[\s\S]*?<\/span>/i)?.[0] || '';
-    const stockMetadata=body.match(/<[^>]*(?:itemprop=["']availability["']|property=["']product:availability["'])[^>]*>/gi)?.join(' ') || '';
-    return { status: 'available', stockStatus: explicitStock(stockMetadata+availability), priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
+    // Ekka hides stock from anonymous visitors. When no visible stock value
+    // is supplied, a confirmed valid product page is the availability fallback.
+    return { status: 'available', stockStatus: ekkaStock(body) ?? 'in_stock', priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
   }
   return { status: 'error' };
 }
