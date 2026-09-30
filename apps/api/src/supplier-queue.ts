@@ -274,17 +274,30 @@ export async function requestSupplierProbe(pool: pg.Pool, provider: string) {
   });
 }
 
+async function deferExpiredConfirmations(
+  client: QueryClient,
+  provider: string | null = null
+): Promise<void> {
+  await client.query(
+    `UPDATE supplier_product_links l SET confirmation_due_at=NULL,
+    next_regular_at=GREATEST(l.next_regular_at,p.cycle_epoch
+      +(floor(extract(epoch FROM l.confirmation_due_at-p.cycle_epoch)/864000)::integer+1)*interval '240 hours'
+      +make_interval(secs => p.phase_seconds+(l.queue_position-1)*p.interval_seconds))
+    FROM supplier_provider_checks p WHERE l.provider_code=p.provider_code
+      AND l.provider_code=ANY($1::text[]) AND ($2::text IS NULL OR l.provider_code=$2)
+      AND l.confirmation_due_at<=now() AND (p.paused_until IS NOT NULL OR p.dispatcher_seen_at IS NULL
+        OR (p.dispatcher_seen_at<now()-interval '2 seconds' AND l.confirmation_due_at>=p.dispatcher_seen_at))`,
+    [NUMBERED_PROVIDERS, provider]
+  );
+}
+
 async function pauseProvider(client: QueryClient, provider: string, reason: string) {
   await client.query(
     `UPDATE supplier_provider_checks SET paused_until=now()+interval '24 hours', pause_reason=$2,
     health_ok=false, health_checked_at=now(), probe_requested_at=NULL, updated_at=now() WHERE provider_code=$1`,
     [provider, reason]
   );
-  await client.query(
-    `UPDATE supplier_product_links SET confirmation_due_at=NULL
-    WHERE provider_code=$1 AND confirmation_due_at IS NOT NULL AND confirmation_due_at<=now()`,
-    [provider]
-  );
+  await deferExpiredConfirmations(client, provider);
 }
 
 async function healthProbe(
@@ -537,13 +550,7 @@ export function startNumberedSupplierChecks(
           WHERE provider_code=ANY($1::text[]) AND next_regular_at<=now()-interval '60 seconds'`,
           [NUMBERED_PROVIDERS]
         );
-        await client.query(
-          `UPDATE supplier_product_links l SET confirmation_due_at=NULL FROM supplier_provider_checks p
-          WHERE l.provider_code=p.provider_code AND l.provider_code=ANY($1::text[]) AND l.confirmation_due_at<=now()
-            AND (p.paused_until IS NOT NULL OR p.dispatcher_seen_at IS NULL
-              OR (p.dispatcher_seen_at<now()-interval '2 seconds' AND l.confirmation_due_at>=p.dispatcher_seen_at))`,
-          [NUMBERED_PROVIDERS]
-        );
+        await deferExpiredConfirmations(client);
         await client.query(
           `UPDATE supplier_product_links l SET next_regular_at=next_regular_at+interval '240 hours'
           FROM supplier_provider_checks p WHERE l.provider_code=p.provider_code AND p.paused_until IS NOT NULL AND l.next_regular_at<=now()`,
