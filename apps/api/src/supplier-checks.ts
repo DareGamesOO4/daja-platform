@@ -117,10 +117,13 @@ async function homeHealthy(provider: Provider): Promise<boolean> {
   } catch { return false; }
 }
 
-export async function previewSupplierLink(provider: Provider, url: string): Promise<Outcome> {
+export async function previewSupplierLink(provider: Provider, url: string): Promise<Outcome | { status: 'unverified' }> {
   if (provider === 'ekka') return ekkaPage(url);
   if (provider === 'bultime') return bultimePage(url);
-  return linkelPage(url);
+  const result = await linkelPage(url);
+  // A failed fetch or an unfamiliar supplier response cannot establish that
+  // the product URL is invalid. Keep the saved link eligible for later checks.
+  return result.status === 'error' ? { status: 'unverified' } : result;
 }
 
 export function startSupplierChecks(database: Database, logger: Logger): () => void {
