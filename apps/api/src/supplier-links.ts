@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { ValidationFailedError } from '@daja/security';
+import { saveNumberedLink } from './supplier-queue.js';
 
 export function normalizeEkkaUrl(value: string | null): string | null {
   if (value === null || value.trim() === '') return null;
@@ -72,6 +73,7 @@ export async function saveAdditionalLink(
   value: string | null
 ): Promise<void> {
   const url = normalizeAdditionalUrl(provider, value);
+  if (provider === 'timezone' || provider === 'qandq') return saveNumberedLink(client, organizationId, productId, provider, url);
   if (!url) {
     await client.query(`DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = $3`, [organizationId, productId, provider]);
     return;
@@ -94,23 +96,7 @@ export async function saveEkkaLink(
   supplierUrl: string | null
 ): Promise<void> {
   const url = normalizeEkkaUrl(supplierUrl);
-  if (!url) {
-    await client.query(
-      `DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = 'ekka'`,
-      [organizationId, productId]
-    );
-    return;
-  }
-  await client.query(
-    `INSERT INTO supplier_product_links (organization_id, product_id, provider_code, url)
-     VALUES ($1, $2, 'ekka', $3)
-     ON CONFLICT (organization_id, product_id, provider_code) DO UPDATE
-       SET url = EXCLUDED.url, check_status = 'unverified', missing_count = 0,
-           external_reference = NULL, last_checked_at = NULL, last_seen_at = NULL,
-           next_check_at = now(), last_error = NULL, updated_at = now()
-     WHERE supplier_product_links.url IS DISTINCT FROM EXCLUDED.url`,
-    [organizationId, productId, url]
-  );
+  return saveNumberedLink(client, organizationId, productId, 'ekka', url);
 }
 
 export async function saveBultimeLink(
@@ -120,23 +106,7 @@ export async function saveBultimeLink(
   supplierUrl: string | null
 ): Promise<void> {
   const url = normalizeBultimeUrl(supplierUrl);
-  if (!url) {
-    await client.query(
-      `DELETE FROM supplier_product_links WHERE organization_id = $1 AND product_id = $2 AND provider_code = 'bultime'`,
-      [organizationId, productId]
-    );
-    return;
-  }
-  await client.query(
-    `INSERT INTO supplier_product_links (organization_id, product_id, provider_code, url)
-     VALUES ($1, $2, 'bultime', $3)
-     ON CONFLICT (organization_id, product_id, provider_code) DO UPDATE
-       SET url = EXCLUDED.url, check_status = 'unverified', stock_status = NULL, missing_count = 0,
-           external_reference = NULL, last_checked_at = NULL, last_seen_at = NULL,
-           next_check_at = now(), last_error = NULL, updated_at = now()
-     WHERE supplier_product_links.url IS DISTINCT FROM EXCLUDED.url`,
-    [organizationId, productId, url]
-  );
+  return saveNumberedLink(client, organizationId, productId, 'bultime', url);
 }
 
 export async function saveLinkelLink(

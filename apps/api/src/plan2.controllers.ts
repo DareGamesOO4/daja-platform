@@ -60,6 +60,7 @@ import { ProductAlertService } from './product-alert.service.js';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl, normalizeAdditionalUrl } from './supplier-links.js';
 import { previewSupplierLink } from './supplier-checks.js';
+import { acquireSupplierLease, reactivateSupplierLink, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
@@ -469,8 +470,39 @@ export class StaffCatalogController {
       ? normalizeEkkaUrl(input.url)
       : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : input.provider === 'linkel' ? normalizeLinkelUrl(input.url) : normalizeAdditionalUrl(input.provider, input.url);
     if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
-    const result = await previewSupplierLink(input.provider, url);
-    return { ...result, url };
+    const lease=await acquireSupplierLease(this.database.pool,input.provider,'preview');
+    if (!lease) return {status:'unverified',url,message:'Provera je odložena; trenutno je aktivno 20 provera.'};
+    try {
+      const result = await previewSupplierLink(input.provider, url);
+      return { ...result, url };
+    } finally { await this.database.pool.query('DELETE FROM supplier_check_leases WHERE token=$1',[lease]); }
+  }
+
+  @Get('supplier-links/providers')
+  async supplierProviders(@Req() request: Request) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
+    return {items:await supplierProviderSummary(this.database.pool,ctx.organizationId)};
+  }
+
+  @Get('supplier-links/states')
+  async supplierCurrentStates(@Req() request: Request, @Query() query: Record<string,string>) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
+    const input=z.object({afterRevision:z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),limit:z.coerce.number().int().min(1).max(500).default(100)}).parse(query);
+    return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit);
+  }
+
+  @Post('supplier-links/:id/reactivate')
+  async supplierReactivate(@Req() request: Request, @Param('id') id: string) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write');
+    await reactivateSupplierLink(this.database.pool,ctx.organizationId,z.string().uuid().parse(id));
+    return {accepted:true};
+  }
+
+  @Post('supplier-links/providers/:code/probe')
+  async supplierProbe(@Req() request: Request, @Param('code') code: string) {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write');
+    await requestSupplierProbe(this.database.pool,code);
+    return {accepted:true};
   }
 
   @Get('supplier-links/exchange-rate')
@@ -2161,7 +2193,7 @@ export class StaffCatalogController {
   }
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false) {
-    return (
+    const rows = (
       await this.database.pool.query(
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
@@ -2254,6 +2286,10 @@ export class StaffCatalogController {
         [organizationId, productId ?? null, contributorId ?? null, includeDeleted]
       )
     ).rows;
+    const states=await supplierStatesForProducts(this.database.pool,organizationId,rows.map(row=>String(row.id)));
+    const fields=new Map<string,Record<string,unknown>>();
+    for (const state of states) fields.set(String(state.productId),{...fields.get(String(state.productId)),...supplierStateFields(state)});
+    return rows.map(row=>({...row,...fields.get(String(row.id))}));
   }
 
   private async invalidateCatalog(organizationId: string, ...slugs: Array<string | undefined>) {

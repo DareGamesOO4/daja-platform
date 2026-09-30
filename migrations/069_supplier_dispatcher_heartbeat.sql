@@ -1,0 +1,1 @@
+ALTER TABLE supplier_provider_checks ADD COLUMN dispatcher_seen_at timestamptz;
