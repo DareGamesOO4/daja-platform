@@ -186,7 +186,7 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
       } else {
         await database.pool.query(
           `UPDATE supplier_product_links SET last_error = $3, next_check_at = now() + interval '24 hours', updated_at = now()
-           WHERE id = $1 AND url = $2`, [link.id, link.url, `${link.provider_code === 'ekka' ? 'Ekka' : 'Bultime'} provera nije uspela`]
+           WHERE id = $1 AND url = $2`, [link.id, link.url, `${link.provider_code === 'ekka' ? 'Ekka' : link.provider_code === 'bultime' ? 'Bultime' : 'Linkel'} provera nije uspela`]
         );
         const failures = await database.pool.query<{ consecutive_errors: number }>(
           `UPDATE supplier_provider_checks SET consecutive_errors = consecutive_errors + 1 WHERE provider_code = $1 RETURNING consecutive_errors`,
