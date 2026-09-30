@@ -2170,23 +2170,23 @@ export class StaffCatalogController {
               CASE WHEN provider.paused_until > now() OR supplier.last_error IS NOT NULL THEN 'deferred'
                    WHEN supplier.missing_count > 0 AND supplier.check_status <> 'missing' THEN 'checking'
                    ELSE supplier.check_status END AS "supplierStatus",
-              supplier.last_checked_at AS "supplierLastCheckedAt", supplier.missing_count AS "supplierMissingCount", supplier.price_amount AS "supplierPriceAmount", supplier.price_currency AS "supplierPriceCurrency",
+              supplier.last_checked_at AS "supplierLastCheckedAt", GREATEST(supplier.next_check_at, provider.next_request_at, provider.paused_until) AS "supplierNextCheckAt", supplier.missing_count AS "supplierMissingCount", supplier.price_amount AS "supplierPriceAmount", supplier.price_currency AS "supplierPriceCurrency",
               bultime.url AS "bultimeUrl", bultime.stock_status AS "bultimeStockStatus", bultime.price_amount AS "bultimePriceAmount", bultime.price_currency AS "bultimePriceCurrency",
               CASE WHEN bultime_provider.paused_until > now() OR bultime.last_error IS NOT NULL THEN 'deferred'
                    WHEN bultime.missing_count > 0 AND bultime.check_status <> 'missing' THEN 'checking'
                    ELSE bultime.check_status END AS "bultimeStatus",
-              bultime.last_checked_at AS "bultimeLastCheckedAt", bultime.missing_count AS "bultimeMissingCount",
+              bultime.last_checked_at AS "bultimeLastCheckedAt", GREATEST(bultime.next_check_at, bultime_provider.next_request_at, bultime_provider.paused_until) AS "bultimeNextCheckAt", bultime.missing_count AS "bultimeMissingCount",
               linkel.url AS "linkelUrl", linkel.stock_status AS "linkelStockStatus", linkel.price_amount AS "linkelPriceAmount", linkel.price_currency AS "linkelPriceCurrency",
               CASE WHEN linkel_provider.paused_until > now() OR linkel.last_error IS NOT NULL THEN 'deferred'
                    WHEN linkel.missing_count > 0 AND linkel.check_status <> 'missing' THEN 'checking'
                    ELSE linkel.check_status END AS "linkelStatus",
-              linkel.last_checked_at AS "linkelLastCheckedAt", linkel.missing_count AS "linkelMissingCount",
+              linkel.last_checked_at AS "linkelLastCheckedAt", GREATEST(linkel.next_check_at, linkel_provider.next_request_at, linkel_provider.paused_until) AS "linkelNextCheckAt", linkel.missing_count AS "linkelMissingCount",
               milano.url AS "milanoUrl", milano.stock_status AS "milanoStockStatus", milano.price_amount AS "milanoPriceAmount", milano.price_currency AS "milanoPriceCurrency",
-              CASE WHEN milano_provider.paused_until > now() OR milano.last_error IS NOT NULL THEN 'deferred' WHEN milano.missing_count > 0 AND milano.check_status <> 'missing' THEN 'checking' ELSE milano.check_status END AS "milanoStatus", milano.last_checked_at AS "milanoLastCheckedAt",
+              CASE WHEN milano_provider.paused_until > now() OR milano.last_error IS NOT NULL THEN 'deferred' WHEN milano.missing_count > 0 AND milano.check_status <> 'missing' THEN 'checking' ELSE milano.check_status END AS "milanoStatus", milano.last_checked_at AS "milanoLastCheckedAt", GREATEST(milano.next_check_at, milano_provider.next_request_at, milano_provider.paused_until) AS "milanoNextCheckAt",
               timezone.url AS "timezoneUrl", timezone.stock_status AS "timezoneStockStatus", timezone.price_amount AS "timezonePriceAmount", timezone.price_currency AS "timezonePriceCurrency",
-              CASE WHEN timezone_provider.paused_until > now() OR timezone.last_error IS NOT NULL THEN 'deferred' WHEN timezone.missing_count > 0 AND timezone.check_status <> 'missing' THEN 'checking' ELSE timezone.check_status END AS "timezoneStatus", timezone.last_checked_at AS "timezoneLastCheckedAt",
+              CASE WHEN timezone_provider.paused_until > now() OR timezone.last_error IS NOT NULL THEN 'deferred' WHEN timezone.missing_count > 0 AND timezone.check_status <> 'missing' THEN 'checking' ELSE timezone.check_status END AS "timezoneStatus", timezone.last_checked_at AS "timezoneLastCheckedAt", GREATEST(timezone.next_check_at, timezone_provider.next_request_at, timezone_provider.paused_until) AS "timezoneNextCheckAt",
               qandq.url AS "qandqUrl", qandq.stock_status AS "qandqStockStatus", qandq.price_amount AS "qandqPriceAmount", qandq.price_currency AS "qandqPriceCurrency",
-              CASE WHEN qandq_provider.paused_until > now() OR qandq.last_error IS NOT NULL THEN 'deferred' WHEN qandq.missing_count > 0 AND qandq.check_status <> 'missing' THEN 'checking' ELSE qandq.check_status END AS "qandqStatus", qandq.last_checked_at AS "qandqLastCheckedAt",
+              CASE WHEN qandq_provider.paused_until > now() OR qandq.last_error IS NOT NULL THEN 'deferred' WHEN qandq.missing_count > 0 AND qandq.check_status <> 'missing' THEN 'checking' ELSE qandq.check_status END AS "qandqStatus", qandq.last_checked_at AS "qandqLastCheckedAt", GREATEST(qandq.next_check_at, qandq_provider.next_request_at, qandq_provider.paused_until) AS "qandqNextCheckAt",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,

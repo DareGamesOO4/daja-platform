@@ -6,7 +6,7 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 type Provider = 'ekka' | 'bultime' | 'linkel' | 'milano' | 'timezone' | 'qandq';
-type Link = { id: string; url: string; provider_code: Provider; organization_id: string; product_id: string; missing_count: number };
+type Link = { id: string; url: string; provider_code: Provider; organization_id: string; product_id: string; missing_count: number; last_checked_at: Date | null; next_check_at: Date };
 type Outcome = { status: 'available'; stockStatus: 'in_stock' | 'out_of_stock' | null; priceAmount?: number | null; priceCurrency?: string | null } | { status: 'missing' | 'error'; message?: string };
 
 async function ekkaPage(urlValue: string): Promise<Outcome> {
@@ -189,6 +189,31 @@ export async function previewSupplierLink(provider: Provider, url: string): Prom
     : result;
 }
 
+async function nextWeeklySlot(client: Pick<Database['pool'], 'query'>, link: Link): Promise<Date> {
+  const now = Date.now();
+  if (link.last_checked_at) return new Date(Math.max(now, link.next_check_at.getTime()) + WEEK_MS);
+  const queued = await client.query<{ next_check_at: Date }>(
+    `SELECT scheduled.next_check_at FROM supplier_product_links scheduled
+     JOIN products product ON product.id = scheduled.product_id AND product.organization_id = scheduled.organization_id
+     WHERE scheduled.id <> $1 AND scheduled.check_status = 'available' AND scheduled.missing_count = 0
+       AND scheduled.last_checked_at IS NOT NULL AND scheduled.last_error IS NULL AND product.deleted_at IS NULL
+       AND scheduled.next_check_at > now() AND scheduled.next_check_at < now() + interval '7 days'
+     ORDER BY scheduled.next_check_at`, [link.id]
+  );
+  if (!queued.rows.length) return new Date(now + WEEK_MS);
+  const horizon = now + WEEK_MS;
+  let previous = now;
+  let largestStart = now;
+  let largestEnd = now;
+  for (const row of queued.rows) {
+    const point = new Date(row.next_check_at).getTime();
+    if (point - previous > largestEnd - largestStart) { largestStart = previous; largestEnd = point; }
+    previous = point;
+  }
+  if (horizon - previous > largestEnd - largestStart) { largestStart = previous; largestEnd = horizon; }
+  return new Date(Math.floor((largestStart + largestEnd) / 2));
+}
+
 export function startSupplierChecks(database: Database, logger: Logger): () => void {
   let active = false;
   let closed = false;
@@ -197,12 +222,12 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
     active = true;
     try {
       const due = await database.pool.query<Link>(
-        `SELECT link.id, link.url, link.provider_code, link.organization_id, link.product_id, link.missing_count
+        `SELECT link.id, link.url, link.provider_code, link.organization_id, link.product_id, link.missing_count, link.last_checked_at, link.next_check_at
          FROM supplier_product_links link JOIN products product ON product.id = link.product_id AND product.organization_id = link.organization_id
          WHERE link.provider_code IN ('ekka', 'bultime', 'linkel', 'milano', 'timezone', 'qandq') AND link.next_check_at <= now() AND product.deleted_at IS NULL
            AND EXISTS (SELECT 1 FROM supplier_provider_checks provider WHERE provider.provider_code = link.provider_code
                        AND provider.next_request_at <= now() AND (provider.paused_until IS NULL OR provider.paused_until <= now()))
-         ORDER BY link.next_check_at, link.id LIMIT 1`
+         ORDER BY CASE WHEN link.last_checked_at IS NULL THEN 0 ELSE 1 END, link.next_check_at, link.id LIMIT 1`
       );
       if (!due.rows[0]) return;
       const slot = await database.pool.query(
@@ -212,10 +237,10 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
       );
       if (!slot.rowCount) return;
       const link = due.rows[0];
-      const claim = await database.pool.query<Link>(
+      const claim = await database.pool.query<{ id: string }>(
         `UPDATE supplier_product_links SET next_check_at = now() + interval '10 minutes', updated_at = now()
          WHERE id = $1 AND url = $2 AND next_check_at <= now()
-         RETURNING id, url, provider_code, organization_id, product_id, missing_count`,
+         RETURNING id`,
         [link.id, link.url]
       );
       if (!claim.rows[0]) return;
@@ -223,12 +248,25 @@ export function startSupplierChecks(database: Database, logger: Logger): () => v
         ? await ekkaPage(link.url)
         : link.provider_code === 'bultime' ? await bultimePage(link.url) : link.provider_code === 'linkel' ? await linkelPage(link.url) : await additionalPage(link.provider_code, link.url);
       if (outcome.status === 'available') {
-        const saved = await database.pool.query(
-          `UPDATE supplier_product_links SET check_status = 'available', stock_status = $3, price_amount = $4, price_currency = $5, missing_count = 0, last_checked_at = now(), last_seen_at = now(), last_error = NULL, next_check_at = now() + interval '7 days', updated_at = now()
-           WHERE id = $1 AND url = $2`, [link.id, link.url, outcome.stockStatus, outcome.priceAmount ?? null, outcome.priceCurrency ?? null]
-        );
+        const client = await database.pool.connect();
+        let saved = false;
+        try {
+          await client.query('BEGIN');
+          await client.query(`SELECT pg_advisory_xact_lock(hashtext('supplier-weekly-queue'))`);
+          const nextCheckAt = await nextWeeklySlot(client, link);
+          const update = await client.query(
+            `UPDATE supplier_product_links SET check_status = 'available', stock_status = $3, price_amount = $4, price_currency = $5,
+               missing_count = 0, last_checked_at = now(), last_seen_at = now(), last_error = NULL, next_check_at = $6, updated_at = now()
+             WHERE id = $1 AND url = $2`, [link.id, link.url, outcome.stockStatus, outcome.priceAmount ?? null, outcome.priceCurrency ?? null, nextCheckAt]
+          );
+          saved = Boolean(update.rowCount);
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally { client.release(); }
         await database.pool.query(`UPDATE supplier_provider_checks SET consecutive_errors = 0, paused_until = NULL WHERE provider_code = $1`, [link.provider_code]);
-        if (saved.rowCount) await publishStatus(database, link, 'available', outcome.stockStatus, outcome.priceAmount, outcome.priceCurrency);
+        if (saved) await publishStatus(database, link, 'available', outcome.stockStatus, outcome.priceAmount, outcome.priceCurrency);
       } else if (outcome.status === 'missing') {
         if (!(await homeHealthy(link.provider_code))) {
           await database.pool.query(`UPDATE supplier_provider_checks SET paused_until = now() + interval '12 hours', consecutive_errors = 0, updated_at = now() WHERE provider_code = $1`, [link.provider_code]);
