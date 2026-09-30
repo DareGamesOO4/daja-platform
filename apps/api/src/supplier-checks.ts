@@ -77,7 +77,20 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
   for (let redirects = 0; redirects < 4; redirects += 1) {
     if (url.protocol !== 'https:' || !['linkel.rs', 'www.linkel.rs'].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error', message: 'Linkel je preusmerio na drugu adresu.' };
     let response: Response;
-    try { response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } }); }
+    try {
+      response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } });
+      if (response.status === 428) {
+        // Retry once with browser headers when Linkel rejects the service request.
+        response = await fetch(url, {
+          redirect: 'manual', signal: AbortSignal.timeout(15000),
+          headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'accept-language': 'sr-RS,sr;q=0.9,en;q=0.8',
+          },
+        });
+      }
+    }
     catch { return { status: 'error', message: 'Server trenutno ne može da pristupi Linkel sajtu.' }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
