@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { z } from 'zod';
-import { CatalogRepository } from '@daja/database';
+import { CatalogRepository, type PublicProductCard } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 
@@ -30,7 +30,21 @@ interface Node {
   sources: string[]; options: Option[]; children: Node[];
 }
 interface Facet { department: string; node: Node; option: Option; aliases: string[]; kind: 'brands' | 'collections' | 'attributes' }
-interface Suggestion { id: string; label: string; detail: string; href: string; count: number }
+export interface Suggestion { id: string; label: string; detail: string; href: string; count: number }
+export interface CatalogSearchResponse {
+  query: string;
+  normalizedQuery: string;
+  recognized: string[];
+  intent: 'products' | 'brands' | 'collections';
+  groups: Record<'brands' | 'collections' | 'attributes', Suggestion[]>;
+  items: PublicProductCard[];
+  total: number;
+  departments: Array<{ id: string; count: number }>;
+  corrections: Array<{ label: string; query: string }>;
+  recommendations: PublicProductCard[];
+  message: string | null;
+  nextCursor: string | null;
+}
 interface Entry { row: SearchRow; codes: string[]; name: string; brand: string; category: string; specs: string; features: string; description: string }
 interface Snapshot { entries: Entry[]; facets: Facet[]; expires: number }
 const snapshots = new Map<string, Promise<Snapshot>>();
@@ -328,7 +342,7 @@ function cursorOffset(cursor: string | undefined, key: string): number {
 }
 function seeded(seed: string, id: string) { return createHash('sha256').update(`${seed}:${id}`).digest('hex'); }
 
-export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery) {
+export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
   const data = await snapshot(pool, organizationId);
   const scope = data.entries.filter((entry) => !input.department || entry.row.department === input.department);
   const facets = data.facets.filter((facet) => !input.department || facet.department === input.department);

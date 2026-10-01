@@ -65,7 +65,7 @@ import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProv
 import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
 import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
-import { searchPublicCatalog, publicSearchQuerySchema } from './catalog-search.js';
+import { searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 
 const productCreateSchema = z.object({
@@ -247,7 +247,7 @@ export class PublicCatalogController {
 
   @Get('search')
   @Throttle({ default: { limit: 300, ttl: 60_000 } })
-  async search(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+  async search(@Req() request: Request, @Query() query: Record<string, string | undefined>): Promise<CatalogSearchResponse> {
     return searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
   }
 
