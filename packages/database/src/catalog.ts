@@ -128,7 +128,7 @@ export class CatalogRepository {
 
     const result = await this.client.query<PublicProductRow>(
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
-              p.brand_id, p.primary_category_id, p.marketing_flags, d.slug AS department,
+              p.brand_id, p.primary_category_id, p.marketing_flags, p.features, d.slug AS department,
               b.name AS brand, c.name AS category,
               v.gender, COALESCE(v.attributes, '{}'::jsonb) - $${internalAttributesParam}::text[] AS attributes,
               v.current_price_amount AS regular_price,
@@ -717,6 +717,7 @@ export interface PublicProductCard {
   primaryCategoryId: string | null;
   department: string | null;
   marketingFlags: string[];
+  features?: ProductRecord['features'];
   brand: string | null;
   category: string | null;
   gender: string | null;
@@ -749,6 +750,7 @@ interface PublicProductRow {
   primary_category_id: string | null;
   department: string | null;
   marketing_flags: string[];
+  features: ProductRecord['features'] | null;
   brand: string | null;
   category: string | null;
   gender: string | null;
@@ -870,6 +872,7 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     primaryCategoryId: row.primary_category_id,
     department: row.department,
     marketingFlags: row.marketing_flags ?? [],
+    features: (row.features ?? []).filter((feature) => feature.title && !feature.title.startsWith('_') && !/^rfid\b/i.test(feature.title)),
     brand: row.brand,
     category: row.category,
     gender: row.gender,

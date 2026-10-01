@@ -5,6 +5,7 @@ import { createDatabase, createRedisConnection } from '@daja/database';
 import { createLogger } from '@daja/observability';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { HealthController } from './health.controller.js';
+import { CatalogFiltersController } from './catalog-filters.controller.js';
 import { OrganizationsController } from './organizations.controller.js';
 import {
   ImportsController,
@@ -60,6 +61,7 @@ const logger = createLogger(config, 'api');
     ])
   ],
   controllers: [
+    CatalogFiltersController,
     AuthController,
     AccessControlController,
     CustomerAuthController,
