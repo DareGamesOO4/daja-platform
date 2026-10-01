@@ -555,8 +555,8 @@ export class CatalogRepository {
       published?: boolean | undefined;
     }
   ): Promise<VariantRecord> {
-    const product = await this.getProduct(ctx, productId);
-    const variantName = input.name?.trim() || product.name;
+    await this.getProduct(ctx, productId);
+    const variantName = input.name?.trim() || null;
     try {
       const result = await this.client.query<VariantRow>(
         `INSERT INTO product_variants (organization_id, product_id, sku, barcode, mpn, name, gender, current_price_amount, currency, attributes, active, published)

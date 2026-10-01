@@ -2279,7 +2279,8 @@ export class OperationalSyncProjector {
     // `_variantName` keeps newly deployed renderer code compatible with an
     // already-running desktop main process that still has the prior strict
     // command schema. It is transport-only and never stored as a catalog spec.
-    const variantName = text(input, 'variantName') ?? text(inputAttributes, '_variantName') ?? name;
+    const variantName = typeof input.variantName === 'string' ? input.variantName.trim()
+      : typeof inputAttributes._variantName === 'string' ? inputAttributes._variantName.trim() : undefined;
     const variantAttributes = Object.fromEntries(
       Object.entries(inputAttributes).filter(
         ([key]) => key !== '_variantName' && key !== '_catalogSpecOptions'
@@ -2400,7 +2401,7 @@ export class OperationalSyncProjector {
           resolvedProductId,
           sku,
           text(input, 'barcode') ?? null,
-          variantName,
+          variantName || null,
           catalogGender(input) ?? null,
           priceRsd * 100,
           currency,
@@ -2443,9 +2444,10 @@ export class OperationalSyncProjector {
       product_slug: string;
       product_name: string;
       variant_sku: string | null;
+      variant_name: string | null;
     }>(
       `SELECT variant.product_id, variant.version::text, product.slug AS product_slug, product.name AS product_name,
-              variant.sku AS variant_sku
+              variant.sku AS variant_sku, variant.name AS variant_name
        FROM product_variants variant
        JOIN products product
          ON product.organization_id = variant.organization_id AND product.id = variant.product_id
@@ -2562,7 +2564,7 @@ export class OperationalSyncProjector {
         variantId,
         sku,
         text(input, 'barcode') ?? null,
-        variantName,
+        variantName === undefined ? row.variant_name : variantName || null,
         catalogGender(input) ?? null,
         priceRsd * 100,
         currency,
