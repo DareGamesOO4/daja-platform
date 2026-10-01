@@ -77,6 +77,7 @@ export class CatalogRepository {
       cursor?: string | undefined;
       limit: number;
       sort?: string | undefined;
+      productIds?: string[] | undefined;
     }
   ): Promise<{ items: PublicProductCard[]; nextCursor: string | null }> {
     const params: unknown[] = [ctx.organizationId, filters.limit + 1];
@@ -92,6 +93,10 @@ export class CatalogRepository {
     if (filters.brand) {
       params.push(filters.brand);
       where.push(`b.slug = $${params.length}`);
+    }
+    if (filters.productIds) {
+      params.push(filters.productIds);
+      where.push(`p.id = ANY($${params.length}::uuid[])`);
     }
     if (filters.category) {
       params.push(filters.category);

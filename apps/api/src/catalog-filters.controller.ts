@@ -9,6 +9,7 @@ import type { Logger } from '@daja/observability';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext, resolvePublicRequestContext } from './runtime/request-context.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
+import { invalidateCatalogSearch } from './catalog-search.js';
 
 const departmentSchema = z.enum(['satovi', 'daljinski', 'baterije', 'naocare']);
 const idSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
@@ -105,7 +106,7 @@ export class CatalogFiltersController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const department = parseWithSchema(departmentSchema, rawDepartment);
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       await client.query('INSERT INTO catalog_filter_configurations (organization_id, department) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ctx.organizationId, department]);
       const current = await client.query('SELECT revision, draft FROM catalog_filter_configurations WHERE organization_id = $1 AND department = $2 FOR UPDATE', [ctx.organizationId, department]);
       if (current.rows[0]?.revision !== revision) throw new ConflictException('Filtere je izmenio drugi administrator. Ponovo učitaj podešavanja.');
@@ -120,5 +121,7 @@ export class CatalogFiltersController {
       if (publish) await client.query('INSERT INTO catalog_filter_versions (organization_id, department, revision, configuration, published_by) VALUES ($1, $2, $3, $4::jsonb, $5)', [ctx.organizationId, department, newRevision, JSON.stringify(valid), ctx.userId]);
       return { revision: newRevision, configuration: valid };
     });
+    if (publish) invalidateCatalogSearch(ctx.organizationId);
+    return result;
   }
 }

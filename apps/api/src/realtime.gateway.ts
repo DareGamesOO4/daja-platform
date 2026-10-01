@@ -15,6 +15,7 @@ import type { Database } from '@daja/database';
 import { AuthService } from './auth.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
+import { invalidateCatalogSearch } from './catalog-search.js';
 
 type RealtimeEvent =
   | 'product.updated'
@@ -191,6 +192,9 @@ export class RealtimeGateway {
   }): void {
     if (!allowedEvents.includes(input.event)) {
       return;
+    }
+    if (['product.updated', 'catalog.taxonomy.updated', 'price.changed', 'media.ready', 'inventory.changed'].includes(input.event)) {
+      invalidateCatalogSearch(input.organizationId);
     }
     const envelope = {
       event: input.event,
