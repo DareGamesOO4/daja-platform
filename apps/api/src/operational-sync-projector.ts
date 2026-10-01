@@ -2923,7 +2923,8 @@ export class OperationalSyncProjector {
     await this.client.query(
       `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
        SELECT $1, $2, $3, 'gallery', $4, $5
-       WHERE NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id = $1 AND product_id = $2 AND media_asset_id = $3)`,
+       WHERE NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id = $1 AND product_id = $2 AND media_asset_id = $3)
+       ON CONFLICT (organization_id, product_id, media_asset_id, role, (COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid))) DO NOTHING`,
       [organizationId, productId, mediaId, position, position === 0]
     );
     return mediaId;

@@ -1529,26 +1529,27 @@ export class StaffCatalogController {
         mediaId: input.mediaId
       });
     }
-    if (input.isPrimary)
-      await this.database.pool.query(
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      // Serialize gallery mutations across tabs, retries and RFID sync.
+      await client.query('SELECT id FROM products WHERE organization_id = $1 AND id = $2 FOR UPDATE', [ctx.organizationId, productId]);
+      const activeAsset = await client.query(
+        `SELECT id FROM media_assets WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+        [ctx.organizationId, input.mediaId]
+      );
+      if (activeAsset.rowCount !== 1) throw new TenantAccessDeniedError();
+      if (input.isPrimary) await client.query(
         `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
         [ctx.organizationId, productId]
       );
-    const result = await this.database.pool.query(
-      `INSERT INTO product_media (organization_id, product_id, variant_id, media_asset_id, role, position, is_primary, alt_text)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
-      [
-        ctx.organizationId,
-        productId,
-        input.variantId ?? null,
-        input.mediaId,
-        input.role ?? 'gallery',
-        input.position ?? 0,
-        input.isPrimary ?? false,
-        input.altText ?? null
-      ]
-    );
+      return client.query(
+        `INSERT INTO product_media (organization_id, product_id, variant_id, media_asset_id, role, position, is_primary, alt_text)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (organization_id, product_id, media_asset_id, role, (COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)))
+         DO UPDATE SET position = EXCLUDED.position, is_primary = EXCLUDED.is_primary, alt_text = COALESCE(EXCLUDED.alt_text, product_media.alt_text)
+         RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
+        [ctx.organizationId, productId, input.variantId ?? null, input.mediaId, input.role ?? 'gallery', input.position ?? 0, input.isPrimary ?? false, input.altText ?? null]
+      );
+    });
     await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
       organizationId: ctx.organizationId,
       productId
@@ -1582,38 +1583,44 @@ export class StaffCatalogController {
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
     if (input.isPrimary) {
       const media = await this.database.pool.query<{ media_id: string }>(
-        `SELECT media_asset_id AS media_id FROM product_media
-         WHERE organization_id = $1 AND product_id = $2 AND id = $3`,
+        `SELECT media_asset_id AS media_id FROM product_media WHERE organization_id = $1 AND product_id = $2 AND id = $3`,
         [ctx.organizationId, productId, linkId]
       );
       const mediaId = media.rows[0]?.media_id;
       if (!mediaId) throw new TenantAccessDeniedError();
-      await ensurePrimaryMediaThumbnail({
-        config: this.config,
-        database: this.database,
-        organizationId: ctx.organizationId,
-        mediaId
-      });
-      await this.database.pool.query(
-        `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
-        [ctx.organizationId, productId]
-      );
+      await ensurePrimaryMediaThumbnail({ config: this.config, database: this.database, organizationId: ctx.organizationId, mediaId });
     }
-    const result = await this.database.pool.query(
-      `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id), alt_text = COALESCE($8, alt_text)
-       WHERE organization_id = $1 AND product_id = $2 AND id = $3
-       RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
-      [
-        ctx.organizationId,
-        productId,
-        linkId,
-        input.position ?? null,
-        input.role ?? null,
-        input.isPrimary ?? null,
-        input.variantId ?? null,
-        input.altText ?? null
-      ]
-    );
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await client.query('SELECT id FROM products WHERE organization_id = $1 AND id = $2 FOR UPDATE', [ctx.organizationId, productId]);
+      if (input.isPrimary) {
+        const media = await client.query<{ media_id: string }>(
+          `SELECT media_asset_id AS media_id FROM product_media
+           WHERE organization_id = $1 AND product_id = $2 AND id = $3`,
+          [ctx.organizationId, productId, linkId]
+        );
+        const mediaId = media.rows[0]?.media_id;
+        if (!mediaId) throw new TenantAccessDeniedError();
+        await client.query(
+          `UPDATE product_media SET is_primary = false WHERE organization_id = $1 AND product_id = $2`,
+          [ctx.organizationId, productId]
+        );
+      }
+      return client.query(
+        `UPDATE product_media SET position = COALESCE($4, position), role = COALESCE($5, role), is_primary = COALESCE($6, is_primary), variant_id = COALESCE($7, variant_id), alt_text = COALESCE($8, alt_text)
+         WHERE organization_id = $1 AND product_id = $2 AND id = $3
+         RETURNING id, media_asset_id AS "mediaId", role, position, is_primary AS "isPrimary", alt_text AS "altText"`,
+        [
+          ctx.organizationId,
+          productId,
+          linkId,
+          input.position ?? null,
+          input.role ?? null,
+          input.isPrimary ?? null,
+          input.variantId ?? null,
+          input.altText ?? null
+        ]
+      );
+    });
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
     await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
       organizationId: ctx.organizationId,
@@ -1637,13 +1644,20 @@ export class StaffCatalogController {
     const product = await new CatalogRepository(this.database.pool).getProduct(ctx, productId);
     const result = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
+        await client.query('SELECT id FROM products WHERE organization_id = $1 AND id = $2 FOR UPDATE', [ctx.organizationId, productId]);
         const deleted = await client.query<{ media_asset_id: string }>(
           `DELETE FROM product_media
          WHERE organization_id = $1 AND product_id = $2 AND id = $3
          RETURNING media_asset_id`,
           [ctx.organizationId, productId, linkId]
         );
-        if (deleted.rowCount !== 1) throw new TenantAccessDeniedError();
+        if (deleted.rowCount !== 1) return deleted;
+        await client.query(
+          `UPDATE product_media SET is_primary = true
+           WHERE id = (SELECT id FROM product_media WHERE organization_id = $1 AND product_id = $2 ORDER BY position, id LIMIT 1)
+             AND NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id = $1 AND product_id = $2 AND is_primary)`,
+          [ctx.organizationId, productId]
+        );
         await new MediaRepository(client).discardUnreferenced(
           ctx,
           deleted.rows[0]!.media_asset_id,
@@ -1652,7 +1666,7 @@ export class StaffCatalogController {
         return deleted;
       }
     );
-    if (result.rowCount !== 1) throw new TenantAccessDeniedError();
+    if (result.rowCount !== 1) return { deleted: true };
     await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
       organizationId: ctx.organizationId,
       productId

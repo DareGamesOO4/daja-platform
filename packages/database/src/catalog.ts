@@ -171,6 +171,8 @@ export class CatalogRepository {
          SELECT
            jsonb_agg(
              jsonb_build_object(
+               'linkId', pm.id,
+               'mediaId', pm.media_asset_id,
                'url', ma.public_url,
                'thumb', thumb.public_url,
                'role', pm.role,
@@ -275,6 +277,8 @@ export class CatalogRepository {
          SELECT
            jsonb_agg(
              jsonb_build_object(
+               'linkId', pm.id,
+               'mediaId', pm.media_asset_id,
                'url', ma.public_url,
                'thumb', thumb.public_url,
                'role', pm.role,
