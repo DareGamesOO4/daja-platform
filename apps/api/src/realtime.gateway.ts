@@ -7,8 +7,9 @@ import {
   WebSocketGateway,
   WebSocketServer
 } from '@nestjs/websockets';
-import type { Server, Socket } from 'socket.io';
+import type { Namespace, Socket } from 'socket.io';
 import { createRequestId } from '@daja/shared';
+import { createLogger } from '@daja/observability';
 import type { AppConfig } from '@daja/config';
 import type { Database } from '@daja/database';
 import { AuthService } from './auth.service.js';
@@ -60,7 +61,29 @@ export class RealtimeGateway {
   ) {}
 
   @WebSocketServer()
-  private readonly server!: Server;
+  private readonly server!: Namespace;
+
+  afterInit(namespace: Namespace): void {
+    const logger = createLogger(this.config, 'realtime');
+    const engine = namespace.server.engine;
+    // Log protocol diagnostics without request headers, query tokens or auth.
+    engine.on('connection_error', (error: { code: number; message: string; req: { method?: string; _query?: Record<string, string> } }) => {
+      logger.warn({
+        code: error.code,
+        message: error.message,
+        method: error.req.method,
+        transport: error.req._query?.transport,
+        instancePid: process.pid
+      }, 'Realtime transport rejected');
+    });
+    engine.on('connection', (connection) => {
+      connection.on('close', (reason: string) => {
+        if (reason === 'ping timeout' || reason === 'transport error') {
+          logger.warn({ reason, transport: connection.transport.name, instancePid: process.pid }, 'Realtime transport interrupted');
+        }
+      });
+    });
+  }
 
   async handleConnection(socket: Socket): Promise<void> {
     const token = bearerToken(socket);
