@@ -358,7 +358,7 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
   const offset = input.mode === 'results' ? cursorOffset(input.cursor, key) : 0;
   const size = input.mode === 'results' ? 24 : 6;
   const selected = ranked.slice(offset, offset + size).map(({ entry }) => entry.row.id);
-  const recommended = !query || !ranked.length ? data.entries.filter((entry) => entry.row.department === 'satovi')
+  const recommended = query && !ranked.length ? data.entries.filter((entry) => entry.row.department === 'satovi')
     .sort((a, b) => Number(b.row.in_stock) - Number(a.row.in_stock) || seeded(input.seed, a.row.id).localeCompare(seeded(input.seed, b.row.id))).slice(0, 6).map((entry) => entry.row.id) : [];
   const ids = [...new Set([...selected, ...recommended])];
   const cards = ids.length ? (await new CatalogRepository(pool).listPublicProducts({ organizationId }, { productIds: ids, limit: ids.length })).items : [];
