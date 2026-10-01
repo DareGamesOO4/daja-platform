@@ -69,7 +69,7 @@ function values(row: SearchRow, source: string): string[] {
   if (source.startsWith('feature:')) return publicFeatures(row.features).some((feature) => feature.title.trim() === source.slice(8)) ? ['Da'] : [];
   if (source === 'gender') {
     const gender = canonical(row.gender);
-    return gender === 'unisex' ? ['Muški', 'Ženski'] : [String(row.gender ?? '')];
+    return gender === 'unisex' ? ['Muški', 'Ženski'] : gender === 'muski' ? ['Muški'] : gender === 'zenski' ? ['Ženski'] : [String(row.gender ?? '')];
   }
   if (source === 'price') return [String(Number(row.price) / 100)];
   if (source.startsWith('spec:')) {
