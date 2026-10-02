@@ -18,6 +18,7 @@ import { CONFIG, DATABASE } from './tokens.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 
 type RealtimeEvent =
+  | 'catalog.variant-groups.updated'
   | 'product.updated'
   | 'catalog.taxonomy.updated'
   | 'price.changed'
@@ -32,6 +33,7 @@ type RealtimeEvent =
   | 'customer.email_verified';
 
 const allowedEvents: RealtimeEvent[] = [
+  'catalog.variant-groups.updated',
   'product.updated',
   'catalog.taxonomy.updated',
   'price.changed',
@@ -205,7 +207,7 @@ export class RealtimeGateway {
       ? this.server.to(locationRoom(input.organizationId, input.locationId))
       : this.server.to(orgRoom(input.organizationId));
     target.emit(input.event, envelope);
-    if (input.event === 'product.updated' && !input.locationId) {
+    if (['product.updated', 'catalog.variant-groups.updated'].includes(input.event) && !input.locationId) {
       this.server.to(publicCatalogRoom(input.organizationId)).emit(input.event, envelope);
     }
   }

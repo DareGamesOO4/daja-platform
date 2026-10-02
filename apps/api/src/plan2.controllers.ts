@@ -68,6 +68,7 @@ import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
+import { loadGroupState, groupOverview, resolveGroupMembers, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 
 const productCreateSchema = z.object({
   linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
@@ -402,6 +403,23 @@ export class PublicCatalogController {
     response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(xml);
   }
 
+  @Get('products/:slug/variants')
+  async productVariantGroup(@Req() request: Request, @Param('slug') slug: string, @Res({ passthrough: true }) response: Response) {
+    const ctx = this.publicContext(request);
+    const repository = new CatalogRepository(this.database.pool);
+    const normalizedSlug = parseWithSchema(slugSchema, slug);
+    response.setHeader('Cache-Control', 'no-store');
+    const state = await loadGroupState(this.database.pool, ctx.organizationId, false);
+    const source = state.products.find(item => item.slug === normalizedSlug && item.public);
+    if (!source) throw new NotFoundException('Product not found');
+    const ids = resolveGroupMembers(state, source.id);
+    if (ids.length < 2) return { items: [] };
+    const result = await repository.listPublicProducts(ctx, { productIds: ids, limit: ids.length });
+    // Internal names and private group metadata never enter the public payload.
+    const unique = [...new Map(result.items.map(item => [item.productId, item])).values()];
+    return { items: unique.length < 2 || !unique.some(item => item.productId === source.id) ? [] : unique.filter(item => item.productId !== source.id) };
+  }
+
   @Get('products/:slug')
   async productBySlug(
     @Req() request: Request,
@@ -471,6 +489,58 @@ export class StaffCatalogController {
     private readonly realtime: RealtimeGateway,
     private readonly productAlerts: ProductAlertService
   ) {}
+
+  private variantGroupContext(request: Request) {
+    const ctx = resolveRequestContext(request);
+    if (!ctx.isOwner) requirePermission(ctx, 'catalog.variant_groups.manage');
+    return ctx;
+  }
+
+  @Get('admin/variant-groups')
+  async variantGroups(@Req() request: Request) {
+    const ctx = this.variantGroupContext(request);
+    return groupOverview(await loadGroupState(this.database.pool, ctx.organizationId));
+  }
+
+  @Get('admin/variant-groups/:key')
+  async variantGroup(@Req() request: Request, @Param('key') key: string) {
+    const result = await this.variantGroups(request);
+    const group = result.groups.find(item => item.key === key);
+    if (!group) throw new ResourceNotFoundError('Variant group');
+    return { group, products: result.products, assignments: result.assignments };
+  }
+
+  @Post('admin/variant-groups')
+  async saveVariantGroup(@Req() request: Request, @Body() body: unknown) {
+    const ctx = this.variantGroupContext(request);
+    const result = await mutateGroups(this.database.pool, ctx, 'save', groupSaveSchema.parse(body));
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'catalog.variant-groups.updated', payload: { revision: result.revision } });
+    return result;
+  }
+
+  @Post('admin/variant-groups/:key/reset')
+  async resetVariantGroup(@Req() request: Request, @Param('key') key: string, @Body() body: unknown) {
+    const ctx = this.variantGroupContext(request);
+    const result = await mutateGroups(this.database.pool, ctx, 'reset', { key, ...groupRevisionSchema.parse(body) });
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'catalog.variant-groups.updated', payload: { revision: result.revision } });
+    return result;
+  }
+
+  @Delete('admin/variant-groups/:key')
+  async deleteVariantGroup(@Req() request: Request, @Param('key') key: string, @Body() body: unknown) {
+    const ctx = this.variantGroupContext(request);
+    const result = await mutateGroups(this.database.pool, ctx, 'delete', { key, ...groupRevisionSchema.parse(body) });
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'catalog.variant-groups.updated', payload: { revision: result.revision } });
+    return result;
+  }
+
+  @Post('admin/variant-groups/products/:id/automatic')
+  async resetProductVariantGroup(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const ctx = this.variantGroupContext(request);
+    const result = await mutateGroups(this.database.pool, ctx, 'product-reset', { key: uuidSchema.parse(id), ...groupRevisionSchema.parse(body) });
+    this.realtime.publish({ organizationId: ctx.organizationId, event: 'catalog.variant-groups.updated', payload: { revision: result.revision } });
+    return result;
+  }
 
   @Post('supplier-links/preview')
   async previewSupplier(@Req() request: Request, @Body() body: unknown) {
