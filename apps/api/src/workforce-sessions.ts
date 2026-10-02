@@ -3,19 +3,19 @@ import type { RequestContext } from '@daja/shared';
 import { TenantAccessDeniedError, ValidationFailedError } from '@daja/security';
 import { z } from 'zod';
 
-type SessionStatus = 'open' | 'completed' | 'abandoned';
+export type SessionStatus = 'open' | 'completed' | 'abandoned';
 interface SessionRow {
   organization_id: string; user_id: string; product_id: string | null; kind: string;
   status: SessionStatus; complete: boolean; active_seconds: number; started_at: Date;
 }
 interface ClientRow { sequence: string; active_seconds: number; updated_at: Date }
 interface LeaseRow { owner_id: string; expires_at: Date }
-interface TimingRow {
+export interface TimingRow {
   id: string; productId: string | null; productName: string; kind: string; status: SessionStatus;
   complete: boolean; startedAt: Date; finishedAt: Date | null; activeSeconds: number;
   elapsedSeconds: string | null; editSessions: number;
 }
-interface TeamRow {
+export interface TeamRow {
   id: string; name: string; count: number; approved: number; returned: number;
   activeSeconds: number | null; elapsedSeconds: string | null; measured: number;
 }
