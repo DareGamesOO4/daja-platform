@@ -998,6 +998,41 @@ export class StaffCatalogController {
       summary: summaries.find(member => member.id === id) ?? null };
   }
 
+  @Get('admin/workforce/:userId/timeline')
+  async workforceTimeline(@Req() request: Request, @Param('userId') userId: string, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const id = parseWithSchema(uuidSchema, userId);
+    const input = parseWithSchema(z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+        const parsed = new Date(`${value}T00:00:00Z`);
+        return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+      })
+    }), query);
+    const entries = (await this.database.pool.query(
+      `WITH bounds AS (
+        SELECT $3::date::timestamp AT TIME ZONE 'Europe/Belgrade' AS start,
+          ($3::date + 1)::timestamp AT TIME ZONE 'Europe/Belgrade' AS finish
+      )
+      SELECT 'product:' || p.id::text AS id, 'created' AS operation, 'product' AS "aggregateType",
+        p.id AS "productId", p.name AS "productName", p.created_at AS "occurredAt", p.deleted_at AS "deletedAt"
+      FROM products p CROSS JOIN bounds b
+      WHERE p.organization_id=$1 AND p.created_by_user_id=$2 AND p.created_at >= b.start AND p.created_at < b.finish
+      UNION ALL
+      SELECT 'audit:' || a.id::text, a.operation, a.aggregate_type,
+        p.id, COALESCE(p.name, a.after_payload->>'name', a.before_payload->>'name', 'Artikal'), a.occurred_at, p.deleted_at
+      FROM audit_events a CROSS JOIN bounds b
+      LEFT JOIN product_variants v ON a.aggregate_type IN ('variant', 'inventory_balance') AND v.id=a.aggregate_id AND v.organization_id=$1
+      LEFT JOIN products p ON p.organization_id=$1 AND p.id=CASE WHEN a.aggregate_type='product' THEN a.aggregate_id ELSE v.product_id END
+      WHERE a.organization_id=$1 AND a.actor_user_id=$2
+        AND a.aggregate_type IN ('product', 'variant', 'inventory_balance')
+        AND a.occurred_at >= b.start AND a.occurred_at < b.finish
+        AND NOT (a.aggregate_type='product' AND a.operation IN ('create', 'created') AND COALESCE(p.created_by_user_id=$2, false))
+      ORDER BY "occurredAt", id`, [ctx.organizationId, id, input.date]
+    )).rows;
+    return { date: input.date, timeZone: 'Europe/Belgrade', entries };
+  }
+
   @Patch('admin/workforce/products/:id/review')
   async reviewContributorProduct(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
