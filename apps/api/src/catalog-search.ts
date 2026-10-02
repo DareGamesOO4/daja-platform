@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { CatalogRepository, type PublicProductCard } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
+import { automaticFilterOptions } from './catalog-filter-options.js';
 
 const departments = ['satovi', 'daljinski', 'baterije', 'naocare'] as const;
 const routes: Record<string, string> = { satovi: '/catalog', daljinski: '/daljinski', baterije: '/baterije', naocare: '/naocare' };
@@ -28,6 +29,7 @@ interface Option { id: string; label: string; visible: boolean; conditions: Cond
 interface Node {
   id: string; title: string; visible: boolean; mode: string; style: string;
   sources: string[]; options: Option[]; children: Node[];
+  autoAddOptions?: boolean; unit?: string;
 }
 interface Facet { department: string; node: Node; option: Option; aliases: string[]; kind: 'brands' | 'collections' | 'attributes' }
 export interface Suggestion { id: string; label: string; detail: string; href: string; count: number }
@@ -162,7 +164,10 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
       configs = await pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]);
     }
     const facets: Facet[] = [];
-    for (const config of configs.rows) collectFacets(config.department, config.published?.filters ?? [], facets);
+    for (const config of configs.rows) {
+      const rows = products.rows.filter((row) => row.department === config.department);
+      collectFacets(config.department, automaticFilterOptions(config.published?.filters ?? [], (source) => rows.flatMap((row) => values(row, source))), facets);
+    }
     const entries = products.rows.map((row): Entry => ({
       row, codes: [...new Set([row.sku, row.mpn, row.name].filter(Boolean).map(compact))],
       name: canonical(row.name), brand: canonical(row.brand), category: canonical(row.category),
