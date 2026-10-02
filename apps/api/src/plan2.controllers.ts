@@ -67,6 +67,7 @@ import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
+import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 
 const productCreateSchema = z.object({
   linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
@@ -1031,6 +1032,38 @@ export class StaffCatalogController {
       ORDER BY "occurredAt", id`, [ctx.organizationId, id, input.date]
     )).rows;
     return { date: input.date, timeZone: 'Europe/Belgrade', entries };
+  }
+
+  @Put('admin/work-sessions/:id')
+  async saveWorkSession(@Req() request: Request, @Param('id') sessionId: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(workSessionSchema, body);
+    if (input.productId) await this.assertContributorOwnsProduct(ctx, input.productId);
+    return recordWorkSession(this.database.pool, ctx, parseWithSchema(uuidSchema, sessionId), input);
+  }
+
+  @Post('admin/work-sessions/:id/abandon')
+  async abandonWorkSession(@Req() request: Request, @Param('id') sessionId: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const id = parseWithSchema(uuidSchema, sessionId);
+    const input = parseWithSchema(z.object({ startedAt: z.string().datetime() }), body);
+    if (new Date(input.startedAt).getTime() > Date.now() + 60_000) throw new ValidationFailedError('Invalid session timestamp');
+    await this.database.pool.query(`INSERT INTO catalog_work_sessions(id,organization_id,user_id,kind,started_at,status,finished_at)
+      VALUES($1,$2,$3,'create',$4,'abandoned',GREATEST(now(),$4::timestamptz)) ON CONFLICT(id) DO NOTHING`,
+      [id, ctx.organizationId, ctx.userId, input.startedAt]);
+    await this.database.pool.query(`UPDATE catalog_work_sessions SET status='abandoned',finished_at=GREATEST(now(),started_at),updated_at=now()
+      WHERE id=$1 AND organization_id=$2 AND user_id=$3 AND status='open'`,
+      [id, ctx.organizationId, ctx.userId]);
+    return { ok: true };
+  }
+
+  @Get('admin/workforce/:userId/dashboard')
+  async workforceDashboard(@Req() request: Request, @Param('userId') userId: string, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    return workforceDashboard(this.database.pool, ctx.organizationId, parseWithSchema(uuidSchema, userId), parseWithSchema(dashboardQuerySchema, query));
   }
 
   @Patch('admin/workforce/products/:id/review')
@@ -2341,6 +2374,8 @@ export class StaffCatalogController {
               qandq.url AS "qandqUrl", qandq.stock_status AS "qandqStockStatus", qandq.price_amount AS "qandqPriceAmount", qandq.price_currency AS "qandqPriceCurrency",
               CASE WHEN qandq_provider.paused_until > now() OR qandq.last_error IS NOT NULL THEN 'deferred' WHEN qandq.missing_count > 0 AND qandq.check_status <> 'missing' THEN 'checking' ELSE qandq.check_status END AS "qandqStatus", qandq.last_checked_at AS "qandqLastCheckedAt", GREATEST(qandq.next_check_at, qandq_provider.next_request_at, qandq_provider.paused_until) AS "qandqNextCheckAt",
               p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote", p.quality_reviewed_at AS "qualityReviewedAt",
+              (SELECT max(a.occurred_at) FROM audit_events a WHERE a.organization_id=p.organization_id
+                AND a.aggregate_type='product' AND a.aggregate_id=p.id AND a.operation='quality_changes_requested') AS "lastReturnedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
               v.id AS "variantId", v.sku, v.barcode, v.mpn, v.name AS "variantName", v.current_price_amount AS "currentPriceAmount", v.currency,
