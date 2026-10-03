@@ -65,7 +65,8 @@ import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProv
 import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
 import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
-import { searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
+import { readSearchSettings, saveSearchSettings, searchSettingsSchema, type SearchSettingsResult } from './catalog-search-settings.js';
+import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
@@ -2161,6 +2162,19 @@ export class StaffCatalogController {
     }
     this.publishCatalogTaxonomy(ctx.organizationId, 'categories');
     return { deleted: true };
+  }
+
+  @Get('catalog-search-settings')
+  async getSearchSettings(@Req() request: Request): Promise<SearchSettingsResult> {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
+    return readSearchSettings(this.database.pool,ctx.organizationId);
+  }
+
+  @Put('catalog-search-settings')
+  async updateSearchSettings(@Req() request: Request,@Body() body: unknown): Promise<SearchSettingsResult> {
+    const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.write');
+    const result=await saveSearchSettings(this.database.pool,ctx.organizationId,parseWithSchema(searchSettingsSchema,body));
+    invalidateCatalogSearch(ctx.organizationId); return result;
   }
 
   @Post('specification-editor')

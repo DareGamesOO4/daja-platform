@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { recordSearchMiss, type SearchSynonym } from './catalog-search-settings.js';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { CatalogRepository, type PublicProductCard } from '@daja/database';
@@ -14,7 +15,9 @@ export const publicSearchQuerySchema = z.object({
   department: z.enum(departments).optional(),
   sort: z.enum(['relevance', 'price_asc', 'price_desc']).default('relevance'),
   cursor: z.string().max(1000).optional(),
-  seed: z.string().max(80).default('catalog')
+  seed: z.string().max(80).default('catalog'),
+  track: z.enum(['yes','no']).default('no'),
+  literal: z.enum(['yes','no']).default('no')
 });
 type SearchQuery = z.infer<typeof publicSearchQuerySchema>;
 interface SearchRow {
@@ -37,6 +40,10 @@ export interface CatalogSearchResponse {
   query: string;
   normalizedQuery: string;
   recognized: string[];
+  conditions: Array<{id:string;label:string;query:string}>;
+  appliedCorrection: {query:string;original:string} | null;
+  completions: Array<{label:string;query:string;count:number}>;
+  similar: Array<{product:PublicProductCard;reason:string}>;
   intent: 'products' | 'brands' | 'collections';
   groups: Record<'brands' | 'collections' | 'attributes', Suggestion[]>;
   items: PublicProductCard[];
@@ -48,7 +55,7 @@ export interface CatalogSearchResponse {
   nextCursor: string | null;
 }
 interface Entry { row: SearchRow; codes: string[]; name: string; brand: string; category: string; specs: string; features: string; description: string }
-interface Snapshot { entries: Entry[]; facets: Facet[]; expires: number }
+interface Snapshot { entries: Entry[]; facets: Facet[]; synonyms: SearchSynonym[]; expires: number }
 const snapshots = new Map<string, Promise<Snapshot>>();
 export function invalidateCatalogSearch(organizationId: string) { snapshots.delete(organizationId); }
 
@@ -71,7 +78,54 @@ const synonyms: Record<string, string> = {
   sat: 'satovi', satove: 'satovi', satova: 'satovi', watch: 'satovi', watches: 'satovi',
   daljinski: 'daljinski', daljinske: 'daljinski', naocare: 'naocare', baterija: 'baterije', battery: 'baterije'
 };
-const colors = new Set(['bela', 'crna', 'plava', 'zelena', 'crvena', 'srebrna', 'zlatna', 'braon', 'siva', 'bez', 'krem', 'bordo', 'ljubicasta', 'narandzasta']);
+Object.assign(synonyms, {
+  srebran:'srebrna', zlatan:'zlatna', crn:'crna', beo:'bela', plav:'plava', zelen:'zelena', crven:'crvena',
+  mens:'muski', man:'muski', muskim:'muski', muskog:'muski', muskom:'muski', muskarca:'muski',
+  womens:'zenski', woman:'zenski', ladies:'zenski', lady:'zenski', zenskim:'zenski', zenskog:'zenski', zenskom:'zenski', zenu:'zenski',
+  srebrnim:'srebrna', srebrnog:'srebrna', srebrnom:'srebrna', srebrnu:'srebrna',
+  zlatnim:'zlatna', zlatnog:'zlatna', zlatnom:'zlatna', zlatnu:'zlatna',
+  crnim:'crna', crnog:'crna', crnom:'crna', crnu:'crna', belim:'bela', belog:'bela', belom:'bela', belu:'bela',
+  plavim:'plava', plavog:'plava', plavom:'plava', plavu:'plava', zelenim:'zelena', zelenog:'zelena', zelenom:'zelena', zelenu:'zelena',
+  crvenim:'crvena', crvenog:'crvena', crvenom:'crvena', crvenu:'crvena',
+  purple:'ljubicasta', violet:'ljubicasta', orange:'narandzasta', beige:'bez', cream:'krem', burgundy:'bordo', pink:'roze', rose:'roze', yellow:'zuta',
+  strap:'narukvica', bracelet:'narukvica', band:'narukvica', kais:'narukvica', kaisem:'narukvica', kaisa:'narukvica', narukvicom:'narukvica', narukvice:'narukvica',
+  dial:'brojcanik', brojcanikom:'brojcanik', brojcanika:'brojcanik', case:'kuciste', kucistem:'kuciste', kucista:'kuciste',
+  koznim:'koza', koznoj:'koza', koznu:'koza', koznom:'koza', guma:'silikon', gumeni:'silikon', gumena:'silikon', rubber:'silikon', silikonskim:'silikon',
+  metalni:'metal', metalna:'metal', metalnim:'metal', metalnom:'metal', steel:'celik', stainless:'nerdjajuci',
+  sapphire:'safirno', safir:'safirno', mineral:'mineralno', glass:'staklo',
+  rectangular:'pravougaoni', pravougaoni:'pravougaoni', pravougaona:'pravougaoni', pravougaono:'pravougaoni', square:'kvadratni', kvadratna:'kvadratni', round:'okrugao', okrugli:'okrugao', okrugla:'okrugao',
+  elegant:'elegantni', elegantan:'elegantni', elegantna:'elegantni', dress:'elegantni', sport:'sportski', sports:'sportski', sporty:'sportski', casual:'svakodnevni', everyday:'svakodnevni',
+  automatic:'automatski', automatskim:'automatski', automatskog:'automatski', mehanicki:'mehanicki', mechanical:'mehanicki',
+  datuma:'datum', day:'dan', weekday:'dan_u_nedelji', crown:'krunica', hands:'analogni', kazaljke:'analogni', kazaljkama:'analogni', numbers:'brojevi',
+  remote:'daljinski', remotes:'daljinski', batteries:'baterije', glasses:'naocare', sunglasses:'naocare',
+  under:'do', below:'do', over:'preko', above:'preko', from:'od', between:'izmedju', to:'do', and:'i', or:'ili', without:'bez', not:'nije', with:'sa',
+  bicolor:'dvobojni', dvobojna:'dvobojni', dvobojno:'dvobojni',
+  danielklein:'daniel klein', klajn:'klein', dk:'daniel klein', qandq:'q q',
+  uskoro:'uskoro', datumom:'datum'
+});
+const phrases: Record<string,string> = {
+  'daniel klajn':'daniel klein', 'q&q':'q q', 'q & q':'q q', 'men’s':'muski', "men's":'muski', "women's":'zenski', 'women’s':'zenski',
+  'sat sa kazaljkama':'analogni', 'sat sa ciframa':'brojevi', 'sat sa brojevima':'brojevi',
+  'sat na navijanje':'rucno navijanje', 'hand winding':'rucno navijanje', 'manual winding':'rucno navijanje',
+  'sat bez baterije':'mehanicki', 'self winding':'automatski', 'self-winding':'automatski',
+  'stainless steel':'nerdjajuci celik', 'two tone':'dvobojni', 'two-tone':'dvobojni', 'srebrno zlatni':'dvobojni',
+  'water resistant':'vodootpornost', 'waterproof':'vodootpornost',
+  'in stock':'na stanju', 'dostupan odmah':'na stanju', 'samo dostupni':'na stanju', 'available now':'na stanju',
+  'za odelo':'elegantni', 'za svaki dan':'svakodnevni', 'sa brojevima':'brojevi',
+  'thin watch':'tanak sat', 'za muskarce':'muski', 'za zene':'zenski',
+  'muskisat':'muski sat', 'zenskisat':'zenski sat', 'crniili':'crni ili'
+};
+function prepareQuery(query:string,custom:SearchSynonym[]=[]):string {
+  let text=query.toLowerCase().replace(/[а-яђјљњћџ]/g,l=>cyrillic[l]??l).replace(/đ/g,'dj').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const replacements=[...custom.map(s=>[normalize(s.alias),normalize(s.target)] as const),...Object.entries(phrases)].sort((a,b)=>b[0].length-a[0].length);
+  const lookup=new Map(replacements);
+  if(replacements.length){
+    const pattern=replacements.map(([alias])=>escapePattern(alias).replace(/ /g,'\\s+')).join('|');
+    text=text.replace(new RegExp(`(?<![a-z0-9])(?:${pattern})(?![a-z0-9])`,'g'),match=>lookup.get(match.replace(/\s+/g,' '))??match);
+  }
+  return text.replace(/[a-z]+/g,(word:string,offset:number)=> /\d/.test(text[offset+word.length]||'') || (word==='dk'&&/^\s+\d/.test(text.slice(offset+word.length))) ? word : synonyms[word]??word).replace(/\s+/g,' ').trim();
+}
+const colors = new Set(['bela', 'crna', 'plava', 'zelena', 'crvena', 'srebrna', 'zlatna', 'braon', 'siva', 'bez', 'krem', 'bordo', 'ljubicasta', 'narandzasta', 'roze', 'zuta']);
 function normalize(value: unknown): string {
   return String(value ?? '').toLowerCase().replace(/[а-яђјљњћџ]/g, (letter) => cyrillic[letter] ?? letter)
     .replace(/đ/g, 'dj').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
@@ -131,7 +185,7 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
   const loading = (async () => {
     // Only lightweight searchable metadata is cached on the server. Images and
     // current public cards are loaded for the selected IDs, never for every keypress.
-    const [products, initialConfigs] = await Promise.all([
+    const [products, initialConfigs, searchSettings] = await Promise.all([
       pool.query<SearchRow>(`SELECT p.id, p.name, p.slug, p.description, p.features,
         v.sku, v.mpn, v.gender, v.attributes, b.name AS brand, c.name AS category, d.slug AS department,
         COALESCE(sale.amount_minor, v.current_price_amount) AS price,
@@ -147,7 +201,8 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
           ORDER BY vp.valid_from DESC, vp.created_at DESC LIMIT 1) sale ON true
         LEFT JOIN LATERAL (SELECT SUM(quantity) AS quantity FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id) inv ON true
         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published AND d.slug = ANY($2::text[])`, [organizationId, departments]),
-      pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId])
+      pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]),
+      pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId])
     ]);
     let configs = initialConfigs;
     const missing = departments.filter((department) => !configs.rows.some((config) => config.department === department));
@@ -180,7 +235,7 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
       features: canonical(publicFeatures(row.features).map((feature) => `${feature.title} ${feature.subtitle ?? ''}`).join(' ')),
       description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
     }));
-    return { entries, facets, expires: Date.now() + 10_000 };
+    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Date.now() + 10_000 };
   })();
   // Bound the organization cache and deduplicate concurrent cold requests.
   if (snapshots.size >= 20 && !snapshots.has(organizationId)) snapshots.delete(snapshots.keys().next().value ?? '');
@@ -194,53 +249,101 @@ function amount(value: string): number {
   numeric = numeric.replace(/[.,](?=\d{3}(?:[.,]|$))/g, '').replace(',', '.');
   return Number(numeric) * multiplier * 100;
 }
-interface Parsed { tests: Array<(row: SearchRow) => boolean>; terms: string[]; labels: string[]; model: string }
-function parseQuery(query: string, facets: Facet[]): Parsed {
-  const tests: Parsed['tests'] = []; const labels: string[] = [];
-  const number = '(\\d+(?:[.,]\\d+)*(?:\\s*(?:k|hiljada))?)';
-  let text = query.toLowerCase();
-  text = text.replace(new RegExp(`\\bod\\s+${number}\\s*(?:rsd|din(?:ara)?)?\\s+do\\s+${number}\\s*(?:rsd|din(?:ara)?)?(?![\\d.,]|\\s*mm)`, 'g'), (_match, first: string, second: string) => {
-    const min = amount(first); const max = amount(second);
-    tests.push((row) => Number(row.price) >= min && Number(row.price) <= max); labels.push(`Cena: ${min / 100}–${max / 100} RSD`); return ' ';
-  });
-  text = text.replace(new RegExp(`\\b(do|ispod|od|preko)\\s+${number}\\s*(?:rsd|din(?:ara)?)?(?![\\d.,]|\\s*mm)`, 'g'), (_match, direction: string, raw: string) => {
-    const price = amount(raw); const minimum = direction === 'od' || direction === 'preko';
-    tests.push((row) => minimum ? Number(row.price) >= price : Number(row.price) <= price); labels.push(`Cena ${minimum ? 'od' : 'do'} ${price / 100} RSD`); return ' ';
-  });
-  text = text.replace(/\b(\d+(?:[.,]\d+)?)\s*mm\b/g, (_match, raw: string) => {
-    const diameter = Number(raw.replace(',', '.'));
-    tests.push((row) => Object.entries(publicAttributes(row.attributes)).some(([key, value]) => /precnik|diameter/.test(normalize(key)) && (Array.isArray(value) ? value : [value]).some((item) => {
-      const match = String(item ?? '').replace(',', '.').match(/^(\d+(?:\.\d+)?)\s*(mm)?$/i); return match && Number(match[1]) === diameter;
-    }))); labels.push(`Prečnik: ${diameter} mm`); return ' ';
-  });
-  let normalized = ` ${canonical(text)} `;
-  for (const gender of ['muski', 'zenski', 'unisex']) {
-    if (!normalized.includes(` ${gender} `)) continue;
-    tests.push((row) => canonical(row.gender) === gender || (gender !== 'unisex' && canonical(row.gender) === 'unisex'));
-    labels.push(gender === 'muski' ? 'Muški' : gender === 'zenski' ? 'Ženski' : 'Unisex');
-    normalized = normalized.split(` ${gender} `).join(' ');
+interface SearchConstraint { id:string; label:string; test:(row:SearchRow)=>boolean; query:string }
+interface Parsed { tests: Array<(row: SearchRow) => boolean>; terms: string[]; labels: string[]; model: string; conditions:SearchConstraint[] }
+const escapePattern=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function numericAttribute(row:SearchRow,pattern:RegExp):number|undefined{
+  for(const [key,value] of Object.entries(publicAttributes(row.attributes))){
+    if(!pattern.test(normalize(key)))continue;
+    for(const item of Array.isArray(value)?value:[value]){const match=String(item??'').replace(',','.').match(/^(\d+(?:\.\d+)?)\s*(?:mm)?$/i);if(match)return Number(match[1]);}
   }
-  // Generic color means any public color field; naming a part narrows only that field.
-  normalized = normalized.replace(/\b(bela|crna|plava|zelena|crvena|srebrna|zlatna|braon|siva|bez|krem|bordo|ljubicasta|narandzasta)(?:\s+(?:boja\s+)?(narukvic\w*|kais\w*|brojcanik\w*|kucist\w*))?\b/g, (_match, color: string, part: string | undefined) => {
-    const qualifier = part?.startsWith('narukvic') || part?.startsWith('kais') ? /narukvic|kais|strap|bracelet/
-      : part?.startsWith('brojcanik') ? /brojcanik|dial/ : part ? /kucist|case/ : null;
-    tests.push((row) => Object.entries(publicAttributes(row.attributes)).some(([key, value]) => /boja|color|colour/.test(normalize(key)) && (!qualifier || qualifier.test(normalize(key))) && canonical(Array.isArray(value) ? value.join(' ') : value).split(' ').includes(color)));
-    labels.push(`${color}${part ? ` ${part}` : ''}`); return ' ';
+  return undefined;
+}
+function booleanAttribute(row:SearchRow,pattern:RegExp,expected:boolean){
+  return Object.entries(publicAttributes(row.attributes)).some(([key,value])=>pattern.test(normalize(key))&&(Array.isArray(value)?value:[value]).some(v=>(expected?/^(da|yes|true|1)$/i:/^(ne|no|false|0)$/i).test(String(v).trim())));
+}
+function colorMatch(row:SearchRow,color:string,part?:string){
+  const qualifier=part==='narukvica'?/narukvic|kais|strap|bracelet/:part==='brojcanik'?/brojcanik|dial/:part==='kuciste'?/kucist|case/:null;
+  return Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/boja|color|colour/.test(normalize(key))&&(!qualifier||qualifier.test(normalize(key)))&&canonical(Array.isArray(value)?value.join(' '):value).split(' ').includes(color));
+}
+function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): Parsed {
+  const conditions:SearchConstraint[]=[];
+  const colorPattern=[...colors].join('|');
+  const whole=prepareQuery(query,custom)
+    .replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+((?:${colorPattern})(?:\\s+ili\\s+(?:${colorPattern}))+)\\b`,'g'),(_match,part:string,choices:string)=>`${choices} ${part}`)
+    .replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+(${colorPattern})\\b`,'g'),(_match,part:string,color:string)=>`${color} ${part}`);
+  let text=whole;
+  const add=(match:string,label:string,test:(row:SearchRow)=>boolean)=>{
+    conditions.push({id:`condition-${conditions.length}`,label,test,query:whole.replace(match,' ').replace(/\s+/g,' ').trim()});
+    return ' ';
+  };
+  const number='(\\d+(?:[.,]\\d+)*(?:\\s*(?:k|hiljada))?)';
+  // Read dimensions before money: "do 40 mm" is never a 40 RSD price.
+  text=text.replace(/\b(?:(?:od|izmedju)\s+)?(\d+(?:[.,]\d+)?)\s*(?:mm\s*)?(?:[-–]|do|i)\s*(\d+(?:[.,]\d+)?)\s*mm\b/g,(match,a:string,b:string)=>{
+    const min=Number(a.replace(',','.')),max=Number(b.replace(',','.'));
+    return add(match,`Prečnik: ${min}–${max} mm`,row=>{const n=numericAttribute(row,/precnik|diameter/);return n!==undefined&&n>=min&&n<=max;});
   });
-  const aliases = [...new Set(facets.flatMap((facet) => facet.aliases))].filter((alias) => !colors.has(alias)).sort((a, b) => b.length - a.length);
-  for (const alias of aliases) {
-    if (!normalized.includes(` ${alias} `)) continue;
-    const matching = facets.filter((facet) => facet.aliases.includes(alias));
-    tests.push((row) => matching.some((facet) => optionMatches(row, facet)));
-    labels.push(matching[0]?.option.label ?? alias); normalized = normalized.split(` ${alias} `).join(' ');
+  text=text.replace(/\b(?:(do|ispod|preko|od)\s+)?(\d+(?:[.,]\d+)?)\s*mm\b/g,(match,direction:string|undefined,raw:string)=>{
+    const n=Number(raw.replace(',','.'));
+    return add(match,`Prečnik ${direction||''} ${n} mm`,row=>{const value=numericAttribute(row,/precnik|diameter/);return value!==undefined&&(direction==='do'||direction==='ispod'?value<=n:direction==='od'||direction==='preko'?value>=n:value===n);});
+  });
+  text=text.replace(/\b(?:tanak|tanki)\b/g,match=>add(match,'Debljina: do 10 mm',row=>{const n=numericAttribute(row,/debljina|thickness/);return n!==undefined&&n<=10;}));
+  text=text.replace(new RegExp(`\\b(?:od|izmedju)\\s+${number}\\s*(?:rsd|din(?:ara|ar|ari|arima)?)?\\s+(?:do|i|-)\\s+${number}\\s*(?:rsd|din(?:ara|ar|ari|arima)?)?\\b`,'g'),(match,a:string,b:string)=>{
+    const min=amount(a),max=amount(b);return add(match,`Cena: ${min/100}–${max/100} RSD`,row=>row.price>=min&&row.price<=max);
+  });
+  text=text.replace(new RegExp(`\\b(do|ispod|od|preko)\\s+${number}\\s*(?:rsd|din(?:ara|ar|ari|arima)?)?\\b`,'g'),(match,direction:string,raw:string)=>{
+    const n=amount(raw),minimum=direction==='od'||direction==='preko';return add(match,`Cena ${minimum?'od':'do'} ${n/100} RSD`,row=>minimum?row.price>=n:row.price<=n);
+  });
+  text=text.replace(/\b(?:na stanju|dostupni|dostupan|dostupna)\b/g,match=>add(match,'Na stanju',row=>row.in_stock));
+  text=text.replace(/\b(?:vodootpornost\s+)?(\d+)\s*(atm|bar|m)\b/g,(match,n:string,unit:string)=>{
+    const atm=unit==='m'?Number(n)/10:Number(n);
+    return add(match,`Vodootpornost: ${atm} ATM (oznaka)`,row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/vodootpor|water/.test(normalize(key))&&(Array.isArray(value)?value:[value]).some(v=>{
+      const m=String(v).toLowerCase().match(/(\d+(?:[.,]\d+)?)\s*(atm|bar|m)\b/);return m&&Number(m[1]!.replace(',','.'))/(m[2]==='m'?10:1)===atm;
+    })));
+  });
+  text=text.replace(/\b(bez|sa)\s+datum\b/g,(match,mode:string)=>add(match,mode==='bez'?'Bez datuma':'Sa datumom',row=>booleanAttribute(row,/^datum$|^date$/,mode==='sa')));
+  text=text.replace(/\b(?:rucno navijanje|mehanicki)\b/g,(match)=>add(match,match==='mehanicki'?'Mehanički (ručni ili automatski)':'Ručno navijanje',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/tip.*mehaniz|movement.*type/.test(normalize(key))&&(/rucn|manual|hand|mehanick/.test(canonical(value))||(match==='mehanicki'&&/automat/.test(canonical(value)))))));
+  text=text.replace(/\b(?:nerdjajuci\s+)?celik\b/g,match=>add(match,'Nerđajući čelik',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/materijal|narukvic|kucist|material/.test(normalize(key))&&!/boja|color/.test(normalize(key))&&/celik|stainless|steel/.test(canonical(value)))));
+  text=text.replace(/\bmetal\b/g,match=>add(match,'Metalna narukvica / kućište',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/materijal|narukvic|kucist|material/.test(normalize(key))&&!/boja|color/.test(normalize(key))&&/metal|celik|titan|mesing|steel/.test(canonical(value)))));
+  text=text.replace(/\bdvobojni\b/g,match=>add(match,'Dvobojni',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>{
+    const text=canonical(value);return /dvoboj|bicolor|two tone/.test(text)||(/boja|color/.test(normalize(key))&&/narukvic|kucist|strap|case/.test(normalize(key))&&[...colors].filter(color=>text.split(' ').includes(color)).length>=2);
+  })));
+  text=text.replace(/\bvodootpornost\b/g,match=>add(match,'Vodootpornost navedena',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/vodootpor|water/.test(normalize(key))&&Number.parseFloat(String(value))>0)));
+  // Group adjacent alternatives into one OR condition, rather than requiring both brands/colors.
+  const aliases=[...new Set(facets.flatMap(f=>f.aliases))].filter(a=>!colors.has(a)).sort((a,b)=>b.length-a.length);
+  const orAliases=[...aliases,...colors,'muski','zenski','unisex'];
+  if(orAliases.length){
+    const atom=`(?:${orAliases.map(escapePattern).join('|')})`;
+    text=text.replace(new RegExp(`\\b(${atom}(?:\\s+ili\\s+${atom})+)(?:\\s+(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,choices:string,part:string|undefined)=>{
+      const list=choices.split(/\s+ili\s+/);
+      return add(match,list.join(' ili ')+(part?` · ${part}`:''),row=>list.some(alias=>colors.has(alias)?colorMatch(row,alias,part):['muski','zenski','unisex'].includes(alias)?canonical(row.gender)===alias||canonical(row.gender)==='unisex':facets.some(f=>f.aliases.includes(alias)&&optionMatches(row,f))));
+    });
   }
-  const terms = normalized.trim().split(/\s+/).filter(Boolean);
-  // Department words are meaningful constraints, not stop words.
-  for (const department of departments) {
-    if (terms.includes(department)) { tests.push((row) => row.department === department); labels.push(department); }
+  for(const gender of ['muski','zenski','unisex']){
+    text=text.replace(new RegExp(`\\b${gender}\\b`,'g'),match=>add(match,gender==='muski'?'Muški':gender==='zenski'?'Ženski':'Unisex',row=>canonical(row.gender)===gender||(gender!=='unisex'&&canonical(row.gender)==='unisex')));
   }
-  const remainder = terms.filter((term) => !departments.some((department) => department === term));
-  return { tests, terms: remainder, labels: [...new Set(labels)], model: remainder.some((term) => /[a-z]/.test(term) && /\d/.test(term)) ? remainder.join('') : '' };
+  const colorWords=[...colors].join('|');
+  // Accept both "crni brojčanik" and "brojčanik crni".
+  text=text.replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+(${colorWords})\\b`,'g'),(_match,part:string,color:string)=>`${color} ${part}`);
+  text=text.replace(new RegExp(`\\b(?:(bez|nije)\\s+)?(${colorWords})(?:\\s+(?:boja\\s+)?(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,negative:string|undefined,color:string,part:string|undefined)=>add(match,`${negative?'Bez: ':''}${color}${part?` · ${part}`:''}`,row=>negative?!colorMatch(row,color,part):colorMatch(row,color,part)));
+  for(const alias of aliases){
+    text=text.replace(new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`,'g'),(match,negative:string|undefined)=>{
+      const matching=facets.filter(f=>f.aliases.includes(alias));
+      return add(match,`${negative?'Bez: ':''}${matching[0]?.option.label??alias}`,row=>negative?!matching.some(f=>optionMatches(row,f)):matching.some(f=>optionMatches(row,f)));
+    });
+  }
+  let terms=normalize(text).split(/\s+/).filter(Boolean);
+  for(const department of departments){
+    if(terms.includes(department)){add(department,department,row=>row.department===department);terms=terms.filter(t=>t!==department);}
+  }
+  const stop=new Set(['trazim','zelim','treba','mi','molim','neki','neka','neko','satovi','sa','s','za','na','od','i','ili','koji','koja','koje','ima','imaju','looking','for','a','the','please','find','show','me','watch','boja','narukvica','brojcanik','kuciste','vodootpornost','staklo','text','model','modeli','want','need','zaista']);
+  terms=terms.filter(t=>!stop.has(t));
+  // Compact split model codes before matching, without changing ordinary numeric price/dimension conditions.
+  if(terms.some(t=>/\d/.test(t))&&terms.every(t=>/^[a-z0-9]+$/.test(t))) {
+    const joined=terms.join('');
+    if(/^(?:dk|ra|cr|sr|lr|ag|r|ae|a|f|w|mtp|lq|ga|gma|ecb)\d/i.test(joined))terms=[joined];
+  }
+  return {tests:conditions.map(c=>c.test),terms,labels:conditions.map(c=>c.label),conditions,model:terms.some(t=>/[a-z]/.test(t)&&/\d/.test(t))?terms.join(''):''};
 }
 function rank(entry: Entry, parsed: Parsed, query: string): number | null {
   if (!parsed.tests.every((test) => test(entry.row))) return null;
@@ -300,43 +403,61 @@ function distance(a: string, b: string, maximum: number): number {
   }
   return previous[b.length]!;
 }
-async function corrections(pool: Pool, organizationId: string, query: string, parsed: Parsed, entries: Entry[], facets: Facet[]) {
-  const needle = parsed.model || compact(parsed.terms.join(' ') || query);
-  if (needle.length < 4) return [];
-  // pg_trgm provides a bounded shortlist, followed by a strict edit-distance
-  // check. Approximate matches never enter the exact result list.
-  const result = await pool.query<{ name: string; sku: string | null; mpn: string | null }>(`SELECT p.name, v.sku, v.mpn FROM products p
-    JOIN product_variants v ON v.product_id = p.id AND v.organization_id = p.organization_id
-    WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published
-      AND v.deleted_at IS NULL AND v.active AND v.published
-      AND (similarity(p.normalized_name, $2) >= 0.2 OR similarity(COALESCE(v.sku, ''), $2) >= 0.2 OR similarity(COALESCE(v.mpn, ''), $2) >= 0.2)
-    ORDER BY GREATEST(similarity(p.normalized_name, $2), similarity(COALESCE(v.sku, ''), $2), similarity(COALESCE(v.mpn, ''), $2)) DESC LIMIT 40`, [organizationId, parsed.model || parsed.terms.join(' ') || query]);
-  const allowed = new Set(entries.map((entry) => entry.row.name));
-  const maximum = needle.length >= 8 ? 2 : 1;
-  const candidates = result.rows.filter((row) => allowed.has(row.name)).map((row) => {
-    const alternatives = [row.name, row.sku, row.mpn].filter((value): value is string => Boolean(value));
-    const best = alternatives.map((value) => ({ value, distance: distance(needle, compact(value), maximum) })).sort((a, b) => a.distance - b.distance)[0]!;
-    return { query: best.value, label: row.name, distance: best.distance };
-  });
-  if (!parsed.model) {
-    for (const entry of entries) for (const value of [entry.row.brand, entry.row.category]) {
-      if (value) candidates.push({ query: value, label: value, distance: distance(needle, compact(value), maximum) });
+interface WordFix { query:string; label:string; safe:boolean; cost:number; token:string }
+function wordCorrections(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]):WordFix[]{
+  const text=prepareQuery(query,custom);
+  const vocabulary=new Map<string,string>();
+  const add=(alias:string,target:string)=>{if(alias.length>=3&&!/\d/.test(alias))vocabulary.set(alias,target);};
+  for(const [alias,target] of Object.entries(synonyms))if(!target.includes(' '))add(alias,target);
+  for(const facet of facets)for(const alias of facet.aliases)for(const word of alias.split(' '))add(word,word);
+  for(const entry of entries)for(const word of `${entry.brand} ${entry.category} ${entry.specs} ${entry.features}`.split(' '))if(word.length<=30)add(word,word);
+  const unresolved=new Set(parseQuery(text,facets).terms);
+  const tokens=text.match(/[a-z0-9]+/g)||[];
+  const fixes:WordFix[]=[];
+  for(const token of [...new Set(tokens)]){
+    // Model numbers and short brand abbreviations require explicit user confirmation.
+    if(!unresolved.has(token)||/\d/.test(token)||token.length<4||vocabulary.has(token)||['trazim','zelim','treba','please','looking','izmedju','hiljada','stanju','navijanje'].includes(token))continue;
+    const swapped=token.replace(/[yz]/g,c=>c==='y'?'z':'y');
+    const maximum=token.length>=7?3:token.length>=5?2:1;
+    const matches=new Map<string,number>();
+    for(const [alias,target] of vocabulary){
+      const cost=alias===swapped?1:distance(token,alias,maximum);
+      if(cost<=maximum)matches.set(target,Math.min(matches.get(target)??Infinity,cost));
     }
-    for (const facet of facets) {
-      if (!entries.some((entry) => optionMatches(entry.row, facet))) continue;
-      const label = /^(da|yes|true|1)$/i.test(facet.option.label) ? facet.node.title : facet.option.label;
-      for (const alias of facet.aliases) candidates.push({ query: label, label, distance: distance(needle, compact(alias), maximum) });
+    // Missing space: only join two known words, never invent a product code.
+    for(let i=3;i<=token.length-3;i++)if(vocabulary.has(token.slice(0,i))&&vocabulary.has(token.slice(i)))matches.set(`${vocabulary.get(token.slice(0,i))} ${vocabulary.get(token.slice(i))}`,1);
+    const best=[...matches].sort((a,b)=>a[1]-b[1]||a[0].localeCompare(b[0],'sr')).slice(0,3);
+    for(const [candidate,cost] of best){
+      const safe=(cost<=2||(cost===3&&candidate.slice(0,2)===token.slice(0,2)))&&(best.length===1||best[1]![1]>cost);
+      fixes.push({query:text.replace(new RegExp(`\\b${escapePattern(token)}\\b`,'g'),candidate),label:candidate,safe,cost,token});
     }
   }
-  return candidates.filter((candidate) => candidate.distance > 0 && candidate.distance <= maximum).sort((a, b) => a.distance - b.distance || a.label.localeCompare(b.label))
-    .filter((candidate, index, all) => all.findIndex((other) => canonical(other.query) === canonical(candidate.query)) === index).slice(0, 3).map(({ label, query: corrected }) => {
-      // Retain recognized price/gender/other conditions when fixing one model
-      // or word, rather than silently replacing the entire combined query.
-      const pattern = parsed.terms.length ? new RegExp(parsed.terms.join('[\\s_-]*'), 'i') : null;
-      const replacement = pattern ? query.replace(pattern, () => corrected) : corrected;
-      return { label, query: (replacement === query ? corrected : replacement).slice(0, 120) };
-    });
+  return fixes.sort((a,b)=>a.cost-b.cost);
 }
+function modelCorrections(query:string,parsed:Parsed,entries:Entry[]):Array<{label:string;query:string}>{
+  if(!parsed.model&&!parsed.terms.some(t=>/\d/.test(t)))return [];
+  const needle=compact(parsed.model||parsed.terms.join(' '));
+  const maximum=needle.length>=8?2:1;
+  return entries.map(entry=>({entry,cost:Math.min(...entry.codes.map(code=>distance(needle,code,maximum)))}))
+    .filter(v=>v.cost>0&&v.cost<=maximum).sort((a,b)=>a.cost-b.cost).slice(0,3).map(v=>({label:v.entry.row.name,query:query.replace(new RegExp(parsed.terms.map(escapePattern).join('[\\s_-]*'),'i'),v.entry.row.name)}));
+}
+function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]){
+  const base=prepareQuery(query,custom),result:Array<{label:string;query:string;count:number}>=[];
+  if(!base||/\b(?:bez|nije)\b/.test(base))return result;
+  const baseParsed=parseQuery(base,facets,custom);
+  const matching=entries.filter(entry=>rank(entry,baseParsed,base)!==null);
+  if(!matching.length)return result;
+  const candidates=facets.map(facet=>({facet,count:matching.filter(entry=>optionMatches(entry.row,facet)).length})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
+  for(const {facet} of candidates){
+    const label=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
+    if(facet.aliases.some(a=>` ${canonical(base)} `.includes(` ${a} `)))continue;
+    const next=`${base} ${label}`.slice(0,120),parsed=parseQuery(next,facets,custom);
+    const count=entries.filter(entry=>rank(entry,parsed,next)!==null).length;
+    if(count&&!result.some(r=>canonical(r.query)===canonical(next)))result.push({label:next,query:next,count});
+  }
+  return result.sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label,'sr')).slice(0,5);
+}
+
 function cursorOffset(cursor: string | undefined, key: string): number {
   if (!cursor) return 0;
   try {
@@ -345,39 +466,86 @@ function cursorOffset(cursor: string | undefined, key: string): number {
     return decoded.offset!;
   } catch { throw new ValidationFailedError('Neispravan kursor pretrage.'); }
 }
-function seeded(seed: string, id: string) { return createHash('sha256').update(`${seed}:${id}`).digest('hex'); }
-
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
-  const data = await snapshot(pool, organizationId);
-  const scope = data.entries.filter((entry) => !input.department || entry.row.department === input.department);
-  const facets = data.facets.filter((facet) => !input.department || facet.department === input.department);
-  const query = input.q.length >= 2 ? canonical(input.q) : '';
-  const parsed = parseQuery(input.q.length >= 2 ? input.q : '', facets);
-  const ranked = query ? scope.map((entry) => ({ entry, score: rank(entry, parsed, input.q) })).filter((item): item is { entry: Entry; score: number } => item.score !== null) : [];
-  ranked.sort((a, b) => {
-    const priceDifference = Number(a.entry.row.price) - Number(b.entry.row.price);
-    if (input.sort !== 'relevance' && priceDifference) return input.sort === 'price_asc' ? priceDifference : -priceDifference;
-    return b.score - a.score || Number(b.entry.row.department === 'satovi') - Number(a.entry.row.department === 'satovi') || a.entry.row.name.localeCompare(b.entry.row.name, 'sr-Latn', { numeric: true }) || a.entry.row.id.localeCompare(b.entry.row.id);
+  const data=await snapshot(pool,organizationId);
+  const scope=data.entries.filter(entry=>!input.department||entry.row.department===input.department);
+  const facets=data.facets.filter(f=>!input.department||f.department===input.department);
+  const raw=input.q.length>=2?input.q:'';
+  let effective=prepareQuery(raw,data.synonyms),parsed=parseQuery(raw,facets,data.synonyms);
+  const find=(p:Parsed,q:string)=>scope.map(entry=>({entry,score:rank(entry,p,q)})).filter((v):v is {entry:Entry;score:number}=>v.score!==null);
+  let ranked=raw?find(parsed,effective):[];
+  const exactEmpty=Boolean(raw&&!ranked.length);
+  const fixes=exactEmpty?wordCorrections(raw,scope,facets,data.synonyms):[];
+  const corrected:Array<{label:string;query:string}>=[];
+  let appliedCorrection:CatalogSearchResponse['appliedCorrection']=null;
+  if(exactEmpty){
+    // Apply only unambiguous word corrections that actually yield matching catalog products.
+    let candidate=effective;
+    for(let pass=0;pass<4;pass++){
+      const safe=wordCorrections(candidate,scope,facets,[]).find(f=>f.safe&&f.query!==candidate);
+      if(!safe)break;candidate=safe.query;
+      const next=parseQuery(candidate,facets),matches=find(next,candidate);
+      if(matches.length){if(input.literal!=='yes'){effective=candidate;parsed=next;ranked=matches;appliedCorrection={query:candidate,original:input.q};}break;}
+    }
+    for(const fix of fixes){if(find(parseQuery(fix.query,facets),fix.query).length&&!corrected.some(c=>c.query===fix.query))corrected.push({label:fix.query,query:fix.query});}
+    // Bounded combinations cover several misspelled words without dropping other conditions.
+    if(!corrected.length&&!ranked.length){
+      let beam:Array<{query:string;cost:number}>=[{query:effective,cost:0}];
+      const seen=new Set<string>([effective]);
+      for(let depth=0;depth<4&&beam.length&&corrected.length<3;depth++){
+        const next:Array<{query:string;cost:number}>=[];
+        for(const node of beam){
+          const options=wordCorrections(node.query,scope,facets,[]),token=options[0]?.token;
+          for(const fix of options.filter(f=>f.token===token).slice(0,3)){
+            if(seen.has(fix.query))continue;seen.add(fix.query);
+            if(find(parseQuery(fix.query,facets),fix.query).length)corrected.push({label:fix.query,query:fix.query});
+            else next.push({query:fix.query,cost:node.cost+fix.cost});
+          }
+        }
+        beam=next.sort((a,b)=>a.cost-b.cost).slice(0,8);
+      }
+    }
+    corrected.push(...modelCorrections(effective,parsed,scope));
+  }
+  ranked.sort((a,b)=>{
+    const price=a.entry.row.price-b.entry.row.price;
+    if(input.sort!=='relevance'&&price)return input.sort==='price_asc'?price:-price;
+    return b.score-a.score||Number(b.entry.row.in_stock)-Number(a.entry.row.in_stock)||a.entry.row.name.localeCompare(b.entry.row.name,'sr-Latn',{numeric:true})||a.entry.row.id.localeCompare(b.entry.row.id);
   });
-  const key = createHash('sha256').update(JSON.stringify([organizationId, input.q, input.department, input.sort])).digest('hex').slice(0, 24);
-  const offset = input.mode === 'results' ? cursorOffset(input.cursor, key) : 0;
-  const size = input.mode === 'results' ? 24 : 6;
-  const selected = ranked.slice(offset, offset + size).map(({ entry }) => entry.row.id);
-  const recommended = query && !ranked.length ? data.entries.filter((entry) => entry.row.department === 'satovi')
-    .sort((a, b) => Number(b.row.in_stock) - Number(a.row.in_stock) || seeded(input.seed, a.row.id).localeCompare(seeded(input.seed, b.row.id))).slice(0, 6).map((entry) => entry.row.id) : [];
-  const ids = [...new Set([...selected, ...recommended])];
-  const cards = ids.length ? (await new CatalogRepository(pool).listPublicProducts({ organizationId }, { productIds: ids, limit: ids.length })).items : [];
-  const byId = new Map(cards.map((card) => [card.productId, card]));
-  const ordered = (keys: string[]) => keys.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
-  const groups = suggestions(facets, query ? ranked.map(({ entry }) => entry) : scope, query);
-  const departmentCounts = departments.map((department) => ({ id: department, count: ranked.filter(({ entry }) => entry.row.department === department).length }));
+  const key=createHash('sha256').update(JSON.stringify([organizationId,input.q,effective,input.department,input.sort,input.literal])).digest('hex').slice(0,24);
+  const offset=input.mode==='results'?cursorOffset(input.cursor,key):0,size=input.mode==='results'?24:6;
+  const selected=ranked.slice(offset,offset+size).map(v=>v.entry.row.id);
+  // Similar products relax exactly one explicit condition. Never silently relax codes or words.
+  const alternatives:Array<{id:string;reason:string;score:number}>=[];
+  if(raw&&!parsed.model&&parsed.conditions.length){
+    for(let i=0;i<parsed.conditions.length;i++){
+      if(departments.some(d=>d===parsed.conditions[i]!.label)||parsed.conditions[i]!.label==='Na stanju'||parsed.conditions[i]!.label.startsWith('Bez'))continue;
+      const relaxed={...parsed,tests:parsed.tests.filter((_,j)=>j!==i)};
+      for(const result of find(relaxed,effective)){
+        if(ranked.some(r=>r.entry.row.id===result.entry.row.id)||alternatives.some(a=>a.id===result.entry.row.id))continue;
+        alternatives.push({id:result.entry.row.id,reason:`Ne ispunjava uslov: ${parsed.conditions[i]!.label}`,score:result.score});
+      }
+    }
+  }
+  alternatives.sort((a,b)=>b.score-a.score);const nearby=alternatives.slice(0,6);
+  const ids=[...new Set([...selected,...nearby.map(a=>a.id)])];
+  const cards=ids.length?(await new CatalogRepository(pool).listPublicProducts({organizationId},{productIds:ids,limit:ids.length})).items:[];
+  const byId=new Map(cards.map(card=>[card.productId,card]));
+  const ordered=(keys:string[])=>keys.flatMap(id=>byId.has(id)?[byId.get(id)!]:[]);
+  const groups=suggestions(facets,raw?ranked.map(v=>v.entry):scope,canonical(effective));
+  if(exactEmpty&&input.track==='yes'&&input.mode==='results'&&!input.cursor){
+    // Analytics failures must not make public search fail.
+    await recordSearchMiss(pool,organizationId,raw,input.department||'').catch(()=>undefined);
+  }
   return {
-    query: input.q, normalizedQuery: query, recognized: parsed.labels,
-    intent: parsed.model ? 'products' : groups.brands.length ? 'brands' : groups.collections.length ? 'collections' : 'products',
-    groups, items: ordered(selected), total: ranked.length, departments: departmentCounts,
-    corrections: query && !ranked.length ? await corrections(pool, organizationId, input.q, parsed, scope, facets) : [],
-    recommendations: ordered(recommended),
-    message: query && !ranked.length ? parsed.model ? 'Nemamo taj model ili oznaka nije tačno ukucana.' : 'Nema rezultata za ovu pretragu.' : null,
-    nextCursor: offset + size < ranked.length ? Buffer.from(JSON.stringify({ key, offset: offset + size })).toString('base64url') : null
+    query:input.q,normalizedQuery:canonical(effective),recognized:parsed.labels,
+    conditions:parsed.conditions.map(({id,label,query})=>({id,label,query})),appliedCorrection,
+    completions:raw&&input.mode==='suggestions'?completionQueries(effective,scope,facets,[]):[],
+    similar:nearby.flatMap(a=>byId.has(a.id)?[{product:byId.get(a.id)!,reason:a.reason}]:[]),
+    intent:parsed.model?'products':groups.brands.length?'brands':groups.collections.length?'collections':'products',
+    groups,items:ordered(selected),total:ranked.length,departments:departments.map(d=>({id:d,count:ranked.filter(v=>v.entry.row.department===d).length})),
+    corrections:corrected.slice(0,3),recommendations:[],
+    message:raw&&!ranked.length?parsed.model?'Nemamo taj model ili oznaka nije tačno ukucana.':'Nema rezultata koji ispunjavaju sve uslove.':null,
+    nextCursor:offset+size<ranked.length?Buffer.from(JSON.stringify({key,offset:offset+size})).toString('base64url'):null
   };
 }
