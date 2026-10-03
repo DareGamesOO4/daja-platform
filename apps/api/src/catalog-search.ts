@@ -41,7 +41,7 @@ export interface CatalogSearchResponse {
   normalizedQuery: string;
   recognized: string[];
   conditions: Array<{id:string;label:string;query:string}>;
-  appliedCorrection: {query:string;original:string} | null;
+  appliedCorrection: {query:string;label:string;original:string} | null;
   completions: Array<{label:string;query:string;count:number}>;
   similar: Array<{product:PublicProductCard;reason:string}>;
   intent: 'products' | 'brands' | 'collections';
@@ -285,7 +285,7 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
   });
   text=text.replace(/\b(?:(do|ispod|preko|od)\s+)?(\d+(?:[.,]\d+)?)\s*mm\b/g,(match,direction:string|undefined,raw:string)=>{
     const n=Number(raw.replace(',','.'));
-    return add(match,`Prečnik ${direction||''} ${n} mm`,row=>{const value=numericAttribute(row,/precnik|diameter/);return value!==undefined&&(direction==='do'||direction==='ispod'?value<=n:direction==='od'||direction==='preko'?value>=n:value===n);});
+    return add(match,`Prečnik: ${direction?direction+' ':''}${n} mm`,row=>{const value=numericAttribute(row,/precnik|diameter/);return value!==undefined&&(direction==='do'||direction==='ispod'?value<=n:direction==='od'||direction==='preko'?value>=n:value===n);});
   });
   text=text.replace(/\b(?:tanak|tanki)\b/g,match=>add(match,'Debljina: do 10 mm',row=>{const n=numericAttribute(row,/debljina|thickness/);return n!==undefined&&n<=10;}));
   text=text.replace(new RegExp(`\\b(?:od|izmedju)\\s+${number}\\s*(?:rsd|din(?:ara|ar|ari|arima)?)?\\s+(?:do|i|-)\\s+${number}\\s*(?:rsd|din(?:ara|ar|ari|arima)?)?\\b`,'g'),(match,a:string,b:string)=>{
@@ -316,7 +316,7 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
     const atom=`(?:${orAliases.map(escapePattern).join('|')})`;
     text=text.replace(new RegExp(`\\b(${atom}(?:\\s+ili\\s+${atom})+)(?:\\s+(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,choices:string,part:string|undefined)=>{
       const list=choices.split(/\s+ili\s+/);
-      return add(match,list.join(' ili ')+(part?` · ${part}`:''),row=>list.some(alias=>colors.has(alias)?colorMatch(row,alias,part):['muski','zenski','unisex'].includes(alias)?canonical(row.gender)===alias||canonical(row.gender)==='unisex':facets.some(f=>f.aliases.includes(alias)&&optionMatches(row,f))));
+      return add(match,(part?`Boja ${part==='narukvica'?'narukvice':part==='brojcanik'?'brojčanika':'kućišta'}: `:'')+list.map(alias=>displayValue(facets.find(f=>f.aliases.includes(alias)&&f.kind!=='attributes')?.option.label??alias)).join(' ili '),row=>list.some(alias=>colors.has(alias)?colorMatch(row,alias,part):['muski','zenski','unisex'].includes(alias)?canonical(row.gender)===alias||canonical(row.gender)==='unisex':facets.some(f=>f.aliases.includes(alias)&&optionMatches(row,f))));
     });
   }
   for(const gender of ['muski','zenski','unisex']){
@@ -325,16 +325,18 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
   const colorWords=[...colors].join('|');
   // Accept both "crni brojčanik" and "brojčanik crni".
   text=text.replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+(${colorWords})\\b`,'g'),(_match,part:string,color:string)=>`${color} ${part}`);
-  text=text.replace(new RegExp(`\\b(?:(bez|nije)\\s+)?(${colorWords})(?:\\s+(?:boja\\s+)?(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,negative:string|undefined,color:string,part:string|undefined)=>add(match,`${negative?'Bez: ':''}${color}${part?` · ${part}`:''}`,row=>negative?!colorMatch(row,color,part):colorMatch(row,color,part)));
+  text=text.replace(new RegExp(`\\b(?:(bez|nije)\\s+)?(${colorWords})(?:\\s+(?:boja\\s+)?(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,negative:string|undefined,color:string,part:string|undefined)=>add(match,`${negative?'Isključena boja':'Boja'}${part?` ${part==='narukvica'?'narukvice':part==='brojcanik'?'brojčanika':'kućišta'}`:''}: ${displayValue(color)}`,row=>negative?!colorMatch(row,color,part):colorMatch(row,color,part)));
   for(const alias of aliases){
     text=text.replace(new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`,'g'),(match,negative:string|undefined)=>{
       const matching=facets.filter(f=>f.aliases.includes(alias));
-      return add(match,`${negative?'Bez: ':''}${matching[0]?.option.label??alias}`,row=>negative?!matching.some(f=>optionMatches(row,f)):matching.some(f=>optionMatches(row,f)));
+      const facet=matching[0];
+      const label=facet&&/^(da|ne|yes|no|true|false|0|1)$/i.test(facet.option.label)?`${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':'Ne'}`:displayValue(facet?.option.label??alias);
+      return add(match,`${negative?'Bez: ':''}${label}`,row=>negative?!matching.some(f=>optionMatches(row,f)):matching.some(f=>optionMatches(row,f)));
     });
   }
   let terms=normalize(text).split(/\s+/).filter(Boolean);
   for(const department of departments){
-    if(terms.includes(department)){add(department,department,row=>row.department===department);terms=terms.filter(t=>t!==department);}
+    if(terms.includes(department)){add(department,displayValue(department),row=>row.department===department);terms=terms.filter(t=>t!==department);}
   }
   const stop=new Set(['trazim','zelim','treba','mi','molim','neki','neka','neko','satovi','sa','s','za','na','od','i','ili','koji','koja','koje','ima','imaju','looking','for','a','the','please','find','show','me','watch','boja','narukvica','brojcanik','kuciste','vodootpornost','staklo','text','model','modeli','want','need','zaista']);
   terms=terms.filter(t=>!stop.has(t));
@@ -441,6 +443,76 @@ function modelCorrections(query:string,parsed:Parsed,entries:Entry[]):Array<{lab
   return entries.map(entry=>({entry,cost:Math.min(...entry.codes.map(code=>distance(needle,code,maximum)))}))
     .filter(v=>v.cost>0&&v.cost<=maximum).sort((a,b)=>a.cost-b.cost).slice(0,3).map(v=>({label:v.entry.row.name,query:query.replace(new RegExp(parsed.terms.map(escapePattern).join('[\\s_-]*'),'i'),v.entry.row.name)}));
 }
+// Canonical tokens are for matching only. Customer-facing suggestions use Serbian agreement.
+const colorForms: Record<string, [string, string, string, string]> = {
+  bela:['beli','bele','belim','belom'], crna:['crni','crne','crnim','crnom'],
+  plava:['plavi','plave','plavim','plavom'], zelena:['zeleni','zelene','zelenim','zelenom'],
+  crvena:['crveni','crvene','crvenim','crvenom'], srebrna:['srebrni','srebrne','srebrnim','srebrnom'],
+  zlatna:['zlatni','zlatne','zlatnim','zlatnom'], siva:['sivi','sive','sivim','sivom'],
+  ljubicasta:['ljubičasti','ljubičaste','ljubičastim','ljubičastom'],
+  narandzasta:['narandžasti','narandžaste','narandžastim','narandžastom'],
+  zuta:['žuti','žute','žutim','žutom'], braon:['braon','braon','braon','braon'],
+  bez:['bež','bež','bež','bež'], krem:['krem','krem','krem','krem'],
+  bordo:['bordo','bordo','bordo','bordo'], roze:['roze','roze','roze','roze']
+};
+const adjectiveForms: Record<string, [string, string]> = {
+  muski:['muški','muške'], zenski:['ženski','ženske'], unisex:['unisex','unisex'],
+  automatski:['automatski','automatske'], kvarc:['kvarcni','kvarcne'],
+  okrugao:['okrugli','okrugle'], pravougaoni:['pravougaoni','pravougaone'],
+  kvadratni:['kvadratni','kvadratne'], elegantni:['elegantni','elegantne'],
+  sportski:['sportski','sportske'], svakodnevni:['svakodnevni','svakodnevne'],
+  analogni:['analogni','analogne'], digitalni:['digitalni','digitalne'], dvobojni:['dvobojni','dvobojne']
+};
+const displayWords: Record<string,string> = {
+  naocare:'naočare', kuciste:'kućište', brojcanik:'brojčanik', datum:'datum',
+  rucno:'ručno', mehanicki:'mehanički', nerdjajuci:'nerđajući', celik:'čelik',
+  koza:'koža', ljubicasta:'ljubičasta', narandzasta:'narandžasta', zuta:'žuta',
+  muski:'muški', zenski:'ženski', bez:'bez'
+};
+function displayValue(value:string):string {
+  return value.replace(/[A-Za-z]+/g, word => {
+    const replacement=displayWords[word.toLowerCase()];
+    return replacement ? (word[0]===word[0]?.toUpperCase()?replacement[0]!.toUpperCase()+replacement.slice(1):replacement) : word;
+  });
+}
+function colorPhrase(color:string,part:string):string {
+  const forms=colorForms[color];
+  if(!forms)return displayValue(color);
+  return part==='narukvica'?`sa ${forms[3]} narukvicom`:part==='brojcanik'?`sa ${forms[2]} brojčanikom`:`sa ${forms[2]} kućištem`;
+}
+function displaySearchQuery(query:string,facets:Facet[],departmentHint?:string):string {
+  let text=prepareQuery(query);
+  const parts:string[]=[];
+  // Keep negation and alternatives as explicit conditions rather than rewriting their meaning.
+  if(/\b(?:bez|nije|ili)\b/.test(text)) {
+    const parsed=parseQuery(text,facets);
+    return [...parsed.labels,...parsed.terms.map(displayValue)].join(' · ');
+  }
+  text=text.replace(new RegExp(`\\b(?:sa\\s+)?(${[...colors].join('|')})\\s+(narukvica|brojcanik|kuciste)\\b`,'g'),(_match,color:string,part:string)=>{parts.push(colorPhrase(color,part));return ' ';});
+  text=text.replace(/\b(?:sa\s+)?datum\b/g,()=>{parts.push('sa datumom');return ' ';});
+  const tokens=text.split(/\s+/).filter(Boolean);
+  const department=tokens.find(token=>(departments as readonly string[]).includes(token))||departmentHint;
+  if(department){
+    const feminine=department==='naocare'||department==='baterije';
+    const adjectives:string[]=[];
+    const remaining=tokens.filter(token=>{
+      const forms=colorForms[token]||adjectiveForms[token];
+      if(forms){adjectives.push(forms[feminine?1:0]);return false;}
+      return token!==department;
+    });
+    const remainder=parseQuery(remaining.join(' '),facets);
+    const details=[...remainder.labels,...remainder.terms.map(displayValue)];
+    text=[[...adjectives,displayValue(department),...parts].join(' '),...details].join(' · ');
+  }else {
+    const parsed=parseQuery(text,facets);
+    text=[...parsed.labels,...parsed.terms.map(displayValue),...parts].join(' · ');
+  }
+  // Preserve the configured spelling of brands and collections, including model names.
+  for(const facet of facets.filter(f=>f.kind!=='attributes'))for(const alias of facet.aliases){
+    if(alias)text=text.replace(new RegExp(`(?<![a-z0-9])${escapePattern(alias)}(?![a-z0-9])`,'gi'),()=>facet.option.label);
+  }
+  return text.replace(/\s+/g,' ').trim();
+}
 function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]){
   const base=prepareQuery(query,custom),result:Array<{label:string;query:string;count:number}>=[];
   if(!base||/\b(?:bez|nije)\b/.test(base))return result;
@@ -449,11 +521,19 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
   if(!matching.length)return result;
   const candidates=facets.map(facet=>({facet,count:matching.filter(entry=>optionMatches(entry.row,facet)).length})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
   for(const {facet} of candidates){
-    const label=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
+    const value=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
     if(facet.aliases.some(a=>` ${canonical(base)} `.includes(` ${a} `)))continue;
-    const next=`${base} ${label}`.slice(0,120),parsed=parseQuery(next,facets,custom);
+    const token=canonical(value);
+    const source=normalize(facet.option.conditions.map(condition=>condition.source).join(' '));
+    const part=colors.has(token)?(/narukvic/.test(source)?'narukvica':/brojcanik/.test(source)?'brojcanik':/kucist/.test(source)?'kuciste':undefined):undefined;
+    const addition=part?`${token} ${part}`:value;
+    const next=`${base} ${addition}`.slice(0,120),parsed=parseQuery(next,facets,custom);
     const count=entries.filter(entry=>rank(entry,parsed,next)!==null).length;
-    if(count&&!result.some(r=>canonical(r.query)===canonical(next)))result.push({label:next,query:next,count});
+    let label=displaySearchQuery(next,facets,facet.department);
+    if(token==='dan u nedelji')label=`${displaySearchQuery(base,facets,facet.department)} sa prikazom dana u nedelji`;
+    else if(token==='datum')label=`${displaySearchQuery(base,facets,facet.department)} sa datumom`;
+    else if(!part&&!colorForms[token]&&!adjectiveForms[token])label=`${displaySearchQuery(base,facets,facet.department)} · ${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':displayValue(value)}`;
+    if(count&&!result.some(r=>canonical(r.query)===canonical(next)||r.label===label))result.push({label,query:next,count});
   }
   return result.sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label,'sr')).slice(0,5);
 }
@@ -485,9 +565,9 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
       const safe=wordCorrections(candidate,scope,facets,[]).find(f=>f.safe&&f.query!==candidate);
       if(!safe)break;candidate=safe.query;
       const next=parseQuery(candidate,facets),matches=find(next,candidate);
-      if(matches.length){if(input.literal!=='yes'){effective=candidate;parsed=next;ranked=matches;appliedCorrection={query:candidate,original:input.q};}break;}
+      if(matches.length){if(input.literal!=='yes'){effective=candidate;parsed=next;ranked=matches;appliedCorrection={query:candidate,label:displaySearchQuery(candidate,facets),original:input.q};}break;}
     }
-    for(const fix of fixes){if(find(parseQuery(fix.query,facets),fix.query).length&&!corrected.some(c=>c.query===fix.query))corrected.push({label:fix.query,query:fix.query});}
+    for(const fix of fixes){if(find(parseQuery(fix.query,facets),fix.query).length&&!corrected.some(c=>c.query===fix.query))corrected.push({label:displaySearchQuery(fix.query,facets),query:fix.query});}
     // Bounded combinations cover several misspelled words without dropping other conditions.
     if(!corrected.length&&!ranked.length){
       let beam:Array<{query:string;cost:number}>=[{query:effective,cost:0}];
@@ -498,7 +578,7 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
           const options=wordCorrections(node.query,scope,facets,[]),token=options[0]?.token;
           for(const fix of options.filter(f=>f.token===token).slice(0,3)){
             if(seen.has(fix.query))continue;seen.add(fix.query);
-            if(find(parseQuery(fix.query,facets),fix.query).length)corrected.push({label:fix.query,query:fix.query});
+            if(find(parseQuery(fix.query,facets),fix.query).length)corrected.push({label:displaySearchQuery(fix.query,facets),query:fix.query});
             else next.push({query:fix.query,cost:node.cost+fix.cost});
           }
         }
@@ -519,7 +599,7 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
   const alternatives:Array<{id:string;reason:string;score:number}>=[];
   if(raw&&!parsed.model&&parsed.conditions.length){
     for(let i=0;i<parsed.conditions.length;i++){
-      if(departments.some(d=>d===parsed.conditions[i]!.label)||parsed.conditions[i]!.label==='Na stanju'||parsed.conditions[i]!.label.startsWith('Bez'))continue;
+      if(departments.some(d=>d===normalize(parsed.conditions[i]!.label))||parsed.conditions[i]!.label==='Na stanju'||(/^(Bez|Isključena boja)/.test(parsed.conditions[i]!.label)))continue;
       const relaxed={...parsed,tests:parsed.tests.filter((_,j)=>j!==i)};
       for(const result of find(relaxed,effective)){
         if(ranked.some(r=>r.entry.row.id===result.entry.row.id)||alternatives.some(a=>a.id===result.entry.row.id))continue;
