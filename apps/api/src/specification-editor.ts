@@ -8,7 +8,7 @@ const field = z.object({ specId: z.string().uuid(), groupId: z.string().max(80),
 export const specificationConfigurationSchema = z.object({ groups: z.array(z.object({ id: z.string().min(1).max(80), name: z.string().trim().min(1).max(100) })).max(40), fields: z.array(field).max(400) });
 export const specificationEditorRequestSchema = z.object({
   action: z.enum(['get', 'configure', 'option']), departmentId: z.string().uuid(), brand: z.string().max(240).optional(),
-  specs: z.record(z.string()).optional(), version: z.number().int().min(0).optional(),
+  specs: z.record(z.string(), z.string()).optional(), version: z.number().int().min(0).optional(),
   configuration: specificationConfigurationSchema.optional(), specId: z.string().uuid().optional(),
   value: z.string().trim().min(1).max(160).optional(), linkType: z.string().trim().max(160).optional()
 });
@@ -72,7 +72,11 @@ export async function specificationEditor(database: Database, organizationId: st
     const products = (await client.query(`SELECT v.attributes,b.name AS brand FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`, [organizationId,input.departmentId])).rows;
     const typeSpec = specs.find(s => norm(s.slug) === 'tip_mehanizma');
     const caliberSpec = specs.find(s => norm(s.slug) === 'mehanizam');
-    const get = (attributes: Record<string,string>, spec: Specification | undefined) => spec ? Object.entries(attributes || {}).find(([k]) => norm(k) === norm(spec.slug) || norm(k) === norm(spec.name))?.[1] : undefined;
+    const get = (attributes: Record<string,unknown>, spec: Specification | undefined): string | undefined => {
+      if (!spec) return undefined;
+      const value = Object.entries(attributes || {}).find(([k]) => norm(k) === norm(spec.slug) || norm(k) === norm(spec.name))?.[1];
+      return typeof value === 'string' ? value : typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
+    };
     if (caliberSpec && typeSpec) {
       const f = configuration.fields.find(f => f.specId === caliberSpec.id)!;
       for (const value of caliberSpec.optionValues) {
