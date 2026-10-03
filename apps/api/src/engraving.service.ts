@@ -13,7 +13,7 @@ const layerSchema = z.object({
   text: z.string().max(200).optional(), font: z.enum(['sans', 'serif', 'mono', 'hand']).optional(), fontSize: z.number().min(14).max(100).optional(),
   bold: z.boolean().optional(), italic: z.boolean().optional(), align: z.enum(['left', 'center', 'right']).optional(),
   letterSpacing: z.number().min(-2).max(15).optional(), lineSpacing: z.number().min(1).max(2.5).optional(),
-  curve: z.enum(['straight', 'upper', 'lower']).optional(), radius: z.number().min(80).max(380).optional(), angle: z.number().min(-180).max(180).optional(),
+  curve: z.enum(['straight', 'upper', 'lower', 'circle']).optional(), radius: z.number().min(80).max(380).optional(), angle: z.number().min(-180).max(180).optional(),
   arc: z.number().min(30).max(330).optional(), assetId: z.string().uuid().optional(), contrast: z.number().min(0.5).max(3).optional(), threshold: z.number().min(0).max(255).optional(), invert: z.boolean().optional()
 }).superRefine((layer, context) => {
   if (layer.type === 'text' && (layer.text === undefined || !layer.font || !layer.fontSize)) context.addIssue({ code: 'custom', message: 'Tekst i font su obavezni.' });
