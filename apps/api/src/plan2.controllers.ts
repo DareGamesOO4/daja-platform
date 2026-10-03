@@ -67,6 +67,7 @@ import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
+import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 import { loadGroupState, groupOverview, resolveGroupMembers, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 
@@ -2160,6 +2161,16 @@ export class StaffCatalogController {
     }
     this.publishCatalogTaxonomy(ctx.organizationId, 'categories');
     return { deleted: true };
+  }
+
+  @Post('specification-editor')
+  async editSpecificationLayout(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    const input = parseWithSchema(specificationEditorRequestSchema, body);
+    requirePermission(ctx, input.action === 'get' ? 'catalog.read' : 'catalog.write');
+    const result = await specificationEditor(this.database, ctx.organizationId, input);
+    if (input.action !== 'get') this.publishCatalogTaxonomy(ctx.organizationId, 'spec_keys');
+    return result;
   }
 
   @Get('spec_keys')
