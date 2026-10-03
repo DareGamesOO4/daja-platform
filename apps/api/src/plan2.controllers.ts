@@ -316,7 +316,8 @@ export class PublicCatalogController {
       '/about',
       '/contact',
       '/faq',
-      '/usluge'
+      '/usluge',
+      '/graviranje'
     ]
       .map((path) => `<url><loc>${escapeXml(`${siteUrl}${path}`)}</loc></url>`)
       .join('');
