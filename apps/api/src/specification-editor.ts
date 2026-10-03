@@ -129,17 +129,17 @@ export async function specificationEditor(database: Database, organizationId: st
       }
       stored = (await client.query(`UPDATE specification_editor_configurations SET configuration=$3::jsonb,version=version+1,updated_at=now() WHERE organization_id=$1 AND department_id=$2 RETURNING version`, [organizationId,input.departmentId,JSON.stringify(configuration)])).rows[0];
     }
-    const ranking = Object.fromEntries(specs.map(s => [s.id, Object.fromEntries(s.optionValues.map(value => {
-      let score = 0;
-      for (const p of products) if (norm(String(get(p.attributes,s) || '')) === norm(value)) {
-        score += 1;
-        if (input.brand && norm(String(p.brand || '')) === norm(input.brand)) score += 100;
-        const selectedType = get(input.specs || {},typeSpec);
-        if (selectedType && norm(String(get(p.attributes,typeSpec) || '')) === norm(selectedType)) score += 20;
+    // Count current catalog variants, once each, regardless of inventory quantity,
+    // brand relevance or mechanism type. Deleted products/variants are excluded above.
+    const usageCounts = Object.fromEntries(specs.map(s => {
+      const counts = new Map<string, number>();
+      for (const product of products) {
+        const value = get(product.attributes, s);
+        if (value?.trim()) counts.set(norm(value), (counts.get(norm(value)) || 0) + 1);
       }
-      return [value, score];
-    }))]));
+      return [s.id, Object.fromEntries(s.optionValues.map(value => [value, counts.get(norm(value)) || 0]))];
+    }));
     await client.query('COMMIT');
-    return { version: stored?.version || 0, configuration, specifications: specs, ranking };
+    return { version: stored?.version || 0, configuration, specifications: specs, ranking: usageCounts, usageCounts };
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
