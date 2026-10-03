@@ -69,6 +69,10 @@ export async function specificationEditor(database: Database, organizationId: st
     // New taxonomy fields always remain visible, even with an older saved layout.
     configuration = { ...configuration, fields: configuration.fields.filter(f => specs.some(s => s.id === f.specId)) };
     for (const s of specs) if (!configuration.fields.some(f => f.specId === s.id)) configuration.fields.push({ specId: s.id, groupId: 'other', order: 999, visibility: [], options: [] });
+    const brands: { id: string; name: string }[] = (await client.query(
+      'SELECT id,name FROM brands WHERE organization_id=$1 AND department_id=$2 AND deleted_at IS NULL AND active=true ORDER BY name',
+      [organizationId,input.departmentId]
+    )).rows;
     const products = (await client.query(`SELECT v.attributes,b.name AS brand FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`, [organizationId,input.departmentId])).rows;
     const typeSpec = specs.find(s => norm(s.slug) === 'tip_mehanizma');
     const caliberSpec = specs.find(s => norm(s.slug) === 'mehanizam');
@@ -140,6 +144,6 @@ export async function specificationEditor(database: Database, organizationId: st
       return [s.id, Object.fromEntries(s.optionValues.map(value => [value, counts.get(norm(value)) || 0]))];
     }));
     await client.query('COMMIT');
-    return { version: stored?.version || 0, configuration, specifications: specs, ranking: usageCounts, usageCounts };
+    return { version: stored?.version || 0, configuration, specifications: specs, ranking: usageCounts, usageCounts, brands };
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
