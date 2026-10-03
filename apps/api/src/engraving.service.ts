@@ -19,7 +19,7 @@ const layerSchema = z.object({
   if (layer.type === 'text' && (layer.text === undefined || !layer.font || !layer.fontSize)) context.addIssue({ code: 'custom', message: 'Tekst i font su obavezni.' });
   if (layer.type === 'image' && !layer.assetId) context.addIssue({ code: 'custom', message: 'Slika nije otpremljena.' });
 });
-export const engravingDesignSchema = z.object({ schemaVersion: z.literal(1), diameter: z.number().min(20).max(70), layers: z.array(layerSchema).max(20) });
+export const engravingDesignSchema = z.object({ schemaVersion: z.literal(1), diameter: z.number().min(20).max(70), reserveCenter: z.boolean().optional(), layers: z.array(layerSchema).max(20) });
 type Design = z.infer<typeof engravingDesignSchema>;
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
 
