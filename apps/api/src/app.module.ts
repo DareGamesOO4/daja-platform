@@ -22,6 +22,8 @@ import { DeviceController, SyncController } from './sync.controller.js';
 import { InternalSalesReportController } from './internal-sales-report.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthMiddleware } from './auth.middleware.js';
+import { EngravingController } from './engraving.controller.js';
+import { EngravingService } from './engraving.service.js';
 import { AuthService } from './auth.service.js';
 import { AccessControlController } from './access-control.controller.js';
 import { OfflineInventoryController } from './offline-inventory.controller.js';
@@ -61,6 +63,7 @@ const logger = createLogger(config, 'api');
     ])
   ],
   controllers: [
+    EngravingController,
     CatalogFiltersController,
     AuthController,
     AccessControlController,
@@ -87,6 +90,7 @@ const logger = createLogger(config, 'api');
     ,ReaderStationController
   ],
   providers: [
+    EngravingService,
     { provide: CONFIG, useValue: config },
     { provide: LOGGER, useValue: logger },
     { provide: DATABASE, useFactory: () => createDatabase(config, logger) },

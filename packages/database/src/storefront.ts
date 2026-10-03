@@ -793,16 +793,17 @@ export class StorefrontRepository {
       }
       await this.client.query(
         `INSERT INTO customer_cart_items (
-           organization_id, customer_id, product_id, variant_id, quantity, item_snapshot
+           organization_id, customer_id, product_id, variant_id, quantity, item_snapshot, line_id
          )
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
         [
           input.organizationId,
           input.customerId,
           productId,
           uuidOrNull(item.variantId),
           item.qty ?? item.quantity ?? 1,
-          JSON.stringify(item)
+          JSON.stringify(item),
+          typeof item.lineId === 'string' ? item.lineId.slice(0, 100) : productId
         ]
       );
     }
@@ -1120,12 +1121,13 @@ export class StorefrontRepository {
     return result.rows.map(serializeOrder);
   }
 
-  async getOrder(input: { organizationId: string; orderIdOrDisplayId: string }) {
+  async getOrder(input: { organizationId: string; orderIdOrDisplayId: string; customerId?: string }) {
     const result = await this.client.query<OrderRow>(
       `SELECT * FROM orders
        WHERE organization_id = $1 AND (id::text = $2 OR display_id = $2) AND deleted_at IS NULL
+         AND ($3::uuid IS NULL OR customer_id = $3)
        LIMIT 1`,
-      [input.organizationId, input.orderIdOrDisplayId]
+      [input.organizationId, input.orderIdOrDisplayId, input.customerId ?? null]
     );
     return serializeOrder(requireRow(result));
   }

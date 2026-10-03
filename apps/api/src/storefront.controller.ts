@@ -21,6 +21,7 @@ import type { Logger } from '@daja/observability';
 import { requirePermission, ValidationFailedError } from '@daja/security';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
+import { EngravingService } from './engraving.service.js';
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
@@ -524,7 +525,8 @@ export class StorefrontOrdersController {
     @Inject(LOGGER) private readonly logger: Logger,
     private readonly orderEmail: OrderEmailService,
     private readonly realtime: RealtimeGateway,
-    private readonly promotions: PromotionsService
+    private readonly promotions: PromotionsService,
+    @Inject(EngravingService) private readonly engraving: EngravingService
   ) {}
 
   @Post('orders')
@@ -536,6 +538,7 @@ export class StorefrontOrdersController {
     const input = parseWithSchema(orderSchema, body);
     const organizationId = publicOrganizationId(this.config);
     const order = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, input.items, client);
       const promotion = await this.promotions.resolve(
         {
           organizationId,
@@ -553,7 +556,7 @@ export class StorefrontOrdersController {
       const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
-        items: input.items,
+        items: frozenItems as typeof input.items,
         subtotalAmount: amountMinor(subtotal),
         discountAmount: amountMinor(promotion.discountAmount),
         shippingAmount: amountMinor(shippingCost),
@@ -622,7 +625,8 @@ export class StorefrontOrdersController {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     const order = await new StorefrontRepository(this.database.pool).getOrder({
       organizationId: customer.organizationId,
-      orderIdOrDisplayId: id
+      orderIdOrDisplayId: id,
+      customerId: customer.customerId
     });
     if (order.customer?.email && customer.email && order.customer.email !== customer.email) {
       throw new ValidationFailedError('Order does not belong to customer');

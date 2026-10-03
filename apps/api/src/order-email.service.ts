@@ -20,6 +20,7 @@ interface OrderEmailPayload {
 }
 
 interface OrderItem {
+  engravingText: string;
   name: string;
   brand: string;
   quantity: number;
@@ -205,6 +206,7 @@ function orderSummaryHtml(order: OrderEmailPayload, items: OrderItem[]): string 
         escapeHtml(String(item.quantity)) +
         '</p>' +
         unitPrice +
+        (item.engravingText ? '<p style="margin:8px 0;font-size:12px">Gravura: ' + escapeHtml(item.engravingText) + ' — konačan dizajn je uz stavku porudžbine.</p>' : '') +
         '</td>' +
         '<td class="item-total" valign="top" align="right" style="white-space:nowrap;color:#18181b;font-size:14px;font-weight:700">' +
         escapeHtml(formatMoney(item.total, order.currency)) +
@@ -460,7 +462,7 @@ function orderTextSummary(order: OrderEmailPayload, items: OrderItem[], shipping
         ' × ' +
         item.quantity +
         ' — ' +
-        formatMoney(item.total, order.currency)
+        formatMoney(item.total, order.currency) + (item.engravingText ? '\n  Gravura: ' + item.engravingText + ' (konačan dizajn u detaljima porudžbine)' : '')
     ),
     '',
     'Međuzbir: ' + formatMoney(order.subtotal, order.currency),
@@ -503,7 +505,11 @@ function orderItems(order: OrderEmailPayload): OrderItem[] {
     const record = isRecord(item) ? item : {};
     const quantity = positiveNumber(record.qty ?? record.quantity) || 1;
     const price = nonNegativeNumber(record.price);
+    const engraving = isRecord(record.engraving) ? record.engraving : null;
+    const design = engraving && isRecord(engraving.design) ? engraving.design : null;
+    const layers = design && Array.isArray(design.layers) ? design.layers : [];
     return {
+      engravingText: engraving ? layers.map((layer) => isRecord(layer) && layer.type === 'text' ? stringValue(layer.text) : 'Slika / logo').join(' · ') : '',
       name: stringValue(record.name) || 'Proizvod',
       brand: stringValue(record.brand),
       quantity,
