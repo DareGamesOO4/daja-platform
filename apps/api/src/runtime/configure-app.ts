@@ -37,7 +37,8 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
           correlationId: req.headers['x-correlation-id'],
           organizationId: req.headers['x-organization-id'],
           userId: req.headers['x-user-id'],
-          route: req.originalUrl,
+          // Query strings can contain customer search text or other personal data.
+          route: req.originalUrl.split('?')[0],
           method: req.method,
           statusCode: res.statusCode,
           durationMs: performance.now() - startedAt

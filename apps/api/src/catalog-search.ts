@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { recordSearchMiss, type SearchSynonym } from './catalog-search-settings.js';
+import type { SearchSynonym } from './catalog-search-settings.js';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { CatalogRepository, type PublicProductCard } from '@daja/database';
@@ -16,7 +16,6 @@ export const publicSearchQuerySchema = z.object({
   sort: z.enum(['relevance', 'price_asc', 'price_desc']).default('relevance'),
   cursor: z.string().max(1000).optional(),
   seed: z.string().max(80).default('catalog'),
-  track: z.enum(['yes','no']).default('no'),
   literal: z.enum(['yes','no']).default('no')
 });
 type SearchQuery = z.infer<typeof publicSearchQuerySchema>;
@@ -613,10 +612,6 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
   const byId=new Map(cards.map(card=>[card.productId,card]));
   const ordered=(keys:string[])=>keys.flatMap(id=>byId.has(id)?[byId.get(id)!]:[]);
   const groups=suggestions(facets,raw?ranked.map(v=>v.entry):scope,canonical(effective));
-  if(exactEmpty&&input.track==='yes'&&input.mode==='results'&&!input.cursor){
-    // Analytics failures must not make public search fail.
-    await recordSearchMiss(pool,organizationId,raw,input.department||'').catch(()=>undefined);
-  }
   return {
     query:input.q,normalizedQuery:canonical(effective),recognized:parsed.labels,
     conditions:parsed.conditions.map(({id,label,query})=>({id,label,query})),appliedCorrection,
