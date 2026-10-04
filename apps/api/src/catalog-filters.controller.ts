@@ -2,11 +2,11 @@ import { Body, Controller, Get, Inject, Param, Post, Put, Req, ConflictException
 import type { Request } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
-import { TransactionManager, type Database } from '@daja/database';
+import { TransactionManager, type Database, type RedisConnection } from '@daja/database';
 import { requirePermission } from '@daja/security';
 import { parseWithSchema } from '@daja/validation';
 import type { Logger } from '@daja/observability';
-import { CONFIG, DATABASE, LOGGER } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolveRequestContext, resolvePublicRequestContext } from './runtime/request-context.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
@@ -74,7 +74,8 @@ const revisionSchema = z.object({ revision: z.number().int().nonnegative(), rest
 
 @Controller()
 export class CatalogFiltersController {
-  constructor(@Inject(DATABASE) private readonly database: Database, @Inject(CONFIG) private readonly config: AppConfig, @Inject(LOGGER) private readonly logger: Logger) {}
+  constructor(@Inject(DATABASE) private readonly database: Database, @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(LOGGER) private readonly logger: Logger, @Inject(REDIS) private readonly redis: RedisConnection) {}
 
   @Get('public/catalog/filters/:department')
   async published(@Req() request: Request, @Param('department') rawDepartment: string) {
@@ -149,7 +150,10 @@ export class CatalogFiltersController {
       if (publish) await client.query('INSERT INTO catalog_filter_versions (organization_id, department, revision, configuration, published_by) VALUES ($1, $2, $3, $4::jsonb, $5)', [ctx.organizationId, department, newRevision, JSON.stringify(valid), ctx.userId]);
       return { revision: newRevision, configuration: valid };
     });
-    if (publish) invalidateCatalogSearch(ctx.organizationId);
+    if (publish) {
+      invalidateCatalogSearch(ctx.organizationId);
+      await this.redis.client.del(`catalog:sitemap:${ctx.organizationId}`, `catalog:sitemap:v2:${ctx.organizationId}`);
+    }
     return result;
   }
 }

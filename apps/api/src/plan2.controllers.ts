@@ -71,6 +71,7 @@ import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workfo
 import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 import { loadGroupState, groupOverview, resolveGroupMembers, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
+import { publicBrandPaths } from './catalog-brand-pages.js';
 
 const productCreateSchema = z.object({
   linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
@@ -223,13 +224,9 @@ function sitemapLastmod(value: string | Date): string {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
-function storefrontSiteUrl(config: AppConfig): string {
-  return (
-    config.OAUTH_FRONTEND_REDIRECT_URL ||
-    config.CORS_ALLOWED_ORIGINS.find((origin) => !origin.includes('localhost')) ||
-    config.STOREFRONT_PUBLIC_BASE_URL ||
-    'https://dajashop.rs'
-  ).replace(/\/$/, '');
+function storefrontSiteUrl(): string {
+  // Match DajaShopWeb publicSite.js; login/CORS/preview hosts are not SEO origins.
+  return 'https://dajashop.rs';
 }
 
 function merchantDescription(value: unknown, fallback: string): string {
@@ -246,7 +243,8 @@ export class PublicCatalogController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(REDIS) private readonly redis: RedisConnection
+    @Inject(REDIS) private readonly redis: RedisConnection,
+    @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
   @Get('search')
@@ -274,7 +272,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v2:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -304,7 +302,8 @@ export class PublicCatalogController {
         [ctx.organizationId]
       )
     ).rows;
-    const siteUrl = storefrontSiteUrl(this.config);
+    const siteUrl = storefrontSiteUrl();
+    const brandPaths = await publicBrandPaths(this.database, ctx.organizationId, this.logger);
     const staticEntries = [
       '/',
       '/catalog',
@@ -317,7 +316,8 @@ export class PublicCatalogController {
       '/contact',
       '/faq',
       '/usluge',
-      '/graviranje'
+      '/graviranje',
+      ...brandPaths
     ]
       .map((path) => `<url><loc>${escapeXml(`${siteUrl}${path}`)}</loc></url>`)
       .join('');
@@ -342,7 +342,7 @@ export class PublicCatalogController {
   @Get('merchant-feed.xml')
   async merchantFeed(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:merchant-feed:${ctx.organizationId}`;
+    const cacheKey = `catalog:merchant-feed:v2:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(cached);
@@ -387,7 +387,7 @@ export class PublicCatalogController {
         [ctx.organizationId]
       )
     ).rows;
-    const siteUrl = storefrontSiteUrl(this.config);
+    const siteUrl = storefrontSiteUrl();
     const items = rows
       .map((row) => {
         const title = [row.brand, row.name].filter(Boolean).join(' ').trim();
@@ -2002,6 +2002,7 @@ export class StaffCatalogController {
         input.active ?? true
       ]
     );
+    await this.invalidateCatalog(ctx.organizationId);
     this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return result.rows[0];
   }
@@ -2035,6 +2036,7 @@ export class StaffCatalogController {
         input.active ?? row.active
       ]
     );
+    await this.invalidateCatalog(ctx.organizationId);
     this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return result.rows[0];
   }
@@ -2059,6 +2061,7 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) {
       throw new TenantAccessDeniedError();
     }
+    await this.invalidateCatalog(ctx.organizationId);
     this.publishCatalogTaxonomy(ctx.organizationId, 'brands');
     return { deleted: true };
   }
@@ -2558,10 +2561,13 @@ export class StaffCatalogController {
     const validSlugs = slugs.filter((slug): slug is string => Boolean(slug));
     const keys = [
       `catalog:sitemap:${organizationId}`,
+      `catalog:sitemap:v2:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
+      `catalog:merchant-feed:v2:${organizationId}`,
       ...validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`)
     ];
     await this.redis.client.del(...keys);
+    if (!validSlugs.length) return;
     const products = await this.database.pool.query<{ id: string; slug: string }>(
       `SELECT id, slug FROM products
        WHERE organization_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
