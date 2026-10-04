@@ -78,6 +78,7 @@ export class CatalogRepository {
       limit: number;
       sort?: string | undefined;
       productIds?: string[] | undefined;
+      relatedTo?: string | undefined;
     }
   ): Promise<{ items: PublicProductCard[]; nextCursor: string | null }> {
     const params: unknown[] = [ctx.organizationId, filters.limit + 1];
@@ -90,6 +91,42 @@ export class CatalogRepository {
       'v.active',
       'v.published'
     ];
+    if (filters.relatedTo) {
+      const source = (await this.client.query<{
+        id: string; brand_id: string | null; department_id: string | null;
+        gender: string | null; price: number; currency: string;
+      }>(
+        `SELECT p.id, p.brand_id, p.department_id, v.gender, v.currency,
+                COALESCE(sale.amount_minor, v.current_price_amount) AS price
+         FROM products p
+         JOIN LATERAL (
+           SELECT * FROM product_variants pv
+           WHERE pv.organization_id = p.organization_id AND pv.product_id = p.id
+             AND pv.deleted_at IS NULL AND pv.active AND pv.published
+           ORDER BY pv.current_price_amount, pv.id LIMIT 1
+         ) v ON true
+         LEFT JOIN LATERAL (
+           SELECT vp.amount_minor FROM variant_prices vp
+           WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+             AND vp.price_type = 'sale' AND vp.valid_from <= now() AND vp.cancelled_at IS NULL
+             AND (vp.valid_until IS NULL OR vp.valid_until > now())
+           ORDER BY vp.valid_from DESC, vp.created_at DESC LIMIT 1
+         ) sale ON true
+         WHERE p.organization_id = $1 AND p.slug = $2
+           AND p.deleted_at IS NULL AND p.active AND p.published`,
+        [ctx.organizationId, filters.relatedTo]
+      )).rows[0];
+      if (!source) return { items: [], nextCursor: null };
+      params.push(source.id, source.brand_id, source.department_id, source.gender || '', source.currency,
+        Math.max(0, Number(source.price) - 100_000), Number(source.price) + 100_000);
+      const start = params.length - 6;
+      where.push(`p.id <> $${start}::uuid`,
+        `p.brand_id IS NOT DISTINCT FROM $${start + 1}::uuid`,
+        `p.department_id IS NOT DISTINCT FROM $${start + 2}::uuid`,
+        `COALESCE(v.gender, '') = $${start + 3}`,
+        `v.currency = $${start + 4}`,
+        `COALESCE(active_sale.amount_minor, v.current_price_amount) BETWEEN $${start + 5} AND $${start + 6}`);
+    }
     if (filters.brand) {
       params.push(filters.brand);
       where.push(`b.slug = $${params.length}`);

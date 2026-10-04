@@ -406,6 +406,16 @@ export class PublicCatalogController {
     response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(xml);
   }
 
+  @Get('products/:slug/related')
+  async relatedProducts(@Req() request: Request, @Param('slug') slug: string, @Res({ passthrough: true }) response: Response) {
+    const ctx = this.publicContext(request);
+    response.setHeader('Cache-Control', 'no-store');
+    const result = await new CatalogRepository(this.database.pool).listPublicProducts(ctx, {
+      relatedTo: parseWithSchema(slugSchema, slug), limit: 12, sort: 'price_asc',
+    });
+    return { items: result.items };
+  }
+
   @Get('products/:slug/variants')
   async productVariantGroup(@Req() request: Request, @Param('slug') slug: string, @Res({ passthrough: true }) response: Response) {
     const ctx = this.publicContext(request);
