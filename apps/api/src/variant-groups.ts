@@ -143,6 +143,56 @@ export function resolveGroupMembers(state: GroupState, productId: string): strin
   return state.products.filter(p => p.name.startsWith(base) && !owners.has(p.id)).map(p => p.id);
 }
 
+// Public product pages need only one group, not the admin catalog snapshot.
+export async function loadPublicGroupMembers(db: Client, organizationId: string, slug: string): Promise<{ sourceId: string; ids: string[] } | null> {
+  const result = await db.query<{ sourceId: string; ids: string[] }>(`WITH source AS (
+    SELECT p.id, p.name,
+      (policy.product_id IS NOT NULL OR rule.id IS NOT NULL) AS has_owner,
+      CASE WHEN policy.product_id IS NOT NULL THEN policy.group_id
+        WHEN rule.follow_auto THEN rule.id ELSE NULL END AS owner_id,
+      CASE WHEN strpos(p.name, '-') > 0 THEN regexp_replace(p.name, '-[^-]*$', '') ELSE NULL END AS base
+    FROM products p
+    LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
+    LEFT JOIN LATERAL (
+      SELECT g.id, g.follow_auto FROM catalog_variant_groups g
+      WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
+        AND left(p.name, length(g.source_prefix))=g.source_prefix
+      ORDER BY length(g.source_prefix) DESC LIMIT 1
+    ) rule ON true
+    WHERE p.organization_id=$1 AND p.slug=$2 AND p.deleted_at IS NULL AND p.active AND p.published
+      AND EXISTS (SELECT 1 FROM product_variants v WHERE v.organization_id=p.organization_id
+        AND v.product_id=p.id AND v.active AND v.published AND v.deleted_at IS NULL)
+  ), target AS (
+    SELECT s.*, g.source_prefix AS owner_prefix, g.kind AS owner_kind, g.customized, g.follow_auto
+    FROM source s LEFT JOIN catalog_variant_groups g ON g.organization_id=$1 AND g.id=s.owner_id
+  )
+  SELECT t.id AS "sourceId", ARRAY(
+    SELECT p.id FROM products p
+    LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
+    LEFT JOIN LATERAL (
+      SELECT g.id, g.follow_auto FROM catalog_variant_groups g
+      WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
+        AND left(p.name, length(g.source_prefix))=g.source_prefix
+      ORDER BY length(g.source_prefix) DESC LIMIT 1
+    ) rule ON true
+    WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND p.active AND p.published
+      AND EXISTS (SELECT 1 FROM product_variants v WHERE v.organization_id=p.organization_id
+        AND v.product_id=p.id AND v.active AND v.published AND v.deleted_at IS NULL)
+      AND (
+        (t.has_owner AND t.owner_id IS NULL AND p.id=t.id)
+        OR (t.has_owner AND t.owner_id IS NOT NULL AND (
+          policy.group_id=t.owner_id
+          OR (policy.product_id IS NULL AND t.owner_kind='automatic' AND t.customized AND t.follow_auto
+            AND left(p.name, length(t.owner_prefix))=t.owner_prefix AND rule.id=t.owner_id AND rule.follow_auto)
+        ))
+        OR (NOT t.has_owner AND policy.product_id IS NULL AND rule.id IS NULL
+          AND ((t.base IS NULL AND p.id=t.id) OR (t.base IS NOT NULL AND left(p.name, length(t.base))=t.base)))
+      )
+    ORDER BY p.name, p.id
+  ) AS ids FROM target t`, [organizationId, slug]);
+  return result.rows[0] ?? null;
+}
+
 export async function mutateGroups(db: Database['pool'], ctx: RequestContext,
   action: 'save' | 'reset' | 'delete' | 'product-reset', input: z.infer<typeof groupSaveSchema> | ({key: string} & z.infer<typeof groupRevisionSchema>)
 ): Promise<GroupOverview> {

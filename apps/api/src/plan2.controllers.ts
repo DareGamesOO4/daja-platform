@@ -70,7 +70,7 @@ import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, 
 import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
 import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
-import { loadGroupState, groupOverview, resolveGroupMembers, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
+import { loadGroupState, loadPublicGroupMembers, groupOverview, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 import { publicBrandPaths } from './catalog-brand-pages.js';
 
 const productCreateSchema = z.object({
@@ -422,15 +422,14 @@ export class PublicCatalogController {
     const repository = new CatalogRepository(this.database.pool);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
     response.setHeader('Cache-Control', 'no-store');
-    const state = await loadGroupState(this.database.pool, ctx.organizationId, false);
-    const source = state.products.find(item => item.slug === normalizedSlug && item.public);
-    if (!source) throw new NotFoundException('Product not found');
-    const ids = resolveGroupMembers(state, source.id);
+    const group = await loadPublicGroupMembers(this.database.pool, ctx.organizationId, normalizedSlug);
+    if (!group) throw new NotFoundException('Product not found');
+    const { ids, sourceId } = group;
     if (ids.length < 2) return { items: [] };
     const result = await repository.listPublicProducts(ctx, { productIds: ids, limit: ids.length });
     // Internal names and private group metadata never enter the public payload.
     const unique = [...new Map(result.items.map(item => [item.productId, item])).values()];
-    return { items: unique.length < 2 || !unique.some(item => item.productId === source.id) ? [] : unique.filter(item => item.productId !== source.id) };
+    return { items: unique.length < 2 || !unique.some(item => item.productId === sourceId) ? [] : unique.filter(item => item.productId !== sourceId) };
   }
 
   @Get('products/:slug')
