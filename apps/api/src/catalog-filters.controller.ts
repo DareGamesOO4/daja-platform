@@ -16,9 +16,11 @@ const departmentSchema = z.enum(['satovi', 'daljinski', 'baterije', 'naocare']);
 const idSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
 const sourceSchema = z.string().min(1).max(300).refine((value) => ['brand', 'gender', 'category', 'price'].includes(value) || /^(spec|feature):.+/.test(value));
 const imageSchema = z.string().max(2048).refine((value) => !value || /^https:\/\//.test(value) || /^\/(?!\/)/.test(value));
+const urlSlugSchema = z.string().max(80).regex(/^$|^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional();
 const conditionSchema = z.object({ source: sourceSchema, values: z.array(z.string().max(500)).min(1).max(500) }).strict();
 const optionSchema = z.object({
   id: idSchema, label: z.string().trim().min(1).max(240), visible: z.boolean(),
+  urlSlug: urlSlugSchema,
   color: z.string().regex(/^$|^#[0-9a-fA-F]{6}$/), image: imageSchema,
   conditions: z.array(conditionSchema).min(1).max(30)
 }).strict();
@@ -28,12 +30,14 @@ interface FilterNode {
   columns: number; showCounts: boolean; unit: string; sources: string[];
   options: z.infer<typeof optionSchema>[]; children: FilterNode[];
   autoAddOptions?: boolean | undefined;
+  urlSlug?: string | undefined;
 }
 const nodeSchema: z.ZodType<FilterNode> = z.lazy(() => z.object({
   id: idSchema, title: z.string().trim().min(1).max(240), description: z.string().max(1000),
   visible: z.boolean(), open: z.boolean(), priority: z.number().int().min(0).max(10000),
   mode: z.enum(['group', 'options']), style: z.enum(['checkbox', 'color', 'material', 'range']),
   autoAddOptions: z.boolean().optional(),
+  urlSlug: urlSlugSchema,
   match: z.enum(['any', 'all']), columns: z.number().int().min(1).max(8), showCounts: z.boolean(),
   unit: z.string().max(30), sources: z.array(sourceSchema).max(30),
   options: z.array(optionSchema).max(1000), children: z.array(nodeSchema).max(100)
