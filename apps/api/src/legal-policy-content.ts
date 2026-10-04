@@ -48,7 +48,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
         title: 'Kategorije koje aplikacija podržava',
         body: [
           'Neophodno: dokaz izbora, prijava i funkcije koje korisnik izričito koristi, poput korpe i liste želja.',
-          'Funkcionalni: pamćenje teme, prijave, prikaza newsletter ponude i pozicije u katalogu, Google Maps za prikaz naše lokacije i Google Places za predlog adrese. Kategorija je podrazumevano isključena; korisnik može nastaviti bez mape i ručno uneti adresu. Google pri korišćenju može obraditi tehničke podatke pregledača i adresu koju korisnik unese.',
+          'Funkcionalni: pamćenje teme, prijave, prikaza newsletter ponude i pozicije u katalogu, Google Maps za prikaz naše lokacije i Google Places za predlog adrese i prikaz stvarne ocene prodavnice i broja ocena. Kategorija je podrazumevano isključena; korisnik može nastaviti bez Google usluga i ručno uneti adresu. Google pri korišćenju može obraditi tehničke podatke pregledača i adresu koju korisnik unese. Ocenu preuzimamo na zahtev pregledača, bez trajnog čuvanja Google ocena na našem serveru.',
           'Analitika: Cloudflare Web Analytics, samo nakon izričitog pristanka korisnika.',
           'Marketing: trenutno ne koristimo marketinške kolačiće niti personalizovano oglašavanje.',
           'Neklasifikovani: trenutno nema kolačića koji nisu svrstani u neku od navedenih kategorija.'
