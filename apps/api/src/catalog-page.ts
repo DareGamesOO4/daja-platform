@@ -4,9 +4,9 @@ import { z } from 'zod';
 import { automaticFilterOptions } from './catalog-filter-options.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 
-interface Option { id: string; label: string; visible: boolean; color: string; image: string; conditions: Array<{ source: string; values: string[] }> }
-interface Node { id: string; title: string; visible: boolean; priority: number; mode: string; style: string; match: string; unit: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined }
-interface Configuration { schemaVersion: number; filters: Node[] }
+export interface Option { id: string; label: string; visible: boolean; color: string; image: string; conditions: Array<{ source: string; values: string[] }> }
+export interface Node { id: string; title: string; visible: boolean; priority: number; mode: string; style: string; match: string; unit: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined }
+export interface Configuration { schemaVersion: number; filters: Node[] }
 interface Product {
   id: string; name: string; slug: string; department: string; brand: string | null; category: string | null;
   gender: string | null; price: number; attributes: Record<string, unknown>; features: Array<{title: string}>;
