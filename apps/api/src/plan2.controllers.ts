@@ -53,6 +53,7 @@ import {
   uuidSchema
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
+import { catalogPageSchema, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
@@ -251,6 +252,16 @@ export class PublicCatalogController {
   @Throttle({ default: { limit: 300, ttl: 60_000 } })
   async search(@Req() request: Request, @Query() query: Record<string, string | undefined>): Promise<CatalogSearchResponse> {
     return searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
+  }
+
+  @Get('page')
+  async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+    return publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));
+  }
+
+  @Get('home')
+  async homeProducts(@Req() request: Request) {
+    return publicHomeProducts(this.database.pool, this.publicContext(request).organizationId);
   }
 
   @Get('products')
