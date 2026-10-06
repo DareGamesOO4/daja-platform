@@ -55,7 +55,7 @@ export function normalizeAdditionalUrl(provider: AdditionalProvider, value: stri
   };
   const validPath = provider === 'qandq'
     ? url.pathname === '/product.php' && /^[1-9]\d*$/.test(url.searchParams.get('id') ?? '')
-    : provider === 'milano' ? /^\/shop\/.+\/.+/.test(url.pathname) : /^\/product\/.+/.test(url.pathname);
+    : provider === 'milano' ? /^\/shop\/sunglasses\/.+\/.+/.test(url.pathname) : /^\/product\/.+/.test(url.pathname);
   if (url.protocol !== 'https:' || !hosts[provider].includes(url.hostname.toLowerCase()) ||
       url.username || url.password || url.port || !validPath) {
     throw new ValidationFailedError('Link mora biti direktna HTTPS adresa artikla kod izabranog dobavljača');

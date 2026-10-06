@@ -7,6 +7,7 @@ type Client = Pick<Database['pool'], 'query'>;
 export interface GroupProduct {
   id: string; name: string; slug: string; brand: string | null; department: string | null;
   image: string | null; public: boolean;
+  departmentSlug?: string | null; brandId?: string | null;
 }
 export interface GroupRecord {
   id: string; kind: 'automatic' | 'custom'; source_prefix: string | null;
@@ -40,9 +41,17 @@ export const groupSaveSchema = z.object({
 }).strict();
 export const groupRevisionSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedCatalogRevision: z.string().length(32) }).strict();
 
-function prefix(name: string): string | null {
+function prefix(product: GroupProduct): string | null {
+  if (product.departmentSlug === 'naocare' || /^nao[čc]are$/i.test(product.department || '')) {
+    const model = product.name.toUpperCase().match(/(?:^|[^A-Z0-9])([A-Z]{0,8}[0-9]{3,}[A-Z]?)(?=[\s-]|$)/)?.[1];
+    return model ? `naocare:${product.brandId || product.brand || ''}:${model}` : null;
+  }
+  const name = product.name;
   const parts = name.split('-');
   return parts.length < 2 ? null : parts.slice(0, -1).join('-');
+}
+function matchesPrefix(product: GroupProduct, value: string): boolean {
+  return value.startsWith('naocare:') ? prefix(product) === value : product.name.startsWith(value);
 }
 function key(group: GroupRecord): string {
   return group.kind === 'automatic' ? `auto:${group.source_prefix!}` : group.id;
@@ -53,6 +62,7 @@ export async function loadGroupState(db: Client, organizationId: string, include
   const result = await db.query<GroupState>(`SELECT
     COALESCE((SELECT jsonb_agg(entry) FROM (
       SELECT p.id, p.name, p.slug, b.name AS brand, d.name AS department,
+        d.slug AS "departmentSlug", p.brand_id AS "brandId",
         CASE WHEN $2::boolean THEN (SELECT ma.public_url FROM product_media pm JOIN media_assets ma ON ma.id=pm.media_asset_id AND ma.status='ready'
          WHERE pm.organization_id=p.organization_id AND pm.product_id=p.id
          ORDER BY pm.is_primary DESC, pm.position, pm.id LIMIT 1) ELSE NULL END AS image,
@@ -78,7 +88,7 @@ function ownership(state: GroupState) {
   for (const product of state.products) {
     const policy = policies.get(product.id);
     if (policy) { owners.set(product.id, policy.group_id); continue; }
-    const group = configured.find(g => product.name.startsWith(g.source_prefix!));
+    const group = configured.find(g => matchesPrefix(product, g.source_prefix!));
     if (group) owners.set(product.id, group.follow_auto ? group.id : null);
   }
   return { policies, owners };
@@ -88,7 +98,7 @@ export function groupOverview(state: GroupState): GroupOverview {
   const { owners, policies } = ownership(state);
   const records = new Map(state.groups.map(g => [key(g), g]));
   for (const product of state.products) {
-    const base = prefix(product.name);
+    const base = prefix(product);
     if (base !== null && !records.has(`auto:${base}`)) records.set(`auto:${base}`, {
       id: '', kind: 'automatic', source_prefix: base, internal_name: null,
       follow_auto: true, customized: false, created_by_user_id: null
@@ -98,18 +108,18 @@ export function groupOverview(state: GroupState): GroupOverview {
   for (const [groupKey, record] of records) {
     const memberIds = state.products.filter(p => {
       if (owners.has(p.id)) return Boolean(record.id) && owners.get(p.id) === record.id;
-      return record.kind === 'automatic' && !record.customized && p.name.startsWith(record.source_prefix!);
+      return record.kind === 'automatic' && !record.customized && matchesPrefix(p, record.source_prefix!);
     }).map(p => p.id);
     const automaticMemberIds = record.kind === 'automatic' ? state.products.filter(p => {
       const policy = policies.get(p.id);
       const longerRule = state.groups.some(g => g.kind === 'automatic' && g.customized && g.id !== record.id &&
-        g.source_prefix!.length > record.source_prefix!.length && p.name.startsWith(g.source_prefix!));
-      return p.name.startsWith(record.source_prefix!) && (!policy || policy.group_id === record.id) &&
+        g.source_prefix!.length > record.source_prefix!.length && matchesPrefix(p, g.source_prefix!));
+      return matchesPrefix(p, record.source_prefix!) && (!policy || policy.group_id === record.id) &&
         (policy?.group_id === record.id && policy.kind === 'manual' || !longerRule);
     }).map(p => p.id) : [];
     const first = state.products.find(p => memberIds.includes(p.id));
     groups.push({ key: groupKey, id: record.id || null, kind: record.kind, prefix: record.source_prefix,
-      internalName: record.internal_name, name: record.internal_name || (record.kind === 'automatic' ? record.source_prefix! : first ? `Grupa — ${first.name}` : 'Nova grupa'),
+      internalName: record.internal_name, name: record.internal_name || (record.kind === 'automatic' ? record.source_prefix!.startsWith('naocare:') ? `${first?.brand || ''} ${record.source_prefix!.split(':').at(-1)}`.trim() : record.source_prefix! : first ? `Grupa — ${first.name}` : 'Nova grupa'),
       followAuto: record.follow_auto, customized: record.customized, createdBy: record.created_by_user_id,
       revision: state.revision, catalogRevision: state.catalogRevision, memberIds, automaticMemberIds,
       manualMemberIds: state.policies.filter(p => p.group_id === record.id && p.kind === 'manual').map(p => p.product_id),
@@ -122,7 +132,7 @@ export function groupOverview(state: GroupState): GroupOverview {
       const owner = state.groups.find(g => g.id === owners.get(p.id));
       if (owner) assignments[p.id] = key(owner);
     } else {
-      const base = prefix(p.name);
+      const base = prefix(p);
       if (base !== null) assignments[p.id] = `auto:${base}`;
     }
   }
@@ -138,9 +148,9 @@ export function resolveGroupMembers(state: GroupState, productId: string): strin
     const owner = owners.get(productId);
     return owner ? state.products.filter(p => owners.get(p.id) === owner).map(p => p.id) : [productId];
   }
-  const base = prefix(product.name);
+  const base = prefix(product);
   if (base === null) return [productId];
-  return state.products.filter(p => p.name.startsWith(base) && !owners.has(p.id)).map(p => p.id);
+  return state.products.filter(p => matchesPrefix(p, base) && !owners.has(p.id)).map(p => p.id);
 }
 
 // Public product pages need only one group, not the admin catalog snapshot.
@@ -150,13 +160,16 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
       (policy.product_id IS NOT NULL OR rule.id IS NOT NULL) AS has_owner,
       CASE WHEN policy.product_id IS NOT NULL THEN policy.group_id
         WHEN rule.follow_auto THEN rule.id ELSE NULL END AS owner_id,
-      CASE WHEN strpos(p.name, '-') > 0 THEN regexp_replace(p.name, '-[^-]*$', '') ELSE NULL END AS base
+      CASE WHEN d.slug='naocare' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)
+        WHEN strpos(p.name, '-') > 0 THEN regexp_replace(p.name, '-[^-]*$', '') ELSE NULL END AS base
     FROM products p
+    LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
     LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
     LEFT JOIN LATERAL (
       SELECT g.id, g.follow_auto FROM catalog_variant_groups g
       WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
-        AND left(p.name, length(g.source_prefix))=g.source_prefix
+        AND CASE WHEN left(g.source_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=g.source_prefix
+          ELSE left(p.name, length(g.source_prefix))=g.source_prefix END
       ORDER BY length(g.source_prefix) DESC LIMIT 1
     ) rule ON true
     WHERE p.organization_id=$1 AND p.slug=$2 AND p.deleted_at IS NULL AND p.active AND p.published
@@ -168,11 +181,13 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
   )
   SELECT t.id AS "sourceId", ARRAY(
     SELECT p.id FROM products p
+    LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
     LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
     LEFT JOIN LATERAL (
       SELECT g.id, g.follow_auto FROM catalog_variant_groups g
       WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
-        AND left(p.name, length(g.source_prefix))=g.source_prefix
+        AND CASE WHEN left(g.source_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=g.source_prefix
+          ELSE left(p.name, length(g.source_prefix))=g.source_prefix END
       ORDER BY length(g.source_prefix) DESC LIMIT 1
     ) rule ON true
     WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND p.active AND p.published
@@ -183,10 +198,13 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
         OR (t.has_owner AND t.owner_id IS NOT NULL AND (
           policy.group_id=t.owner_id
           OR (policy.product_id IS NULL AND t.owner_kind='automatic' AND t.customized AND t.follow_auto
-            AND left(p.name, length(t.owner_prefix))=t.owner_prefix AND rule.id=t.owner_id AND rule.follow_auto)
+            AND CASE WHEN left(t.owner_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=t.owner_prefix
+              ELSE left(p.name, length(t.owner_prefix))=t.owner_prefix END AND rule.id=t.owner_id AND rule.follow_auto)
         ))
         OR (NOT t.has_owner AND policy.product_id IS NULL AND rule.id IS NULL
-          AND ((t.base IS NULL AND p.id=t.id) OR (t.base IS NOT NULL AND left(p.name, length(t.base))=t.base)))
+          AND ((t.base IS NULL AND p.id=t.id) OR (t.base IS NOT NULL AND
+            CASE WHEN left(t.base,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=t.base
+              ELSE left(p.name, length(t.base))=t.base END)))
       )
     ORDER BY p.name, p.id
   ) AS ids FROM target t`, [organizationId, slug]);
@@ -245,7 +263,7 @@ export async function mutateGroups(db: Database['pool'], ctx: RequestContext,
           const product = state.products.find(p => p.id === id)!;
           const policy = state.policies.find(p => p.product_id === id);
           const belongsElsewhere = !before?.memberIds.includes(id) && Boolean(overview.assignments[id] && overview.assignments[id] !== key(group));
-          const manual = group.kind === 'custom' || !product.name.startsWith(group.source_prefix!) ||
+          const manual = group.kind === 'custom' || !matchesPrefix(product, group.source_prefix!) ||
             policy?.kind === 'manual' || belongsElsewhere || policy?.kind === 'detached';
           if (follow && !manual) {
             await client.query('DELETE FROM catalog_variant_group_products WHERE organization_id=$1 AND product_id=$2 AND group_id=$3', [ctx.organizationId,id,group.id]);
