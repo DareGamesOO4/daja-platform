@@ -538,29 +538,39 @@ export class StorefrontOrdersController {
     const input = parseWithSchema(orderSchema, body);
     const organizationId = publicOrganizationId(this.config);
     const order = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, input.items, client);
+      const cart = await this.promotions.priceCart(organizationId, input.items, client);
+      const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, cart.items, client);
       const promotion = await this.promotions.resolve(
         {
           organizationId,
           customer,
           code: input.promoCode,
-          items: input.items,
+          items: cart.items,
           shippingMethod: input.shippingMethod,
           paymentMethod: input.paymentMethod
         },
         client,
-        true
+        true,
+        cart.lines
       );
-      const subtotal = promotion.subtotalAmount ?? input.subtotal;
-      const shippingCost = promotion.freeShipping ? 0 : input.shippingCost;
+      const subtotalMinor = cart.subtotalMinor;
+      const discountedSubtotalMinor = Math.max(0, subtotalMinor - promotion.discountAmountMinor);
+      const shippingMinor = input.shippingMethod === 'pickup' || promotion.freeShipping ||
+        discountedSubtotalMinor >= amountMinor(this.config.STOREFRONT_FREE_SHIPPING_THRESHOLD_RSD)
+        ? 0
+        : amountMinor(this.config.STOREFRONT_SHIPPING_COST_RSD);
+      const totalMinor = discountedSubtotalMinor + shippingMinor;
+      if (!Number.isSafeInteger(totalMinor) || totalMinor > 2_147_483_647) {
+        throw new ValidationFailedError('Iznos porudžbine je van dozvoljenog opsega.');
+      }
       const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
         items: frozenItems as typeof input.items,
-        subtotalAmount: amountMinor(subtotal),
-        discountAmount: amountMinor(promotion.discountAmount),
-        shippingAmount: amountMinor(shippingCost),
-        totalAmount: amountMinor(Math.max(0, subtotal - promotion.discountAmount + shippingCost)),
+        subtotalAmount: subtotalMinor,
+        discountAmount: promotion.discountAmountMinor,
+        shippingAmount: shippingMinor,
+        totalAmount: totalMinor,
         promoCode: promotion.code,
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod

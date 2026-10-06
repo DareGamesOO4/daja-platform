@@ -90,6 +90,7 @@ interface PromotionRow {
 interface CanonicalCartLine {
   productId: string;
   variantId: string;
+  legacyProductId: string | null;
   categoryId: string | null;
   brandId: string | null;
   departmentId: string | null;
@@ -313,6 +314,39 @@ export class PromotionsService {
     });
   }
 
+  async priceCart(
+    organizationId: string,
+    items: Array<Record<string, unknown>>,
+    client: Queryable = this.database.pool
+  ) {
+    const lines = await canonicalCartLines(client, organizationId, items);
+    const variants = new Map(lines.filter((line) => !line.legacyProductId).map((line) => [line.variantId, line]));
+    const products = new Map(lines.filter((line) => line.legacyProductId).map((line) => [line.legacyProductId, line]));
+    const pricedItems = items.map((item) => {
+      const variantId = typeof item.variantId === 'string' ? item.variantId.toLowerCase() : null;
+      const productId = String(item.productId ?? item.id ?? '').toLowerCase();
+      const line = variantId ? variants.get(variantId) : products.get(productId);
+      if (!line || (productId && productId !== line.productId)) {
+        throw new ValidationFailedError('Proizvod i varijanta iz korpe se ne podudaraju.');
+      }
+      const quantity = Number(item.qty ?? item.quantity ?? 1);
+      return {
+        ...item,
+        id: line.productId,
+        productId: line.productId,
+        variantId: line.variantId,
+        price: line.priceMinor / 100,
+        qty: quantity,
+        quantity
+      };
+    });
+    const subtotalMinor = lines.reduce((sum, line) => sum + line.priceMinor * line.quantity, 0);
+    if (!Number.isSafeInteger(subtotalMinor) || subtotalMinor < 0 || subtotalMinor > 2_147_483_647) {
+      throw new ValidationFailedError('Iznos porudžbine je van dozvoljenog opsega.');
+    }
+    return { items: pricedItems, lines, subtotalMinor };
+  }
+
   async resolve(
     input: {
       organizationId: string;
@@ -323,7 +357,8 @@ export class PromotionsService {
       paymentMethod?: 'cod' | 'pickup' | undefined;
     },
     client: Queryable = this.database.pool,
-    lockPromotion = false
+    lockPromotion = false,
+    pricedLines?: CanonicalCartLine[]
   ): Promise<PromotionResolution> {
     const code = input.code?.trim().toUpperCase();
     if (!code) return emptyResolution();
@@ -350,7 +385,7 @@ export class PromotionsService {
     await this.assertAudience(promotion, input.customer, client);
     this.assertCheckoutRules(promotion, input.shippingMethod, input.paymentMethod);
 
-    const lines = await canonicalCartLines(client, input.organizationId, input.items);
+    const lines = pricedLines ?? await canonicalCartLines(client, input.organizationId, input.items);
     const subtotalMinor = lines.reduce((sum, item) => sum + item.priceMinor * item.quantity, 0);
     const rules = parseProductRules(promotion.product_rules);
     const eligible = lines.filter((line) => isEligible(line, rules));
@@ -741,18 +776,21 @@ async function canonicalCartLines(
   const variantQuantities = new Map<string, number>();
   const legacyProductQuantities = new Map<string, number>();
   for (const item of items) {
-    const variantId = typeof item.variantId === 'string' ? item.variantId : null;
+    const variantId = typeof item.variantId === 'string' ? item.variantId.toLowerCase() : null;
     const productId =
       typeof item.productId === 'string'
-        ? item.productId
+        ? item.productId.toLowerCase()
         : typeof item.id === 'string'
-          ? item.id
+          ? item.id.toLowerCase()
           : null;
     const quantity = Number(item.qty ?? item.quantity ?? 1);
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 200) {
       throw new ValidationFailedError('Korpa sadrži neispravan proizvod ili količinu.');
     }
-    if (variantId && isUuid(variantId)) {
+    if (variantId && !isUuid(variantId)) {
+      throw new ValidationFailedError('Korpa sadrži neispravnu varijantu proizvoda.');
+    }
+    if (variantId) {
       variantQuantities.set(variantId, (variantQuantities.get(variantId) ?? 0) + quantity);
       continue;
     }
@@ -846,29 +884,27 @@ async function canonicalCartLines(
   if (result.rows.length !== variantIds.length + legacyProductIds.length) {
     throw new ValidationFailedError('Jedan ili više proizvoda iz korpe više nisu dostupni.');
   }
-  const lines = new Map<string, CanonicalCartLine>();
-  result.rows.forEach((row) => {
+  return result.rows.map((row) => {
     const quantity = row.legacy_product_id
       ? legacyProductQuantities.get(row.legacy_product_id)
       : variantQuantities.get(row.variant_id);
-    const existing = lines.get(row.variant_id);
-    if (existing) {
-      existing.quantity += quantity ?? 0;
-      return;
+    const priceMinor = Number(row.price_minor);
+    if (!Number.isSafeInteger(priceMinor) || priceMinor < 0) {
+      throw new ValidationFailedError('Cena proizvoda nije ispravna.');
     }
-    lines.set(row.variant_id, {
+    return {
       productId: row.product_id,
       variantId: row.variant_id,
+      legacyProductId: row.legacy_product_id,
       categoryId: row.category_id,
       brandId: row.brand_id,
       departmentId: row.department_id,
-      priceMinor: Number(row.price_minor),
+      priceMinor,
       quantity: quantity ?? 0,
       attributes: asObject(row.attributes),
       specificationValues: asObject(row.specification_values)
-    });
+    };
   });
-  return [...lines.values()];
 }
 
 function isEligible(line: CanonicalCartLine, rules: { include: PromotionScope; exclude: PromotionScope }) {

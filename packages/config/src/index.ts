@@ -60,7 +60,7 @@ const envSchema = z.object({
   PRIVACY_TOKEN_SECRET: optionalPreparedSecret,
   STOREFRONT_PUBLIC_BASE_URL: z.string().url().default('https://dajashop.rs'),
   STOREFRONT_SHIPPING_COST_RSD: z.coerce.number().min(0).default(380),
-  STOREFRONT_FREE_SHIPPING_THRESHOLD_RSD: z.coerce.number().min(0).default(10000),
+  STOREFRONT_FREE_SHIPPING_THRESHOLD_RSD: z.coerce.number().min(0).default(8000),
   STOREFRONT_DELIVERY_MIN_DAYS: z.coerce.number().int().min(0).default(1),
   STOREFRONT_DELIVERY_MAX_DAYS: z.coerce.number().int().min(0).default(3),
   STOREFRONT_RETURN_DAYS: z.coerce.number().int().min(0).default(14),
