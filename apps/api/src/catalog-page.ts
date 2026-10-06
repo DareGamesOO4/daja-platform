@@ -3,6 +3,7 @@ import { CatalogRepository } from '@daja/database';
 import { z } from 'zod';
 import { automaticFilterOptions } from './catalog-filter-options.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
+import { departmentBrandNames } from './catalog-department-brands.js';
 
 export interface Option { id: string; label: string; visible: boolean; color: string; image: string; conditions: Array<{ source: string; values: string[] }> }
 export interface Node { id: string; title: string; visible: boolean; priority: number; mode: string; style: string; match: string; unit: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined }
@@ -80,13 +81,14 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const client = await pool.connect();
   try { await client.query('BEGIN'); await initializeCatalogFilters(client,organizationId,input.department); await client.query('COMMIT'); }
   catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
-  const [products, configResult] = await Promise.all([
+  const [products, configResult, brands] = await Promise.all([
     productsSnapshot(pool,organizationId,input.department),
-    pool.query<{configuration: Configuration}>('SELECT published AS configuration FROM catalog_filter_configurations WHERE organization_id=$1 AND department=$2',[organizationId,input.department])
+    pool.query<{configuration: Configuration}>('SELECT published AS configuration FROM catalog_filter_configurations WHERE organization_id=$1 AND department=$2',[organizationId,input.department]),
+    departmentBrandNames(pool, organizationId, input.department)
   ]);
   const saved = configResult.rows[0]?.configuration;
   if (!saved) throw new Error('Published catalog filters unavailable');
-  const configuration = {...saved,filters: automaticFilterOptions(saved.filters,source => products.flatMap(product => values(product,source)))};
+  const configuration = {...saved,filters: automaticFilterOptions(saved.filters,source => source === 'brand' ? [...brands,...products.flatMap(product => values(product,source))] : products.flatMap(product => values(product,source)))};
   const nodes = leaves(configuration.filters);
   const params = new URLSearchParams(input.params);
   const filtered = products.filter(product => matches(product,params,nodes,input.fixedGender));

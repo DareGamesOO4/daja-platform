@@ -283,7 +283,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v2:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v3:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response

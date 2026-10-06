@@ -11,6 +11,7 @@ import { resolveRequestContext, resolvePublicRequestContext } from './runtime/re
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 import { automaticFilterOptions } from './catalog-filter-options.js';
+import { departmentBrandNames } from './catalog-department-brands.js';
 
 const departmentSchema = z.enum(['satovi', 'daljinski', 'baterije', 'naocare']);
 const idSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
@@ -95,7 +96,8 @@ export class CatalogFiltersController {
       LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
       WHERE p.organization_id = $1 AND d.slug = $2 AND p.deleted_at IS NULL AND p.active AND p.published`, [ctx.organizationId, department]);
     const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[_\s-]+/g, ' ').trim();
-    const read = (source: string) => products.rows.flatMap((product) => {
+    const brands = await departmentBrandNames(this.database.pool, ctx.organizationId, department);
+    const readProducts = (source: string) => products.rows.flatMap((product) => {
       if (source.startsWith('feature:')) return (product.features || []).some((feature) => feature.title?.trim() === source.slice(8)) ? ['Da'] : [];
       if (source === 'gender') {
         const gender = normalize(product.gender || 'UNISEX');
@@ -105,7 +107,7 @@ export class CatalogFiltersController {
       const raw = source.startsWith('spec:') ? product.attributes?.[key] ?? Object.entries(product.attributes || {}).find(([name]) => normalize(name) === normalize(key))?.[1] : product[source as 'brand' | 'category' | 'price'];
       return (Array.isArray(raw) ? raw : [raw]).filter((value) => value !== null && value !== undefined && typeof value !== 'object').map((value) => String(value).trim());
     });
-    return { configuration: { ...configuration, filters: automaticFilterOptions(configuration.filters, read) } };
+    return { configuration: { ...configuration, filters: automaticFilterOptions(configuration.filters, source => source === 'brand' ? [...brands,...readProducts(source)] : readProducts(source)) } };
   }
 
   @Get('admin/catalog/filters/:department')
