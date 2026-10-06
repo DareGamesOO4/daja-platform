@@ -26,7 +26,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       response.status(exception.getStatus()).json({
         error: {
-          code: ERROR_CODES.validationFailed,
+          code: exception.getStatus() === HttpStatus.TOO_MANY_REQUESTS ? 'RATE_LIMITED' : ERROR_CODES.validationFailed,
           message: exception.message,
           details: {},
           requestId

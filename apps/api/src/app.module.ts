@@ -1,5 +1,7 @@
 import { MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import type { RequestWithAuthContext } from './auth.controller.js';
 import { loadConfig } from '@daja/config';
 import { createDatabase, createRedisConnection } from '@daja/database';
 import { createLogger } from '@daja/observability';
@@ -55,12 +57,22 @@ const logger = createLogger(config, 'api');
 
 @Module({
   imports: [
-    ThrottlerModule.forRoot([
-      {
+    ThrottlerModule.forRoot({
+      // HTTP limits must not run against the WebSocket gateway or health probes.
+      skipIf: context => context.getType() !== 'http' || context.getClass() === HealthController,
+      getTracker: request => {
+        const ctx = (request as RequestWithAuthContext).authContext;
+        // AuthMiddleware verifies this identity. Never trust device/user headers
+        // directly, or rotating a header would bypass the limiter.
+        return ctx ? `staff:${ctx.organizationId}:${ctx.userId}:${ctx.deviceId || 'web'}` : `ip:${request.ip}`;
+      },
+      throttlers: [{
         ttl: 60_000,
-        limit: 120
-      }
-    ])
+        // Staff devices make bursts during inventory/sync; explicit @Throttle
+        // limits still override this default on sensitive handlers.
+        limit: context => context.switchToHttp().getRequest<RequestWithAuthContext>().authContext ? 600 : 120
+      }]
+    })
   ],
   controllers: [
     EngravingController,
@@ -90,6 +102,7 @@ const logger = createLogger(config, 'api');
     ,ReaderStationController
   ],
   providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     EngravingService,
     { provide: CONFIG, useValue: config },
     { provide: LOGGER, useValue: logger },

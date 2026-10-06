@@ -5,6 +5,7 @@ const optionalPreparedSecret = z.string().optional().default('');
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'staging', 'production']),
   PORT: z.coerce.number().int().positive().max(65535),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   API_PUBLIC_BASE_URL: z.string().url(),

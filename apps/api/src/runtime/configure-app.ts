@@ -11,6 +11,9 @@ import { ApiExceptionFilter } from './api-exception.filter.js';
 import { EnvelopeInterceptor } from './envelope.interceptor.js';
 
 export function configureApiApp(app: INestApplication, config: AppConfig, logger: Logger): void {
+  // Trust only the configured number of proxies, not an arbitrary forwarded
+  // chain. Render terminates public requests before they reach Express.
+  app.getHttpAdapter().getInstance().set('trust proxy', config.TRUST_PROXY_HOPS);
   app.use(helmet());
   // Capacitor Android serves the mobile UI from these local origins. Keep
   // them enabled in code so a Render environment update cannot strand the
@@ -18,7 +21,8 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   const corsOrigins = [...new Set([...config.CORS_ALLOWED_ORIGINS, 'capacitor://localhost', 'http://localhost', 'https://localhost'])];
   app.enableCors({
     origin: corsOrigins,
-    credentials: true
+    credentials: true,
+    exposedHeaders: ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset']
   });
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: false, limit: '1mb' }));
