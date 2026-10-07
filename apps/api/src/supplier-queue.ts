@@ -269,6 +269,8 @@ export async function supplierProviderSummary(pool: pg.Pool, organizationId: str
   return (
     await pool.query(
       `SELECT p.provider_code AS "providerCode", p.interval_seconds AS "intervalSeconds", p.capacity,
+    p.regular_interval_seconds AS "regularIntervalSeconds",
+    p.cycle_seconds / 86400 AS "cycleDays",
     p.cycle_epoch AS "cycleEpoch", p.paused_until AS "pausedUntil", p.pause_reason AS "pauseReason",
     p.manual_pause_mode AS "manualPauseMode",p.manual_pause_until AS "manualPauseUntil",p.manual_pause_at AS "manualPauseAt",
     p.manual_pause_reason AS "manualPauseReason",p.manual_pause_by AS "manualPauseBy",
@@ -284,7 +286,7 @@ export async function supplierProviderSummary(pool: pg.Pool, organizationId: str
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND (l.negative_count>0 OR l.missing_count BETWEEN 1 AND 2)) AS "confirmations",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND l.initial_requested_at IS NOT NULL) AS "initialPending",
     p.health_checked_at AS "healthCheckedAt", p.health_ok AS "healthOk", p.probe_requested_at AS "probeRequestedAt",
-    CASE WHEN p.cycle_epoch>now() THEN p.cycle_epoch ELSE p.cycle_epoch + (floor(extract(epoch FROM now()-p.cycle_epoch)/864000)::integer+1)*interval '240 hours' END AS "nextCycleAt",
+    CASE WHEN p.cycle_epoch>now() THEN p.cycle_epoch ELSE p.cycle_epoch + (floor(extract(epoch FROM now()-p.cycle_epoch)/p.cycle_seconds)::integer+1)*make_interval(secs => p.cycle_seconds) END AS "nextCycleAt",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.queue_position IS NOT NULL) AS occupied,
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND l.checks_enabled AND NOT l.removed AND EXISTS(SELECT 1 FROM products product WHERE product.id=l.product_id AND product.deleted_at IS NULL)) AS "ownActive",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.checks_enabled AND NOT l.removed) AS "ownDisabled",
@@ -530,34 +532,16 @@ async function finishLink(
 }
 
 async function legacyNextSlot(client: QueryClient, link: QueueLink): Promise<Date> {
-  const now = Date.now(),
-    week = 604800000;
-  if (link.last_checked_at)
-    return new Date(Math.max(now, new Date(link.next_check_at).getTime()) + week);
-  const scheduled = await client.query<{ next_check_at: Date }>(
-    `SELECT next_check_at FROM supplier_product_links l JOIN products p ON p.id=l.product_id
-    WHERE l.provider_code IN ('linkel','milano') AND l.id<>$1 AND l.checks_enabled AND NOT l.removed AND p.deleted_at IS NULL
-    AND l.check_status='available' AND l.missing_count=0 AND l.last_checked_at IS NOT NULL AND l.last_error IS NULL
-    AND next_check_at>now() AND next_check_at<now()+interval '7 days' ORDER BY next_check_at`,
+  const result = await client.query<{ next_check_at: Date | null }>(
+    `SELECT supplier_regular_slot(p.cycle_epoch,p.phase_seconds,p.regular_interval_seconds,
+      l.queue_position,now()+interval '1 second',p.cycle_seconds) AS next_check_at
+    FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
+    WHERE l.id=$1`,
     [link.id]
   );
-  if (!scheduled.rows.length) return new Date(now + week);
-  let previous = now,
-    start = now,
-    end = now;
-  for (const row of scheduled.rows) {
-    const at = new Date(row.next_check_at).getTime();
-    if (at - previous > end - start) {
-      start = previous;
-      end = at;
-    }
-    previous = at;
-  }
-  if (now + week - previous > end - start) {
-    start = previous;
-    end = now + week;
-  }
-  return new Date(Math.floor((start + end) / 2));
+  const next = result.rows[0]?.next_check_at;
+  if (!next) throw new Error('Dobavljač nema slobodan redovni termin');
+  return next;
 }
 async function finishLegacy(
   database: Database,
@@ -621,7 +605,7 @@ async function finishLegacy(
         duration: Date.now() - healthStarted
       });
     let next = row.next_check_at;
-    // A manual-only check preserves the weekly schedule; a coincident regular check is merged into it.
+    // A manual-only check preserves the regular schedule; a coincident regular check is merged into it.
     const regular = link.legacy_due || lease.kind === 'initial';
     if (outcome.status === 'available') {
       if (regular) next = await legacyNextSlot(client, row);
@@ -654,7 +638,7 @@ async function finishLegacy(
           ? Math.min(row.missing_count + 1, paused ? 2 : 3)
           : row.missing_count;
       const final = count >= 3 && !paused && healthy;
-      if (regular) next = new Date(Date.now() + (final ? 604800000 : 86400000));
+      if (regular) next = final ? await legacyNextSlot(client, row) : new Date(Date.now() + 86400000);
       await client.query(
         `UPDATE supplier_product_links SET missing_count=$2,check_status=CASE WHEN $3 THEN 'missing' ELSE check_status END,
         stock_status=CASE WHEN $3 THEN NULL ELSE stock_status END,last_checked_at=now(),last_error=$4,next_check_at=$5,
@@ -737,12 +721,12 @@ export async function rollMissedSlots(
     skipped: number;
   }>(
     `WITH due AS MATERIALIZED (
-    SELECT l.id,l.organization_id,l.provider_code,(floor(extract(epoch FROM now()-l.next_check_at)/604800)::integer+1) AS skipped
+    SELECT l.id,l.organization_id,l.provider_code,p.cycle_seconds,(floor(extract(epoch FROM now()-l.next_check_at)/p.cycle_seconds)::integer+1) AS skipped
     FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
     WHERE l.provider_code=ANY($1::text[]) AND l.provider_code IN ('linkel','milano') AND l.checks_enabled AND NOT l.removed AND l.initial_requested_at IS NULL
       AND l.last_error IS NULL AND l.missing_count=0 AND p.manual_pause_mode IS NOT NULL
       AND l.next_check_at<=LEAST(now(),COALESCE(p.manual_pause_until,now())))
-    ,updated AS (UPDATE supplier_product_links l SET next_check_at=l.next_check_at+due.skipped*interval '7 days'
+    ,updated AS (UPDATE supplier_product_links l SET next_check_at=l.next_check_at+due.skipped*make_interval(secs => due.cycle_seconds)
     FROM due WHERE l.id=due.id RETURNING due.organization_id,due.provider_code,due.skipped)
     SELECT organization_id,provider_code,sum(skipped)::integer AS skipped FROM updated GROUP BY organization_id,provider_code`,
     [providers]
