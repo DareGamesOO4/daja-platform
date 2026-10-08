@@ -16,12 +16,12 @@ type Configuration = z.infer<typeof specificationConfigurationSchema>;
 type Specification = { id: string; name: string; slug: string; unit: string | null; optionValues: string[] };
 const norm = (v: string) => v.trim().toLocaleLowerCase('sr-RS').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[-\s]+/g, '_');
 const groups = [
-  ['general', 'Opšti podaci', ['serija', 'garancija']],
+  ['general', 'Opšti podaci', ['uzrasna_grupa', 'serija', 'garancija', 'proizvo_ac']],
   ['mechanism', 'Mehanizam', ['tip_mehanizma', 'mehanizam', 'rezerva_snage']],
-  ['functions', 'Funkcije', ['datum', 'dan_u_nedelji']],
-  ['design', 'Dizajn', ['stil', 'oblik', 'prikaz', 'boja_brojcanika', 'boja_kucista']],
-  ['case', 'Kućište i otpornost', ['precnik_kucista', 'debljina_kucista', 'staklo', 'vodootpornost']],
-  ['strap', 'Narukvica', ['materijal_narukvice', 'stil_narukvice', 'boja_narukvice']]
+  ['functions', 'Funkcije', ['datum', 'dan_u_nedelji', 'hronograf', 'stoperica', 'alarm', 'tajmer', 'svetsko_vreme', 'dvojno_vreme', '12_24_casovni_format', 'satni_zvucni_signal', 'osvetljenje_displeja']],
+  ['design', 'Dizajn', ['stil', 'oblik', 'prikaz', 'boja_brojcanika', 'boja_kucista', 'luminescencija']],
+  ['case', 'Kućište i otpornost', ['materijal_kucista', 'precnik_kucista', 'debljina_kucista', 'tezina', 'staklo', 'vodootpornost']],
+  ['strap', 'Narukvica', ['materijal_narukvice', 'stil_narukvice', 'boja_narukvice', 'sirina_narukvice', 'duzina_narukvice']]
 ] as const;
 
 function defaults(specs: Specification[], watch: boolean): Configuration {
