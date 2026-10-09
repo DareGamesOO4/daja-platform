@@ -119,15 +119,39 @@ export async function specificationEditor(database: Database, organizationId: st
         const value = existing || input.value;
         spec.optionValues = existing ? values : [...values, value];
         await client.query('UPDATE spec_keys SET option_values=$3::jsonb,version=version+1,updated_at=now() WHERE id=$1 AND organization_id=$2', [spec.id, organizationId,JSON.stringify(spec.optionValues)]);
-        if (input.linkType) {
-          if (spec.id !== caliberSpec?.id || !typeSpec || !typeSpec.optionValues.some(v => norm(v) === norm(input.linkType!))) throw new BadRequestException('Izaberi važeći tip mehanizma.');
+        if (spec.id === caliberSpec?.id && (input.linkType || input.brand?.trim())) {
+          if (input.linkType && (!typeSpec || !typeSpec.optionValues.some(v => norm(v) === norm(input.linkType!)))) throw new BadRequestException('Izaberi važeći tip mehanizma.');
           let f = configuration.fields.find(f => f.specId === spec.id);
           if (!f) { f = {specId:spec.id,groupId:'other',order:999,visibility:[],options:[]}; configuration.fields.push(f); }
           const previous = f.options.find(o => norm(o.value) === norm(value));
-          const linkedTypes = previous?.rules.flat().filter(c => c.specId === typeSpec.id && c.operator === 'equals').map(c => norm(c.value)) || [];
-          if (linkedTypes.length && !linkedTypes.includes(norm(input.linkType))) throw new ConflictException('Kalibar je već povezan sa drugim tipom. Ponovo učitaj; vezu možeš menjati u podešavanjima.');
+          const linkedTypes = typeSpec ? previous?.rules.flat().filter(c => c.specId === typeSpec.id && c.operator === 'equals').map(c => norm(c.value)) || [] : [];
+          if (input.linkType && linkedTypes.some(type => type !== norm(input.linkType!))) throw new ConflictException('Kalibar je već povezan sa drugim tipom. Ponovo učitaj; vezu možeš menjati u podešavanjima.');
+          let optionRules = previous?.rules || [];
+          const requestedBrand = input.brand?.trim();
+          const brandName = requestedBrand ? brands.find(brand => norm(brand.name) === norm(requestedBrand))?.name || requestedBrand : undefined;
+          if (brandName) {
+            // A mechanism value is scoped to the product's brand. If it was
+            // previously inferred from catalog products, retain a branch for
+            // every matching brand instead of leaving the old type-wide rule.
+            const inferred = products.filter(product => norm(String(get(product.attributes, caliberSpec) || '')) === norm(value))
+              .flatMap(product => {
+                const productType = String(get(product.attributes, typeSpec) || '').trim();
+                const productBrand = String(product.brand || '').trim();
+                if (!productBrand || (input.linkType && norm(productType) !== norm(input.linkType))) return [];
+                const movementType = input.linkType || typeSpec?.optionValues.find(option => norm(option) === norm(productType));
+                return [[...(movementType && typeSpec ? [{specId:typeSpec.id,operator:'equals' as const,value:movementType}] : []), {brand:true,operator:'equals' as const,value:productBrand}]];
+              });
+            const hasUnscopedTypeRule = Boolean(typeSpec && optionRules.some(row => !row.some(condition => condition.brand) && row.some(condition => condition.specId === typeSpec.id)));
+            const hasBrandRule = optionRules.some(row => row.some(condition => condition.brand));
+            if (hasUnscopedTypeRule) optionRules = optionRules.filter(row => row.some(condition => condition.brand) || !row.some(condition => condition.specId === typeSpec?.id));
+            if (!hasBrandRule || hasUnscopedTypeRule) optionRules.push(...inferred);
+            optionRules.push([...(input.linkType && typeSpec ? [{specId:typeSpec.id,operator:'equals' as const,value:input.linkType}] : []), {brand:true,operator:'equals' as const,value:brandName}]);
+            optionRules = optionRules.filter((row, index, all) => all.findIndex(candidate => JSON.stringify(candidate) === JSON.stringify(row)) === index);
+          } else if (input.linkType && typeSpec) {
+            optionRules.push([{specId:typeSpec.id,operator:'equals',value:input.linkType}]);
+          }
           f.options = f.options.filter(o => norm(o.value) !== norm(value));
-          f.options.push({value,rules:[[{specId:typeSpec.id,operator:'equals',value:input.linkType}]]});
+          f.options.push({value,rules:optionRules});
         }
         validateConfiguration(configuration,specs);
       }
