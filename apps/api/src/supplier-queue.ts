@@ -343,19 +343,41 @@ async function pauseProvider(client: QueryClient, provider: string, reason: stri
 async function healthProbe(
   database: Database,
   adapters: Adapters,
+  logger: Logger,
   provider: string,
   signal: AbortSignal,
   excludeId?: string
 ): Promise<boolean> {
-  if (!(await adapters.home(provider, signal))) return false;
+  if (!(await adapters.home(provider, signal))) {
+    logger.warn({ provider, stage: 'home' }, 'Supplier health probe failed');
+    return false;
+  }
   const controls = await database.pool.query<{ url: string }>(
-    `SELECT DISTINCT url FROM supplier_product_links
-    WHERE provider_code=$1 AND NOT removed AND url IS NOT NULL AND last_good_result IS NOT NULL
-      AND ($2::uuid IS NULL OR id<>$2) AND (disabled_reason IS NULL OR check_status<>'missing') LIMIT 2`,
+    `SELECT url FROM supplier_product_links
+    WHERE provider_code=$1 AND NOT removed AND checks_enabled AND check_status='available'
+      AND disabled_reason IS NULL AND url IS NOT NULL AND last_good_result IS NOT NULL
+      AND last_checked_at>=now()-interval '30 days'
+      AND ($2::uuid IS NULL OR id<>$2)
+    GROUP BY url ORDER BY max(last_checked_at) DESC NULLS LAST LIMIT 2`,
     [provider, excludeId ?? null]
   );
   for (const control of controls.rows) {
-    if ((await adapters.page(provider, control.url, signal)).status !== 'available') return false;
+    try {
+      const result = await adapters.page(provider, control.url, signal);
+      if (result.status !== 'available') {
+        logger.warn(
+          { provider, stage: 'control_page', url: control.url, outcome: result.status },
+          'Supplier health probe failed'
+        );
+        return false;
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, provider, stage: 'control_page', url: control.url },
+        'Supplier health probe failed'
+      );
+      return false;
+    }
   }
   return true;
 }
@@ -363,6 +385,7 @@ async function healthProbe(
 async function finishLink(
   database: Database,
   adapters: Adapters,
+  logger: Logger,
   lease: Lease,
   link: QueueLink,
   outcome: SupplierOutcome,
@@ -403,7 +426,7 @@ async function finishLink(
             ? p.health_ok
             : await (async () => {
                 probed = true;
-                return healthProbe(database, adapters, link.provider_code, signal, link.id);
+                return healthProbe(database, adapters, logger, link.provider_code, signal, link.id);
               })();
       } catch {
         health = false;
@@ -760,7 +783,7 @@ export function startNumberedSupplierChecks(
           };
         }
         if (NUMBERED_PROVIDERS.includes(link.provider_code as NumberedProvider))
-          await finishLink(database, adapters, lease, link, outcome, signal, Date.now() - started);
+          await finishLink(database, adapters, logger, lease, link, outcome, signal, Date.now() - started);
         else
           await finishLegacy(
             database,
@@ -774,7 +797,7 @@ export function startNumberedSupplierChecks(
       } else {
         let healthy = false;
         try {
-          healthy = await healthProbe(database, adapters, lease.provider_code, signal);
+          healthy = await healthProbe(database, adapters, logger, lease.provider_code, signal);
         } catch {
           /* treat as unhealthy */
         }

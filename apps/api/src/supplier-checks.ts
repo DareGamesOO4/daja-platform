@@ -179,11 +179,20 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
       return { status: 'available', stockStatus: stock === 'instock' ? 'in_stock' : stock === 'outofstock' ? 'out_of_stock' : null, priceAmount: Number(price), priceCurrency: 'EUR' };
     }
     if (provider === 'timezone') {
-      if (!/class=["']product-price["']/.test(body) || !/itemprop=["']availability["']/.test(body)) return { status: 'error' };
-      const price = body.match(/<li\b[^>]*class=["']product-price["'][^>]*>\s*([0-9.,]+)\s*€/i)?.[1];
+      if (!/itemprop=["']availability["']/.test(body)) return { status: 'error' };
+      const priceTag = body.match(/<meta\b(?=[^>]*\bitemprop=["']price["'])[^>]*>/i)?.[0];
+      const metaPrice = priceTag?.match(/\bcontent=["']([0-9]+(?:[.,][0-9]+)?)["']/i)?.[1];
+      const priceElement = body.match(/<li\b[^>]*class=["'][^"']*\b(?:product-price|price-new)\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
+      const visiblePrice = priceElement
+        ?.replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;|&#160;/gi, ' ')
+        .match(/([0-9]+(?:[.,][0-9]+)?)\s*€/i)?.[1];
+      const price = metaPrice ?? visiblePrice;
       const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
       if (!price) return { status: 'error' };
-      return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
+      const priceAmount = Number(price.replace(',', '.'));
+      if (!Number.isFinite(priceAmount)) return { status: 'error' };
+      return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
     }
     const product = body.split('id="product_info"')[1];
     if (!product || !/Модел|Model/i.test(product.slice(0, 20000))) return { status: 'error' };
