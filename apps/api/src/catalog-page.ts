@@ -117,9 +117,12 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
     return [node.id,{values:choices,selected,numbers}];
   }));
   const total = filtered.length;
+  const hiddenCount = includeHidden
+    ? filtered.filter(product => !product.active || !product.published).length
+    : undefined;
   const page = Math.min(input.page,Math.max(1,Math.ceil(total/32)));
   const items = await cards(pool,organizationId,filtered.slice((page-1)*32,page*32).map(product => product.id),includeHidden);
-  return {items,total,page,perPage:32,configuration,facets};
+  return {items,total,page,perPage:32,configuration,facets,...(hiddenCount === undefined ? {} : {hiddenCount})};
 }
 const homeSlugs = ['casio-mtp-1314pl-8a','daniel-3271','qq-classic-qw12','ga-100-1a1','orient-diver','daniel-klein-dk13965-4'];
 export async function publicHomeProducts(pool: Pool, organizationId: string) {
