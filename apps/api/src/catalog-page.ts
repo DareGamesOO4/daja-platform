@@ -48,7 +48,7 @@ function matches(product: Product, params: URLSearchParams, nodes: Node[], fixed
     return !selected.length || (node.match === 'all' ? selected.every(option => optionMatches(product,option)) : selected.some(option => optionMatches(product,option)));
   });
 }
-async function productsSnapshot(pool: Pool, organizationId: string, department?: string): Promise<Product[]> {
+async function productsSnapshot(pool: Pool, organizationId: string, department?: string, includeHidden = false): Promise<Product[]> {
   // Filter/sort metadata stays on the server. Only selected cards load media.
   const result = await pool.query<Product>(`SELECT p.id, p.name, p.slug, COALESCE(d.slug,'satovi') AS department,
     b.name AS brand, c.name AS category, v.gender, v.current_price_amount::double precision / 100 AS price,
@@ -61,14 +61,14 @@ async function productsSnapshot(pool: Pool, organizationId: string, department?:
     LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id AND d.deleted_at IS NULL
     LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id AND b.deleted_at IS NULL
     LEFT JOIN categories c ON c.id=p.primary_category_id AND c.organization_id=p.organization_id AND c.deleted_at IS NULL
-    WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND p.active AND p.published
+    WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND ($3::boolean OR (p.active AND p.published))
       AND ($2::text IS NULL OR COALESCE(d.slug,'satovi')=$2)
-    ORDER BY p.updated_at DESC, p.id DESC`, [organizationId, department ?? null]);
+    ORDER BY p.updated_at DESC, p.id DESC`, [organizationId, department ?? null, includeHidden]);
   return result.rows;
 }
-async function cards(pool: Pool, organizationId: string, ids: string[]) {
+async function cards(pool: Pool, organizationId: string, ids: string[], includeHidden = false) {
   if (!ids.length) return [];
-  const result = await new CatalogRepository(pool).listPublicProducts({organizationId}, {productIds: ids, limit: ids.length});
+  const result = await new CatalogRepository(pool).listPublicProducts({organizationId}, {productIds: ids, limit: ids.length, includeHidden});
   const order = new Map(ids.map((id,index) => [id,index]));
   // Preserve card galleries, prices, availability and cart identity, without
   // serializing every specification and feature twice in the initial HTML.
@@ -77,12 +77,12 @@ async function cards(pool: Pool, organizationId: string, ids: string[]) {
     return { ...compact, images: compact.images.map(image => ({ url: image.url, thumb: image.thumb })) };
   });
 }
-export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query) {
+export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query, includeHidden = false) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); await initializeCatalogFilters(client,organizationId,input.department); await client.query('COMMIT'); }
   catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   const [products, configResult, brands] = await Promise.all([
-    productsSnapshot(pool,organizationId,input.department),
+    productsSnapshot(pool,organizationId,input.department,includeHidden),
     pool.query<{configuration: Configuration}>('SELECT published AS configuration FROM catalog_filter_configurations WHERE organization_id=$1 AND department=$2',[organizationId,input.department]),
     departmentBrandNames(pool, organizationId, input.department)
   ]);
@@ -110,7 +110,7 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   }));
   const total = filtered.length;
   const page = Math.min(input.page,Math.max(1,Math.ceil(total/32)));
-  const items = await cards(pool,organizationId,filtered.slice((page-1)*32,page*32).map(product => product.id));
+  const items = await cards(pool,organizationId,filtered.slice((page-1)*32,page*32).map(product => product.id),includeHidden);
   return {items,total,page,perPage:32,configuration,facets};
 }
 const homeSlugs = ['casio-mtp-1314pl-8a','daniel-3271','qq-classic-qw12','ga-100-1a1','orient-diver','daniel-klein-dk13965-4'];

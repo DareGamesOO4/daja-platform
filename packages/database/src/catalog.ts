@@ -79,18 +79,18 @@ export class CatalogRepository {
       sort?: string | undefined;
       productIds?: string[] | undefined;
       relatedTo?: string | undefined;
+      includeHidden?: boolean | undefined;
     }
   ): Promise<{ items: PublicProductCard[]; nextCursor: string | null }> {
     const params: unknown[] = [ctx.organizationId, filters.limit + 1];
     const where = [
       'p.organization_id = $1',
       'p.deleted_at IS NULL',
-      'p.active',
-      'p.published',
       'v.deleted_at IS NULL',
       'v.active',
       'v.published'
     ];
+    if (!filters.includeHidden) where.push('p.active', 'p.published');
     if (filters.relatedTo) {
       const source = (await this.client.query<{
         id: string; brand_id: string | null; department_id: string | null;
@@ -170,7 +170,8 @@ export class CatalogRepository {
 
     const result = await this.client.query<PublicProductRow>(
       `SELECT p.id AS product_id, v.id AS variant_id, p.name, p.slug,
-              p.brand_id, p.primary_category_id, p.marketing_flags, p.features, d.slug AS department,
+              p.brand_id, p.primary_category_id, p.marketing_flags, p.features,
+              p.active AS product_active, p.published AS product_published, d.slug AS department,
               b.name AS brand, c.name AS category,
               v.gender, COALESCE(v.attributes, '{}'::jsonb) - $${internalAttributesParam}::text[] AS attributes,
               v.current_price_amount AS regular_price,
@@ -759,6 +760,8 @@ export interface PublicProductCard {
   primaryCategoryId: string | null;
   department: string | null;
   marketingFlags: string[];
+  isVisible: boolean;
+  published: boolean;
   features?: ProductRecord['features'];
   brand: string | null;
   category: string | null;
@@ -793,6 +796,8 @@ interface PublicProductRow {
   department: string | null;
   marketing_flags: string[];
   features: ProductRecord['features'] | null;
+  product_active: boolean;
+  product_published: boolean;
   brand: string | null;
   category: string | null;
   gender: string | null;
@@ -914,6 +919,8 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     primaryCategoryId: row.primary_category_id,
     department: row.department,
     marketingFlags: row.marketing_flags ?? [],
+    isVisible: row.product_active,
+    published: row.product_published,
     features: (row.features ?? []).filter((feature) => feature.title && !feature.title.startsWith('_') && !/^rfid\b/i.test(feature.title)),
     brand: row.brand,
     category: row.category,

@@ -795,6 +795,41 @@ export class StaffCatalogController {
     return this.adminProductRows(ctx.organizationId, undefined, this.isCatalogContributor(ctx) ? ctx.userId : undefined);
   }
 
+  @Get('admin/catalog/page')
+  async adminCatalogPage(
+    @Req() request: Request,
+    @Query() query: Record<string, string | undefined>,
+    @Res({ passthrough: true }) response: Response
+  ) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    if (this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
+    response.setHeader('Cache-Control', 'private, no-store');
+    return publicCatalogPage(this.database.pool, ctx.organizationId, parseWithSchema(catalogPageSchema, query), true);
+  }
+
+  @Get('admin/catalog/products/by-slug/:slug')
+  async adminCatalogProductBySlug(
+    @Req() request: Request,
+    @Param('slug') rawSlug: string,
+    @Res({ passthrough: true }) response: Response
+  ) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    if (this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
+    response.setHeader('Cache-Control', 'private, no-store');
+    const slug = parseWithSchema(slugSchema, rawSlug);
+    const result = await this.database.pool.query<{ id: string }>(
+      'SELECT id FROM products WHERE organization_id = $1 AND slug = $2 AND deleted_at IS NULL',
+      [ctx.organizationId, slug]
+    );
+    const productId = result.rows[0]?.id;
+    if (!productId) throw new NotFoundException('Product not found');
+    const product = (await this.adminProductRows(ctx.organizationId, productId))[0];
+    if (!product) throw new NotFoundException('Product not found');
+    return product;
+  }
+
   @Get('products/:id')
   async getProduct(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
