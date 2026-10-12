@@ -111,7 +111,15 @@ export async function supplierLinkActions(
           reason = 'Link je već uključen';
         } else {
           const updated = await client.query(
-            `UPDATE supplier_product_links SET checks_enabled=true WHERE id=$1 RETURNING checks_enabled`,
+            `UPDATE supplier_product_links l SET checks_enabled=true,disabled_at=NULL,disabled_reason=NULL,
+            check_status='unverified',stock_status=NULL,last_error=NULL,negative_count=0,missing_count=0,
+            first_problem_at=NULL,first_problem_reason=NULL,confirmation_due_at=NULL,manual_requested_at=now(),
+            next_regular_at=CASE WHEN p.interval_seconds IS NOT NULL
+              THEN supplier_regular_slot(p.cycle_epoch,p.phase_seconds,p.interval_seconds,
+                l.queue_position,now()+interval '1 second',p.cycle_seconds)
+              ELSE l.next_regular_at END
+            FROM supplier_provider_checks p WHERE l.id=$1 AND p.provider_code=l.provider_code
+            RETURNING l.checks_enabled`,
             [id]
           );
           if (!updated.rows[0].checks_enabled) {
