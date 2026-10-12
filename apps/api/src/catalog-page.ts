@@ -11,7 +11,7 @@ export interface Configuration { schemaVersion: number; filters: Node[] }
 interface Product {
   id: string; name: string; slug: string; department: string; brand: string | null; category: string | null;
   gender: string | null; price: number; attributes: Record<string, unknown>; features: Array<{title: string}>;
-  createdAt: string; updatedAt: string;
+  active: boolean; published: boolean; createdAt: string; updatedAt: string;
 }
 export const catalogPageSchema = z.object({
   department: z.enum(['satovi', 'daljinski', 'baterije', 'naocare']).default('satovi'),
@@ -53,6 +53,7 @@ async function productsSnapshot(pool: Pool, organizationId: string, department?:
   const result = await pool.query<Product>(`SELECT p.id, p.name, p.slug, COALESCE(d.slug,'satovi') AS department,
     b.name AS brand, c.name AS category, v.gender, v.current_price_amount::double precision / 100 AS price,
     COALESCE(v.attributes,'{}'::jsonb) AS attributes, COALESCE(p.features,'[]'::jsonb) AS features,
+    p.active, p.published,
     p.created_at AS "createdAt", p.updated_at AS "updatedAt"
     FROM products p
     JOIN LATERAL (SELECT pv.gender, pv.current_price_amount, pv.attributes FROM product_variants pv
@@ -94,7 +95,14 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const filtered = products.filter(product => matches(product,params,nodes,input.fixedGender));
   const collator = new Intl.Collator('sr-RS',{sensitivity:'base'});
   const sort = params.get('sort') || 'popular';
-  filtered.sort((a,b) => sort === 'price-asc' ? a.price-b.price : sort === 'price-desc' ? b.price-a.price : sort === 'name' ? collator.compare(a.name,b.name) : 0);
+  filtered.sort((a,b) => {
+    if (includeHidden) {
+      const aHidden = !a.active || !a.published;
+      const bHidden = !b.active || !b.published;
+      if (aHidden !== bHidden) return aHidden ? 1 : -1;
+    }
+    return sort === 'price-asc' ? a.price-b.price : sort === 'price-desc' ? b.price-a.price : sort === 'name' ? collator.compare(a.name,b.name) : 0;
+  });
   const facets = Object.fromEntries(nodes.map(node => {
     const candidates = products.filter(product => matches(product,params,nodes,input.fixedGender,node.id));
     const options = node.options.filter(option => option.visible);
