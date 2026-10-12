@@ -134,7 +134,7 @@ export async function supplierLinkActions(
   });
 }
 
-const LINK_VIEW = `WITH links AS (${STATE_SELECT.replace('SELECT l.id,', 'SELECT product.name AS "productName", product.slug AS "productSlug", l.id,')}
+const LINK_VIEW = `WITH links AS (${STATE_SELECT.replace('SELECT l.id,', 'SELECT product.name AS "productName", product.slug AS "productSlug", product.active AS "productActive", product.published AS "productPublished", l.id,')}
  JOIN products product ON product.id=l.product_id AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
  WHERE l.organization_id=$1 AND NOT l.removed AND l.url IS NOT NULL)
  SELECT * FROM links WHERE ($2::text IS NULL OR "providerCode"=$2)
