@@ -448,6 +448,23 @@ function rank(entry: Entry, parsed: Parsed, query: string): number | null {
   }
   return score + parsed.tests.length * 500;
 }
+interface RankedEntry { entry: Entry; score: number }
+const rankedQueries = new WeakMap<Entry[], Map<Parsed, { query: string; rows: RankedEntry[] }>>();
+const productNames = new Intl.Collator('sr-Latn', { numeric: true });
+function rankEntries(entries: Entry[], parsed: Parsed, query: string): readonly RankedEntry[] {
+  let cached = rankedQueries.get(entries);
+  if (!cached) { cached = new Map(); rankedQueries.set(entries, cached); }
+  const known = cached.get(parsed);
+  if (known?.query === query) return known.rows;
+  const rows: RankedEntry[] = [];
+  for (const entry of entries) {
+    const score = rank(entry, parsed, query);
+    if (score !== null) rows.push({ entry, score });
+  }
+  cached.set(parsed, { query, rows });
+  while (cached.size > 64) cached.delete(cached.keys().next().value!);
+  return rows;
+}
 function facetHref(facet: Facet): string {
   const params = new URLSearchParams({ [`cf_${facet.node.id}`]: facet.option.id });
   return `${routes[facet.department] ?? '/catalog'}?${params.toString()}`;
@@ -492,13 +509,21 @@ function distance(a: string, b: string, maximum: number): number {
   return previous[b.length]!;
 }
 interface WordFix { query:string; label:string; safe:boolean; cost:number; token:string }
-function wordCorrections(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]):WordFix[]{
-  const text=prepareQuery(query,custom);
+const vocabularies = new WeakMap<Entry[], { facets: Facet[]; words: Map<string, string> }>();
+function vocabularyFor(entries: Entry[], facets: Facet[]) {
+  const known = vocabularies.get(entries);
+  if (known?.facets === facets) return known.words;
   const vocabulary=new Map<string,string>();
   const add=(alias:string,target:string)=>{if(alias.length>=3&&!/\d/.test(alias))vocabulary.set(alias,target);};
   for(const [alias,target] of Object.entries(synonyms))if(!target.includes(' '))add(alias,target);
   for(const facet of facets)for(const alias of facet.aliases)for(const word of alias.split(' '))add(word,word);
   for(const entry of entries)for(const word of `${entry.brand} ${entry.category} ${entry.specs} ${entry.features}`.split(' '))if(word.length<=30)add(word,word);
+  vocabularies.set(entries, { facets, words: vocabulary });
+  return vocabulary;
+}
+function wordCorrections(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]):WordFix[]{
+  const text=prepareQuery(query,custom);
+  const vocabulary = vocabularyFor(entries, facets);
   const unresolved=new Set(parseQuery(text,facets).terms);
   const tokens=text.match(/[a-z0-9]+/g)||[];
   const fixes:WordFix[]=[];
@@ -566,7 +591,19 @@ function colorPhrase(color:string,part:string):string {
   if(!forms)return displayValue(color);
   return part==='narukvica'?`sa ${forms[3]} narukvicom`:part==='brojcanik'?`sa ${forms[2]} brojčanikom`:`sa ${forms[2]} kućištem`;
 }
+const displayQueries = new WeakMap<Facet[], Map<string, string>>();
 function displaySearchQuery(query:string,facets:Facet[],departmentHint?:string):string {
+  let cached = displayQueries.get(facets);
+  if (!cached) { cached = new Map(); displayQueries.set(facets, cached); }
+  const key = JSON.stringify([query, departmentHint]);
+  const known = cached.get(key);
+  if (known !== undefined) return known;
+  const result = formatSearchQuery(query, facets, departmentHint);
+  cached.set(key, result);
+  while (cached.size > 256) cached.delete(cached.keys().next().value!);
+  return result;
+}
+function formatSearchQuery(query:string,facets:Facet[],departmentHint?:string):string {
   let text=prepareQuery(query);
   const parts:string[]=[];
   // Keep negation and alternatives as explicit conditions rather than rewriting their meaning.
@@ -603,7 +640,7 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
   const base=prepareQuery(query,custom),result:Array<{label:string;query:string;count:number}>=[];
   if(!base||/\b(?:bez|nije)\b/.test(base))return result;
   const baseParsed=parseQuery(base,facets,custom);
-  const matching=entries.filter(entry=>rank(entry,baseParsed,base)!==null);
+  const matching=rankEntries(entries,baseParsed,base).map(result=>result.entry);
   if(!matching.length)return result;
   const candidates=facets.map(facet=>({facet,count:matching.reduce((count,entry)=>count+Number(optionMatches(entry.row,facet)),0)})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
   for(const {facet} of candidates){
@@ -614,7 +651,7 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
     const part=colors.has(token)?(/narukvic/.test(source)?'narukvica':/brojcanik/.test(source)?'brojcanik':/kucist/.test(source)?'kuciste':undefined):undefined;
     const addition=part?`${token} ${part}`:value;
     const next=`${base} ${addition}`.slice(0,120),parsed=parseQuery(next,facets,custom);
-    const count=entries.filter(entry=>rank(entry,parsed,next)!==null).length;
+    const count=rankEntries(entries,parsed,next).length;
     let label=displaySearchQuery(next,facets,facet.department);
     if(token==='dan u nedelji')label=`${displaySearchQuery(base,facets,facet.department)} sa prikazom dana u nedelji`;
     else if(token==='datum')label=`${displaySearchQuery(base,facets,facet.department)} sa datumom`;
@@ -666,7 +703,7 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
   const { entries: scope, facets } = scoped;
   const raw=input.q.length>=2?input.q:'';
   let effective=prepareQuery(raw,data.synonyms),parsed=parseQuery(raw,facets,data.synonyms);
-  const find=(p:Parsed,q:string)=>scope.map(entry=>({entry,score:rank(entry,p,q)})).filter((v):v is {entry:Entry;score:number}=>v.score!==null);
+  const find=(p:Parsed,q:string)=>rankEntries(scope,p,q);
   let ranked=raw?find(parsed,effective):[];
   const exactEmpty=Boolean(raw&&!ranked.length);
   const fixes=exactEmpty?wordCorrections(raw,scope,facets,data.synonyms):[];
@@ -701,22 +738,25 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
     }
     corrected.push(...modelCorrections(effective,parsed,scope));
   }
-  ranked.sort((a,b)=>{
+  // Cached ranks are shared by suggestions, pagination and sorting requests.
+  ranked=[...ranked].sort((a,b)=>{
     const price=a.entry.row.price-b.entry.row.price;
     if(input.sort!=='relevance'&&price)return input.sort==='price_asc'?price:-price;
-    return b.score-a.score||Number(b.entry.row.in_stock)-Number(a.entry.row.in_stock)||a.entry.row.name.localeCompare(b.entry.row.name,'sr-Latn',{numeric:true})||a.entry.row.id.localeCompare(b.entry.row.id);
+    return b.score-a.score||Number(b.entry.row.in_stock)-Number(a.entry.row.in_stock)||productNames.compare(a.entry.row.name,b.entry.row.name)||a.entry.row.id.localeCompare(b.entry.row.id);
   });
   const key=createHash('sha256').update(JSON.stringify([organizationId,input.q,effective,input.department,input.sort,input.literal])).digest('hex').slice(0,24);
   const offset=input.mode==='results'?cursorOffset(input.cursor,key):0,size=input.mode==='results'?24:6;
   const selected=ranked.slice(offset,offset+size).map(v=>v.entry.row.id);
   // Similar products relax exactly one explicit condition. Never silently relax codes or words.
   const alternatives:Array<{id:string;reason:string;score:number}>=[];
+  const includedIds = new Set(ranked.map(result => result.entry.row.id));
   if(raw&&!parsed.model&&parsed.conditions.length){
     for(let i=0;i<parsed.conditions.length;i++){
       if(departments.some(d=>d===normalize(parsed.conditions[i]!.label))||parsed.conditions[i]!.label==='Na stanju'||(/^(Bez|Isključena boja)/.test(parsed.conditions[i]!.label)))continue;
       const relaxed={...parsed,tests:parsed.tests.filter((_,j)=>j!==i)};
       for(const result of find(relaxed,effective)){
-        if(ranked.some(r=>r.entry.row.id===result.entry.row.id)||alternatives.some(a=>a.id===result.entry.row.id))continue;
+        if(includedIds.has(result.entry.row.id))continue;
+        includedIds.add(result.entry.row.id);
         alternatives.push({id:result.entry.row.id,reason:`Ne ispunjava uslov: ${parsed.conditions[i]!.label}`,score:result.score});
       }
     }
