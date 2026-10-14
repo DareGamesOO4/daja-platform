@@ -1,7 +1,7 @@
 import { type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { startNumberedSupplierChecks } from './supplier-queue.js';
+import { startNumberedSupplierChecks, type SupplierOutcome } from './supplier-queue.js';
 
 const supplierDeadline = new AsyncLocalStorage<AbortSignal>();
 function supplierSignal(): AbortSignal {
@@ -12,7 +12,7 @@ function supplierSignal(): AbortSignal {
 
 
 type Provider = 'ekka' | 'bultime' | 'linkel' | 'milano' | 'timezone' | 'qandq';
-type Outcome = { status: 'available'; stockStatus: 'in_stock' | 'out_of_stock' | null; priceAmount?: number | null; priceCurrency?: string | null } | { status: 'missing' | 'error'; message?: string };
+type Outcome = SupplierOutcome;
 
 function explicitStock(markup: string): 'in_stock' | 'out_of_stock' | null {
   const metadata=markup.match(/(?:itemprop=["']availability["'][^>]*(?:href|content)=["'][^"']*schema\.org\/|property=["']product:availability["'][^>]*content=["'])(InStock|OutOfStock|instock|outofstock)/i)?.[1]?.toLowerCase();
@@ -49,16 +49,17 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
     let response: Response;
     try {
       response = await fetch(url, { redirect: 'manual', signal: supplierSignal(), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } });
-    } catch { return { status: 'error' }; }
+    } catch { return { status: 'error', accessFailed: true }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
-      if (!location) return { status: 'error' };
+      if (!location) return { status: 'error', accessFailed: true };
       url = new URL(location, url);
       if (url.pathname === '/' || url.pathname === '/index.php') return { status: 'missing' };
       continue;
     }
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
+    if (!response.ok) return { status: 'error', accessFailed: true };
+    if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 500_000);
     if (!/<h1\b[^>]*>[^<]+<\/h1>/i.test(body) || !/Referenca/i.test(body) || !/Stanje proizvoda/i.test(body)) return { status: 'error' };
     const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
@@ -67,7 +68,7 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
     // is supplied, a confirmed valid product page is the availability fallback.
     return { status: 'available', stockStatus: ekkaStock(body) ?? 'in_stock', priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
   }
-  return { status: 'error' };
+  return { status: 'error', accessFailed: true };
 }
 
 async function ekkaHomeHealthy(): Promise<boolean> {
@@ -85,17 +86,18 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
     let response: Response;
     try {
       response = await fetch(url, { redirect: 'manual', signal: supplierSignal(), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } });
-    } catch { return { status: 'error' }; }
+    } catch { return { status: 'error', accessFailed: true }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
-      if (!location) return { status: 'error' };
+      if (!location) return { status: 'error', accessFailed: true };
       url = new URL(location, url);
       if (url.pathname === '/' || url.searchParams.get('route') === 'common/home') return { status: 'missing' };
-      if (url.searchParams.get('product_id') !== productId) return { status: 'error' };
+      if (url.searchParams.get('product_id') !== productId) return { status: 'missing' };
       continue;
     }
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
+    if (!response.ok) return { status: 'error', accessFailed: true };
+    if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
     if (!body.includes('route-product-product') || !body.includes(`product_id=${productId}`) ||
         !/<h1\b[^>]*>\s*(?:<span[^>]*>)?[^<]+(?:<\/span>)?\s*<\/h1>/i.test(body) ||
@@ -104,7 +106,7 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
     const offerPrice = body.match(/"offers"\s*:\s*\{[\s\S]{0,1200}?"priceCurrency"\s*:\s*"([A-Z]+)"[\s\S]{0,160}?"price"\s*:\s*"?([0-9.]+)/i);
     return { status: 'available', stockStatus: stock === 'В наличност' ? 'in_stock' : stock === 'Няма наличност' ? 'out_of_stock' : null, priceAmount: offerPrice ? Number(offerPrice[2]) : null, priceCurrency: offerPrice?.[1] || null };
   }
-  return { status: 'error' };
+  return { status: 'error', accessFailed: true };
 }
 
 async function linkelPage(urlValue: string): Promise<Outcome> {
@@ -126,16 +128,16 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
         });
       }
     }
-    catch { return { status: 'error', message: 'Server trenutno ne može da pristupi Linkel sajtu.' }; }
+    catch { return { status: 'error', accessFailed: true, message: 'Server trenutno ne može da pristupi Linkel sajtu.' }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
-      if (!location) return { status: 'error', message: 'Linkel je vratio preusmerenje bez adrese.' };
+      if (!location) return { status: 'error', accessFailed: true, message: 'Linkel je vratio preusmerenje bez adrese.' };
       url = new URL(location, url);
       if (url.pathname === '/' || url.pathname === '/sr/' || url.pathname.includes('controller=404')) return { status: 'missing' };
       continue;
     }
-    if (!response.ok) return { status: 'error', message: `Linkel je serveru vratio HTTP ${response.status}.` };
+    if (!response.ok) return { status: 'error', accessFailed: true, message: `Linkel je serveru vratio HTTP ${response.status}.` };
     if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error', message: 'Linkel nije vratio HTML stranicu.' };
     const body = (await response.text()).slice(0, 1_000_000);
     // Linkel's canonical tag and product-id class are not stable across
@@ -149,7 +151,7 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
     const stockStatus = /Nije na stanju/i.test(visible) ? 'out_of_stock' : /Na stanju/i.test(visible) ? 'in_stock' : null;
     return { status: 'available', stockStatus, priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
   }
-  return { status: 'error', message: 'Linkel je vratio previše preusmerenja.' };
+  return { status: 'error', accessFailed: true, message: 'Linkel je vratio previše preusmerenja.' };
 }
 
 async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValue: string): Promise<Outcome> {
@@ -160,16 +162,17 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
     if (url.protocol !== 'https:' || !domains[provider].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error' };
     let response: Response;
     try { response = await fetch(url, { redirect: 'manual', signal: supplierSignal(), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } }); }
-    catch { return { status: 'error', message: 'Server trenutno ne može da pristupi sajtu dobavljača.' }; }
+    catch { return { status: 'error', accessFailed: true, message: 'Server trenutno ne može da pristupi sajtu dobavljača.' }; }
     if (response.status === 404 || response.status === 410) return { status: 'missing' };
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
-      if (!location) return { status: 'error' };
+      if (!location) return { status: 'error', accessFailed: true };
       url = new URL(location, url);
       if (url.pathname === '/' || (provider === 'qandq' && url.searchParams.get('id') !== requestedId)) return { status: 'missing' };
       continue;
     }
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error', message: `Dobavljač je serveru vratio HTTP ${response.status}.` };
+    if (!response.ok) return { status: 'error', accessFailed: true, message: `Dobavljač je serveru vratio HTTP ${response.status}.` };
+    if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
     if (provider === 'milano') {
       if (!/property=["']product:price:amount["']/.test(body) || !/property=["']product:availability["']/.test(body)) return { status: 'error' };
@@ -204,7 +207,7 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
     const stockStatus = explicitStock(product.slice(0,20_000));
     return { status: 'available', stockStatus, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
   }
-  return { status: 'error' };
+  return { status: 'error', accessFailed: true };
 }
 
 async function homeHealthy(provider: Provider): Promise<boolean> {

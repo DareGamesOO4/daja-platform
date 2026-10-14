@@ -15,7 +15,11 @@ export type SupplierOutcome =
       priceAmount?: number | null;
       priceCurrency?: string | null;
     }
-  | { status: 'missing' | 'error'; message?: string };
+  | { status: 'missing' | 'error'; message?: string; accessFailed?: boolean };
+
+function pageAccessFailed(outcome: SupplierOutcome): boolean {
+  return outcome.status === 'missing' || (outcome.status === 'error' && outcome.accessFailed === true);
+}
 type QueryClient = Pick<pg.PoolClient, 'query'>;
 type QueueLink = {
   id: string;
@@ -340,6 +344,23 @@ async function pauseProvider(client: QueryClient, provider: string, reason: stri
   await deferExpiredConfirmations(client, provider);
 }
 
+async function pauseForAccessFailures(client: QueryClient, provider: string): Promise<boolean> {
+  const samples = await client.query<{ bad: number }>(
+    `SELECT count(*) FILTER (WHERE window_bad)::integer AS bad FROM (
+      SELECT DISTINCT ON (url) window_bad FROM supplier_product_links
+      WHERE provider_code=$1 AND NOT removed AND window_observed_at>now()-interval '2 hours'
+      ORDER BY url,window_observed_at DESC) recent`,
+    [provider]
+  );
+  if ((samples.rows[0]?.bad ?? 0) < 15) return false;
+  await pauseProvider(
+    client,
+    provider,
+    'Pristup stranicama najmanje 15 različitih artikala nije uspeo u poslednja 2 sata'
+  );
+  return true;
+}
+
 async function healthProbe(
   database: Database,
   adapters: Adapters,
@@ -457,13 +478,7 @@ async function finishLink(
       });
     await client.query(
       `UPDATE supplier_product_links SET window_observed_at=now(), window_bad=$2 WHERE id=$1`,
-      [row.id, bad]
-    );
-    const samples = await client.query<{ total: number; bad: number }>(
-      `SELECT count(*)::integer AS total,count(*) FILTER (WHERE window_bad)::integer AS bad FROM (
-      SELECT DISTINCT ON (url) window_bad FROM supplier_product_links WHERE provider_code=$1 AND NOT removed
-        AND window_observed_at>now()-interval '2 hours' ORDER BY url,window_observed_at DESC) recent`,
-      [row.provider_code]
+      [row.id, pageAccessFailed(outcome)]
     );
     const provider = await client.query<{
       paused_until: Date | null;
@@ -474,15 +489,7 @@ async function finishLink(
     );
     let paused = provider.rows[0]?.paused_until != null;
     const manuallyPaused = provider.rows[0]?.manual_pause_mode != null;
-    const sample = samples.rows[0];
-    if (!paused && sample && sample.total >= 6 && sample.bad * 2 >= sample.total) {
-      await pauseProvider(
-        client,
-        row.provider_code,
-        'Najmanje 50% od najmanje 6 proverenih linkova ima problem u poslednja 2 sata'
-      );
-      paused = true;
-    }
+    if (!paused && !manuallyPaused) paused = await pauseForAccessFailures(client, row.provider_code);
     if (!bad && outcome.status === 'available') {
       await client.query(
         `UPDATE supplier_product_links SET check_status='available',stock_status=$2,price_amount=$3,price_currency=$4,
@@ -504,10 +511,6 @@ async function finishLink(
       return;
     }
     const second = row.negative_count > 0 && row.second_due;
-    if (second && !paused && !manuallyPaused && health === false) {
-      await pauseProvider(client, row.provider_code, 'Zdravstvena proba sajta nije uspela');
-      paused = true;
-    }
     if (second && !paused && !manuallyPaused && health === true && row.checks_enabled) {
       await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
         disabled: 1
@@ -615,13 +618,14 @@ async function finishLegacy(
         row.provider_code
       ])
     ).rows[0];
-    const paused =
+    let paused =
       provider.manual_pause_mode != null ||
       (provider.paused_until && new Date(provider.paused_until).getTime() > Date.now());
     await client.query(
       'UPDATE supplier_product_links SET window_observed_at=now(),window_bad=$2 WHERE id=$1',
-      [row.id, outcome.status !== 'available' || outcome.stockStatus === 'out_of_stock']
+      [row.id, pageAccessFailed(outcome)]
     );
+    if (!paused) paused = await pauseForAccessFailures(client, row.provider_code);
     if (probeNeeded && prior.manual_pause_mode !== 'all')
       await recordSupplierStatistics(client, 'site', row.provider_code, {
         outcome: healthy ? 'available' : 'error',
@@ -672,11 +676,6 @@ async function finishLegacy(
       if (outcome.status === 'error')
         await client.query(
           'UPDATE supplier_provider_checks SET consecutive_errors=consecutive_errors+1 WHERE provider_code=$1',
-          [row.provider_code]
-        );
-      if (!healthy)
-        await client.query(
-          `UPDATE supplier_provider_checks SET paused_until=now()+interval '12 hours',pause_reason='Sajt dobavljača nije dostupan',health_ok=false,health_checked_at=now() WHERE provider_code=$1`,
           [row.provider_code]
         );
     }
@@ -779,6 +778,7 @@ export function startNumberedSupplierChecks(
         } catch {
           outcome = {
             status: 'error',
+            accessFailed: true,
             message: 'Provera je prekinuta ili je istekao rok od 60 sekundi'
           };
         }
@@ -818,8 +818,14 @@ export function startNumberedSupplierChecks(
             health_ok=true,health_checked_at=now(),probe_requested_at=NULL,updated_at=now() WHERE provider_code=$1`,
               [lease.provider_code]
             );
-          else
-            await pauseProvider(client, lease.provider_code, 'Zdravstvena proba sajta nije uspela');
+          else {
+            await client.query(
+              `UPDATE supplier_provider_checks SET health_ok=false,health_checked_at=now(),
+                probe_requested_at=NULL,updated_at=now() WHERE provider_code=$1`,
+              [lease.provider_code]
+            );
+            await pauseForAccessFailures(client, lease.provider_code);
+          }
         });
       }
     } catch (error) {
