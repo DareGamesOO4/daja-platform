@@ -198,7 +198,10 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
     if (!product || !/Модел|Model/i.test(product.slice(0, 20000))) return { status: 'error' };
     const price = product.match(/<b\b[^>]*>\s*([0-9.,]+)\s*(?:&euro;|€)\s*<\/b>/i)?.[1];
     if (!price) return { status: 'error' };
-    const stockStatus = explicitStock(product.slice(0,20_000)) ?? 'in_stock';
+    // Do not report stock when the supplier page has no explicit stock signal.
+    // The modal preview and scheduled checks share this parser; optimistic
+    // fallback here can contradict a previous confirmed out-of-stock result.
+    const stockStatus = explicitStock(product.slice(0,20_000));
     return { status: 'available', stockStatus, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
   }
   return { status: 'error' };
