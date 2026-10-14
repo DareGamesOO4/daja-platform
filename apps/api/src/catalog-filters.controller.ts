@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Put, Req, ConflictException } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, ConflictException } from '@nestjs/common';
 import type { Request } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
@@ -10,8 +10,7 @@ import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolveRequestContext, resolvePublicRequestContext } from './runtime/request-context.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
-import { automaticFilterOptions } from './catalog-filter-options.js';
-import { departmentBrandNames } from './catalog-department-brands.js';
+import { invalidateCatalogPages, publicCatalogConfiguration } from './catalog-page.js';
 
 const departmentSchema = z.enum(['satovi', 'daljinski', 'baterije', 'naocare']);
 const idSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
@@ -79,35 +78,12 @@ export class CatalogFiltersController {
     @Inject(LOGGER) private readonly logger: Logger, @Inject(REDIS) private readonly redis: RedisConnection) {}
 
   @Get('public/catalog/filters/:department')
-  async published(@Req() request: Request, @Param('department') rawDepartment: string) {
+  async published(@Req() request: Request, @Param('department') rawDepartment: string, @Query('version') version?: string) {
     const department = parseWithSchema(departmentSchema, rawDepartment);
     const ctx = this.config.PUBLIC_ORGANIZATION_ID
       ? resolvePublicRequestContext(request, this.config.PUBLIC_ORGANIZATION_ID) : resolveRequestContext(request);
-    await new TransactionManager(this.database.pool, this.logger).run((client) => initializeCatalogFilters(client, ctx.organizationId, department));
-    const result = await this.database.pool.query('SELECT published AS configuration FROM catalog_filter_configurations WHERE organization_id = $1 AND department = $2', [ctx.organizationId, department]);
-    const configuration = result.rows[0]?.configuration as { filters: FilterNode[] } | null;
-    if (!configuration) return { configuration: null };
-    const products = await this.database.pool.query<{ attributes: Record<string, unknown>; brand: string | null; category: string | null; gender: string | null; features: Array<{ title: string }>; price: string | null }>(`
-      SELECT v.attributes, v.gender, p.features, b.name AS brand, c.name AS category, (v.current_price_amount / 100.0)::text AS price
-      FROM products p
-      JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
-      JOIN LATERAL (SELECT * FROM product_variants pv WHERE pv.organization_id = p.organization_id AND pv.product_id = p.id AND pv.deleted_at IS NULL AND pv.active AND pv.published ORDER BY pv.current_price_amount DESC, pv.id LIMIT 1) v ON true
-      LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
-      LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
-      WHERE p.organization_id = $1 AND d.slug = $2 AND p.deleted_at IS NULL AND p.active AND p.published`, [ctx.organizationId, department]);
-    const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[_\s-]+/g, ' ').trim();
-    const brands = await departmentBrandNames(this.database.pool, ctx.organizationId, department);
-    const readProducts = (source: string) => products.rows.flatMap((product) => {
-      if (source.startsWith('feature:')) return (product.features || []).some((feature) => feature.title?.trim() === source.slice(8)) ? ['Da'] : [];
-      if (source === 'gender') {
-        const gender = normalize(product.gender || 'UNISEX');
-        return gender === 'unisex' ? ['Muški', 'Ženski'] : ['muski', 'm'].includes(gender) ? ['Muški'] : ['zenski', 'z'].includes(gender) ? ['Ženski'] : [product.gender || ''];
-      }
-      const key = source.slice(5);
-      const raw = source.startsWith('spec:') ? product.attributes?.[key] ?? Object.entries(product.attributes || {}).find(([name]) => normalize(name) === normalize(key))?.[1] : product[source as 'brand' | 'category' | 'price'];
-      return (Array.isArray(raw) ? raw : [raw]).filter((value) => value !== null && value !== undefined && typeof value !== 'object').map((value) => String(value).trim());
-    });
-    return { configuration: { ...configuration, filters: automaticFilterOptions(configuration.filters, source => source === 'brand' ? [...brands,...readProducts(source)] : readProducts(source)) } };
+    const result = await publicCatalogConfiguration(this.database.pool, ctx.organizationId, department);
+    return version === result.version ? { version: result.version } : result;
   }
 
   @Get('admin/catalog/filters/:department')
@@ -154,6 +130,7 @@ export class CatalogFiltersController {
     });
     if (publish) {
       invalidateCatalogSearch(ctx.organizationId);
+      invalidateCatalogPages(ctx.organizationId);
       await this.redis.client.del(`catalog:sitemap:${ctx.organizationId}`, `catalog:sitemap:v2:${ctx.organizationId}`);
     }
     return result;

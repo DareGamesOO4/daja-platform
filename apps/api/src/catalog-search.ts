@@ -36,6 +36,7 @@ interface Node {
 interface Facet { department: string; node: Node; option: Option; aliases: string[]; kind: 'brands' | 'collections' | 'attributes' }
 export interface Suggestion { id: string; label: string; detail: string; href: string; count: number }
 export interface CatalogSearchResponse {
+  cacheUntil?: number;
   query: string;
   normalizedQuery: string;
   recognized: string[];
@@ -57,6 +58,8 @@ interface Entry { row: SearchRow; codes: string[]; name: string; brand: string; 
 interface Snapshot { entries: Entry[]; facets: Facet[]; synonyms: SearchSynonym[]; expires: number }
 const snapshots = new Map<string, Promise<Snapshot>>();
 export function invalidateCatalogSearch(organizationId: string) { snapshots.delete(organizationId); }
+const searchResults = new WeakMap<Snapshot, Map<string, { expires: number; promise: Promise<CatalogSearchResponse> }>>();
+const scopes = new WeakMap<Snapshot, Map<string, { entries: Entry[]; facets: Facet[] }>>();
 
 const cyrillic: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', ђ: 'dj', е: 'e', ж: 'z', з: 'z', и: 'i', ј: 'j', к: 'k', л: 'l', љ: 'lj', м: 'm', н: 'n', њ: 'nj', о: 'o', п: 'p', р: 'r', с: 's', т: 't', ћ: 'c', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'c', џ: 'dz', ш: 's' };
 const synonyms: Record<string, string> = {
@@ -132,9 +135,26 @@ function normalize(value: unknown): string {
 function canonical(value: unknown) { return normalize(value).split(' ').map((word) => synonyms[word] ?? word).join(' '); }
 function compact(value: unknown) { return normalize(value).replace(/ /g, ''); }
 function internal(key: string) { return key.startsWith('_') || /^(additional_?barcodes|rfid_?piece_?placements)$/i.test(key); }
-function publicAttributes(attributes: Record<string, unknown>) { return Object.fromEntries(Object.entries(attributes ?? {}).filter(([key]) => !internal(key))); }
+const attributeCache = new WeakMap<Record<string, unknown>, Record<string, unknown>>();
+function publicAttributes(attributes: Record<string, unknown>) {
+  if (!attributes) return {};
+  let result = attributeCache.get(attributes);
+  if (!result) { result = Object.fromEntries(Object.entries(attributes).filter(([key]) => !internal(key))); attributeCache.set(attributes, result); }
+  return result;
+}
 function publicFeatures(features: SearchRow['features']) { return (features ?? []).filter((feature) => feature.title && !internal(feature.title) && !/^rfid\b/i.test(feature.title)); }
+const sourceCache = new WeakMap<SearchRow, Map<string, string[]>>();
+const normalizedAttributes = new WeakMap<SearchRow, Map<string, unknown>>();
 function values(row: SearchRow, source: string): string[] {
+  let cached = sourceCache.get(row);
+  if (!cached) { cached = new Map(); sourceCache.set(row, cached); }
+  const known = cached.get(source);
+  if (known) return known;
+  const result = readValues(row, source);
+  cached.set(source, result);
+  return result;
+}
+function readValues(row: SearchRow, source: string): string[] {
   if (source.startsWith('feature:')) return publicFeatures(row.features).some((feature) => feature.title.trim() === source.slice(8)) ? ['Da'] : [];
   if (source === 'gender') {
     const gender = canonical(row.gender);
@@ -145,13 +165,26 @@ function values(row: SearchRow, source: string): string[] {
     const key = source.slice(5);
     if (internal(key)) return [];
     const attrs = publicAttributes(row.attributes);
-    const raw = attrs[key] ?? Object.entries(attrs).find(([name]) => normalize(name) === normalize(key))?.[1];
+    let index = normalizedAttributes.get(row);
+    if (!index) {
+      index = new Map();
+      for (const [name, value] of Object.entries(attrs)) if (!index.has(normalize(name))) index.set(normalize(name), value);
+      normalizedAttributes.set(row, index);
+    }
+    const raw = attrs[key] ?? index.get(normalize(key));
     return (Array.isArray(raw) ? raw : [raw]).filter((item) => item !== null && item !== undefined && typeof item !== 'object').map(String);
   }
   return [String(source === 'brand' ? row.brand ?? '' : source === 'category' ? row.category ?? '' : '')];
 }
+const membershipCache = new WeakMap<SearchRow, WeakMap<Facet, boolean>>();
 function optionMatches(row: SearchRow, facet: Facet) {
-  return row.department === facet.department && facet.option.conditions.some((condition) => condition.values.some((value) => values(row, condition.source).includes(value)));
+  let cached = membershipCache.get(row);
+  if (!cached) { cached = new WeakMap(); membershipCache.set(row, cached); }
+  const known = cached.get(facet);
+  if (known !== undefined) return known;
+  const result = row.department === facet.department && facet.option.conditions.some((condition) => condition.values.some((value) => values(row, condition.source).includes(value)));
+  cached.set(facet, result);
+  return result;
 }
 function collectFacets(department: string, nodes: Node[], result: Facet[]) {
   for (const node of nodes) {
@@ -179,12 +212,15 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
   const cached = snapshots.get(organizationId);
   if (cached) {
     const value = await cached;
+    // Another request may already have replaced this expired snapshot.
+    if (snapshots.get(organizationId) !== cached) return snapshot(pool, organizationId);
     if (value.expires > Date.now()) return value;
+    snapshots.delete(organizationId);
   }
   const loading = (async () => {
     // Only lightweight searchable metadata is cached on the server. Images and
     // current public cards are loaded for the selected IDs, never for every keypress.
-    const [products, initialConfigs, searchSettings] = await Promise.all([
+    const [products, initialConfigs, searchSettings, priceBoundary] = await Promise.all([
       pool.query<SearchRow>(`SELECT p.id, p.name, p.slug, p.description, p.features,
         v.sku, v.mpn, v.gender, v.attributes, b.name AS brand, c.name AS category, d.slug AS department,
         COALESCE(sale.amount_minor, v.current_price_amount) AS price,
@@ -201,7 +237,12 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
         LEFT JOIN LATERAL (SELECT SUM(quantity) AS quantity FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id) inv ON true
         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published AND d.slug = ANY($2::text[])`, [organizationId, departments]),
       pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]),
-      pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId])
+      pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId]),
+      pool.query<{ at: Date | null }>(`SELECT min(boundary) AS at FROM (
+        SELECT min(valid_from) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_from>now()
+        UNION ALL
+        SELECT min(valid_until) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_until>now()
+      ) boundaries`, [organizationId])
     ]);
     let configs = initialConfigs;
     const missing = departments.filter((department) => !configs.rows.some((config) => config.department === department));
@@ -234,7 +275,8 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
       features: canonical(publicFeatures(row.features).map((feature) => `${feature.title} ${feature.subtitle ?? ''}`).join(' ')),
       description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
     }));
-    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Date.now() + 10_000 };
+    const boundary = priceBoundary.rows[0]?.at?.getTime() ?? Infinity;
+    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Math.min(Date.now() + 10_000, boundary) };
   })();
   // Bound the organization cache and deduplicate concurrent cold requests.
   if (snapshots.size >= 20 && !snapshots.has(organizationId)) snapshots.delete(snapshots.keys().next().value ?? '');
@@ -251,21 +293,59 @@ function amount(value: string): number {
 interface SearchConstraint { id:string; label:string; test:(row:SearchRow)=>boolean; query:string }
 interface Parsed { tests: Array<(row: SearchRow) => boolean>; terms: string[]; labels: string[]; model: string; conditions:SearchConstraint[] }
 const escapePattern=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+const rowTests = new WeakMap<SearchRow, Map<string, unknown>>();
+function cachedRowTest<T>(row: SearchRow, key: string, read: () => T): T {
+  let cached = rowTests.get(row);
+  if (!cached) { cached = new Map(); rowTests.set(row, cached); }
+  if (cached.has(key)) return cached.get(key) as T;
+  const result = read(); cached.set(key, result); return result;
+}
 function numericAttribute(row:SearchRow,pattern:RegExp):number|undefined{
+  return cachedRowTest(row, `number:${pattern.source}`, () => {
   for(const [key,value] of Object.entries(publicAttributes(row.attributes))){
     if(!pattern.test(normalize(key)))continue;
     for(const item of Array.isArray(value)?value:[value]){const match=String(item??'').replace(',','.').match(/^(\d+(?:\.\d+)?)\s*(?:mm)?$/i);if(match)return Number(match[1]);}
   }
   return undefined;
+  });
 }
 function booleanAttribute(row:SearchRow,pattern:RegExp,expected:boolean){
-  return Object.entries(publicAttributes(row.attributes)).some(([key,value])=>pattern.test(normalize(key))&&(Array.isArray(value)?value:[value]).some(v=>(expected?/^(da|yes|true|1)$/i:/^(ne|no|false|0)$/i).test(String(v).trim())));
+  return cachedRowTest(row, `boolean:${pattern.source}:${expected}`, () => Object.entries(publicAttributes(row.attributes)).some(([key,value])=>pattern.test(normalize(key))&&(Array.isArray(value)?value:[value]).some(v=>(expected?/^(da|yes|true|1)$/i:/^(ne|no|false|0)$/i).test(String(v).trim()))));
 }
 function colorMatch(row:SearchRow,color:string,part?:string){
   const qualifier=part==='narukvica'?/narukvic|kais|strap|bracelet/:part==='brojcanik'?/brojcanik|dial/:part==='kuciste'?/kucist|case/:null;
-  return Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/boja|color|colour/.test(normalize(key))&&(!qualifier||qualifier.test(normalize(key)))&&canonical(Array.isArray(value)?value.join(' '):value).split(' ').includes(color));
+  return cachedRowTest(row, `color:${color}:${part || ''}`, () => Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/boja|color|colour/.test(normalize(key))&&(!qualifier||qualifier.test(normalize(key)))&&canonical(Array.isArray(value)?value.join(' '):value).split(' ').includes(color)));
+}
+const parsedQueries = new WeakMap<Facet[], Map<string, Parsed>>();
+const parserIndexes = new WeakMap<Facet[], { alternatives: RegExp; aliases: Array<{ pattern: RegExp; matching: Facet[] }> }>();
+function parserIndex(facets: Facet[]) {
+  let cached = parserIndexes.get(facets);
+  if (cached) return cached;
+  const byAlias = new Map<string, Facet[]>();
+  for (const facet of facets) for (const alias of facet.aliases) {
+    if (colors.has(alias)) continue;
+    const matching = byAlias.get(alias) || [];
+    matching.push(facet); byAlias.set(alias, matching);
+  }
+  const aliases = [...byAlias.keys()].sort((a,b) => b.length-a.length);
+  const atom = `(?:${[...aliases,...colors,'muski','zenski','unisex'].map(escapePattern).join('|')})`;
+  cached = { alternatives: new RegExp(`\\b(${atom}(?:\\s+ili\\s+${atom})+)(?:\\s+(narukvica|brojcanik|kuciste))?\\b`, 'g'),
+    aliases: aliases.map(alias => ({ pattern: new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`, 'g'), matching: byAlias.get(alias)! })) };
+  parserIndexes.set(facets, cached);
+  return cached;
 }
 function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): Parsed {
+  let cached = parsedQueries.get(facets);
+  if (!cached) { cached = new Map(); parsedQueries.set(facets, cached); }
+  const key = JSON.stringify([query, custom]);
+  const known = cached.get(key);
+  if (known) return known;
+  const result = parseUncachedQuery(query, facets, custom);
+  cached.set(key, result);
+  while (cached.size > 256) cached.delete(cached.keys().next().value!);
+  return result;
+}
+function parseUncachedQuery(query: string, facets: Facet[], custom:SearchSynonym[]): Parsed {
   const conditions:SearchConstraint[]=[];
   const colorPattern=[...colors].join('|');
   const whole=prepareQuery(query,custom)
@@ -309,11 +389,9 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
   })));
   text=text.replace(/\bvodootpornost\b/g,match=>add(match,'Vodootpornost navedena',row=>Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/vodootpor|water/.test(normalize(key))&&Number.parseFloat(String(value))>0)));
   // Group adjacent alternatives into one OR condition, rather than requiring both brands/colors.
-  const aliases=[...new Set(facets.flatMap(f=>f.aliases))].filter(a=>!colors.has(a)).sort((a,b)=>b.length-a.length);
-  const orAliases=[...aliases,...colors,'muski','zenski','unisex'];
-  if(orAliases.length){
-    const atom=`(?:${orAliases.map(escapePattern).join('|')})`;
-    text=text.replace(new RegExp(`\\b(${atom}(?:\\s+ili\\s+${atom})+)(?:\\s+(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,choices:string,part:string|undefined)=>{
+  const index = parserIndex(facets);
+  {
+    text=text.replace(index.alternatives,(match,choices:string,part:string|undefined)=>{
       const list=choices.split(/\s+ili\s+/);
       return add(match,(part?`Boja ${part==='narukvica'?'narukvice':part==='brojcanik'?'brojčanika':'kućišta'}: `:'')+list.map(alias=>displayValue(facets.find(f=>f.aliases.includes(alias)&&f.kind!=='attributes')?.option.label??alias)).join(' ili '),row=>list.some(alias=>colors.has(alias)?colorMatch(row,alias,part):['muski','zenski','unisex'].includes(alias)?canonical(row.gender)===alias||canonical(row.gender)==='unisex':facets.some(f=>f.aliases.includes(alias)&&optionMatches(row,f))));
     });
@@ -325,11 +403,10 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
   // Accept both "crni brojčanik" and "brojčanik crni".
   text=text.replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+(${colorWords})\\b`,'g'),(_match,part:string,color:string)=>`${color} ${part}`);
   text=text.replace(new RegExp(`\\b(?:(bez|nije)\\s+)?(${colorWords})(?:\\s+(?:boja\\s+)?(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,negative:string|undefined,color:string,part:string|undefined)=>add(match,`${negative?'Isključena boja':'Boja'}${part?` ${part==='narukvica'?'narukvice':part==='brojcanik'?'brojčanika':'kućišta'}`:''}: ${displayValue(color)}`,row=>negative?!colorMatch(row,color,part):colorMatch(row,color,part)));
-  for(const alias of aliases){
-    text=text.replace(new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`,'g'),(match,negative:string|undefined)=>{
-      const matching=facets.filter(f=>f.aliases.includes(alias));
+  for(const {pattern,matching} of index.aliases){
+    text=text.replace(pattern,(match,negative:string|undefined)=>{
       const facet=matching[0];
-      const label=facet&&/^(da|ne|yes|no|true|false|0|1)$/i.test(facet.option.label)?`${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':'Ne'}`:displayValue(facet?.option.label??alias);
+      const label=facet&&/^(da|ne|yes|no|true|false|0|1)$/i.test(facet.option.label)?`${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':'Ne'}`:displayValue(facet!.option.label);
       return add(match,`${negative?'Bez: ':''}${label}`,row=>negative?!matching.some(f=>optionMatches(row,f)):matching.some(f=>optionMatches(row,f)));
     });
   }
@@ -346,14 +423,22 @@ function parseQuery(query: string, facets: Facet[], custom:SearchSynonym[]=[]): 
   }
   return {tests:conditions.map(c=>c.test),terms,labels:conditions.map(c=>c.label),conditions,model:terms.some(t=>/[a-z]/.test(t)&&/\d/.test(t))?terms.join(''):''};
 }
+const rankingKeys = new WeakMap<Parsed, Map<string, { whole: string; terms: Array<{ text: string; code: string }> }>>();
 function rank(entry: Entry, parsed: Parsed, query: string): number | null {
   if (!parsed.tests.every((test) => test(entry.row))) return null;
+  let cached = rankingKeys.get(parsed);
+  if (!cached) { cached = new Map(); rankingKeys.set(parsed, cached); }
+  let keys = cached.get(query);
+  if (!keys) {
+    keys = { whole: compact(query), terms: parsed.terms.map(text => ({ text, code: compact(text) })) };
+    cached.set(query, keys);
+    while (cached.size > 8) cached.delete(cached.keys().next().value!);
+  }
   let score = 0;
-  const whole = compact(query);
+  const whole = keys.whole;
   if (entry.codes.includes(whole)) score += 5000;
   else if (whole && entry.codes.some((code) => code.startsWith(whole))) score += 4000;
-  for (const term of parsed.terms) {
-    const code = compact(term);
+  for (const { text: term, code } of keys.terms) {
     const part = entry.codes.some((value) => value.includes(code)) ? 1200
       : entry.name.includes(term) ? 1000 : entry.brand.includes(term) ? 800
         : entry.category.includes(term) ? 700 : entry.specs.includes(term) || entry.features.includes(term) ? 400
@@ -377,8 +462,10 @@ function aliasScore(alias: string, query: string): number {
 }
 function suggestions(facets: Facet[], entries: Entry[], query: string) {
   const groups: Record<'brands' | 'collections' | 'attributes', Suggestion[]> = { brands: [], collections: [], attributes: [] };
-  const scored = facets.map((facet) => ({ facet, score: Math.max(0, ...facet.aliases.map((alias) => aliasScore(alias, query))), count: entries.filter((entry) => optionMatches(entry.row, facet)).length }))
-    .filter((item) => item.score && item.count && (query || item.facet.kind !== 'attributes')).sort((a, b) => b.score - a.score || b.count - a.count || a.facet.option.label.localeCompare(b.facet.option.label));
+  const scored = facets.map((facet) => ({ facet, score: Math.max(0, ...facet.aliases.map((alias) => aliasScore(alias, query))) }))
+    .filter(item => item.score && (query || item.facet.kind !== 'attributes'))
+    .map(item => ({ ...item, count: entries.reduce((count, entry) => count + Number(optionMatches(entry.row, item.facet)), 0) }))
+    .filter(item => item.count).sort((a, b) => b.score - a.score || b.count - a.count || a.facet.option.label.localeCompare(b.facet.option.label));
   for (const { facet, count } of scored) {
     const group = groups[facet.kind]; const limit = facet.kind === 'attributes' ? 4 : 3;
     if (group.length >= limit) continue;
@@ -518,7 +605,7 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
   const baseParsed=parseQuery(base,facets,custom);
   const matching=entries.filter(entry=>rank(entry,baseParsed,base)!==null);
   if(!matching.length)return result;
-  const candidates=facets.map(facet=>({facet,count:matching.filter(entry=>optionMatches(entry.row,facet)).length})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
+  const candidates=facets.map(facet=>({facet,count:matching.reduce((count,entry)=>count+Number(optionMatches(entry.row,facet)),0)})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
   for(const {facet} of candidates){
     const value=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
     if(facet.aliases.some(a=>` ${canonical(base)} `.includes(` ${a} `)))continue;
@@ -547,8 +634,36 @@ function cursorOffset(cursor: string | undefined, key: string): number {
 }
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
   const data=await snapshot(pool,organizationId);
-  const scope=data.entries.filter(entry=>!input.department||entry.row.department===input.department);
-  const facets=data.facets.filter(f=>!input.department||f.department===input.department);
+  let cached = searchResults.get(data);
+  if (!cached) { cached = new Map(); searchResults.set(data, cached); }
+  const key = JSON.stringify(input);
+  const known = cached.get(key);
+  if (known && known.expires > Date.now()) return known.promise;
+  const entry = { expires: data.expires, promise: searchSnapshot(pool, organizationId, input, data) };
+  cached.set(key, entry);
+  while (cached.size > 64) cached.delete(cached.keys().next().value!);
+  try {
+    const result = await entry.promise;
+    const cards = [...result.items, ...result.similar.map(item => item.product), ...result.recommendations];
+    for (const card of cards) if (card.saleValidUntil) {
+      const expiry = Date.parse(card.saleValidUntil);
+      if (Number.isFinite(expiry)) entry.expires = Math.min(entry.expires, expiry);
+    }
+    result.cacheUntil = entry.expires;
+    return result;
+  } catch (error) { if (cached.get(key) === entry) cached.delete(key); throw error; }
+}
+async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQuery, data: Snapshot): Promise<CatalogSearchResponse> {
+  let departmentsCache = scopes.get(data);
+  if (!departmentsCache) { departmentsCache = new Map(); scopes.set(data, departmentsCache); }
+  const scopeKey = input.department || '';
+  let scoped = departmentsCache.get(scopeKey);
+  if (!scoped) {
+    scoped = { entries: input.department ? data.entries.filter(entry => entry.row.department === input.department) : data.entries,
+      facets: input.department ? data.facets.filter(f => f.department === input.department) : data.facets };
+    departmentsCache.set(scopeKey, scoped);
+  }
+  const { entries: scope, facets } = scoped;
   const raw=input.q.length>=2?input.q:'';
   let effective=prepareQuery(raw,data.synonyms),parsed=parseQuery(raw,facets,data.synonyms);
   const find=(p:Parsed,q:string)=>scope.map(entry=>({entry,score:rank(entry,p,q)})).filter((v):v is {entry:Entry;score:number}=>v.score!==null);

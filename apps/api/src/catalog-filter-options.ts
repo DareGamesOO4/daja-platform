@@ -7,8 +7,14 @@ export function automaticFilterOptions<T extends Node>(nodes: T[], read: (source
   return nodes.map((node) => {
     if (node.mode === 'group') return { ...node, children: automaticFilterOptions(node.children, read) };
     if (node.autoAddOptions === false) return node;
+    const reserved = new Map<string, Set<string>>();
+    for (const option of node.options) for (const condition of option.conditions) {
+      let values = reserved.get(condition.source);
+      if (!values) { values = new Set(); reserved.set(condition.source, values); }
+      for (const value of condition.values) values.add(value);
+    }
     const additions = node.sources.flatMap((source) => [...new Set(read(source))]
-      .filter((value) => value && !node.options.some((option) => option.conditions.some((condition) => condition.source === source && condition.values.includes(value))))
+      .filter((value) => value && !reserved.get(source)?.has(value))
       .filter((value) => {
         if (node.style !== 'range') return true;
         const match = value.replace(',', '.').match(/^(\d+(?:\.\d+)?)\s*([^\d]*)$/);

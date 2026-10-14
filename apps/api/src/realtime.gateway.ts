@@ -16,6 +16,7 @@ import { AuthService } from './auth.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
+import { invalidateCatalogPages } from './catalog-page.js';
 
 type RealtimeEvent =
   | 'catalog.variant-groups.updated'
@@ -195,8 +196,9 @@ export class RealtimeGateway {
     if (!allowedEvents.includes(input.event)) {
       return;
     }
-    if (['product.updated', 'catalog.taxonomy.updated', 'price.changed', 'media.ready', 'inventory.changed'].includes(input.event)) {
+    if (['product.updated', 'catalog.taxonomy.updated', 'catalog.variant-groups.updated', 'price.changed', 'media.ready', 'inventory.changed'].includes(input.event)) {
       invalidateCatalogSearch(input.organizationId);
+      invalidateCatalogPages(input.organizationId);
     }
     const envelope = {
       event: input.event,
