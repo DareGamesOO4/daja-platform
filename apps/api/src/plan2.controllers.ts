@@ -53,7 +53,7 @@ import {
   uuidSchema
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
-import { catalogPageSchema, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
+import { catalogPageSchema, catalogPreparationSchema, prepareCatalogPages, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
@@ -257,6 +257,12 @@ export class PublicCatalogController {
   @Get('page')
   async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
     return publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));
+  }
+
+  @Post('prepare')
+  async prepareCatalog(@Req() request: Request, @Body() body: unknown) {
+    return prepareCatalogPages(this.database.pool, this.publicContext(request).organizationId,
+      parseWithSchema(catalogPreparationSchema, body));
   }
 
   @Get('home')
@@ -806,6 +812,17 @@ export class StaffCatalogController {
     if (this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
     response.setHeader('Cache-Control', 'private, no-store');
     return publicCatalogPage(this.database.pool, ctx.organizationId, parseWithSchema(catalogPageSchema, query), true);
+  }
+
+  @Post('admin/catalog/prepare')
+  async prepareAdminCatalog(@Req() request: Request, @Body() body: unknown,
+    @Res({ passthrough: true }) response: Response) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    if (this.isCatalogContributor(ctx)) throw new TenantAccessDeniedError();
+    response.setHeader('Cache-Control', 'private, no-store');
+    return prepareCatalogPages(this.database.pool, ctx.organizationId,
+      parseWithSchema(catalogPreparationSchema, body), true);
   }
 
   @Get('admin/catalog/products/by-slug/:slug')

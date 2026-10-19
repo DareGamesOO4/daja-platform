@@ -19,8 +19,10 @@ export const catalogPageSchema = z.object({
   page: z.coerce.number().int().min(1).max(100000).default(1),
   params: z.string().max(16000).default(''),
   fixedGender: z.enum(['Muški', 'Ženski']).optional(),
-  configurationVersion: z.string().max(64).optional()
+  configurationVersion: z.string().max(64).optional(),
+  prepareOnly: z.enum(['0', '1']).optional()
 });
+export const catalogPreparationSchema = z.object({ requests: z.array(catalogPageSchema).min(1).max(32) });
 type Query = z.infer<typeof catalogPageSchema>;
 const normalize = (value: unknown) => String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[_\s-]+/g, ' ').trim();
 const specKey = (value: string) => normalize(value).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -113,8 +115,8 @@ async function cards(pool: Pool, organizationId: string, ids: string[], includeH
   });
 }
 type Facet = { values: Array<{value: string; label: string; color: string; image: string; count: number}>; selected: string[]; numbers: number[] };
-interface Selection { products: Product[]; facets: Record<string, Facet> }
-interface Snapshot { products: Product[]; configuration: Configuration; version: string; nodes: Node[]; selections: Map<string, Selection> }
+interface Selection { products: Product[]; facets?: Record<string, Facet> }
+interface Snapshot { products: Product[]; configuration: Configuration; version: string; nodes: Node[]; selections: Map<string, Selection>; orders: Map<string, Product[]> }
 const snapshots = new Map<string, { pool: Pool; expires: number; promise: Promise<Snapshot> }>();
 const SNAPSHOT_TTL = 10_000;
 export function invalidateCatalogPages(organizationId: string) {
@@ -144,7 +146,7 @@ async function loadSnapshot(pool: Pool, organizationId: string, department: stri
     }
     return known;
   })};
-  return { products, configuration, nodes: leaves(configuration.filters), selections: new Map(),
+  return { products, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
     version: createHash('sha256').update(JSON.stringify(configuration)).digest('hex') };
 }
 function snapshot(pool: Pool, organizationId: string, department: string, includeHidden = false) {
@@ -161,13 +163,13 @@ export async function publicCatalogConfiguration(pool: Pool, organizationId: str
   const data = await snapshot(pool, organizationId, department);
   return { configuration: data.configuration, version: data.version };
 }
-function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: string): Selection {
+function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: string, withFacets = true): Selection {
   // Pagination and sorting cannot change facet counts. Ignore tracking keys too.
   const selectionParams = new URLSearchParams([...params].filter(([key]) => key === 'q' || key.startsWith('cf_')));
   selectionParams.sort();
   const key = JSON.stringify([fixedGender, selectionParams.toString()]);
   const cached = data.selections.get(key);
-  if (cached) return cached;
+  if (cached && (!withFacets || cached.facets)) return cached;
   const { products, nodes } = data;
   const tests = activeFilters(params, nodes, fixedGender);
   const query = params.get('q')?.trim().toLowerCase();
@@ -178,7 +180,13 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
     failures.set(product, tests.filter(test => !test.test(product)).map(test => test.id));
     return true;
   });
-  const filtered = eligible.filter(product => failures.get(product)!.length === 0);
+  const filtered = cached?.products || eligible.filter(product => failures.get(product)!.length === 0);
+  if (!withFacets) {
+    const selection = { products: filtered };
+    data.selections.set(key, selection);
+    while (data.selections.size > 64) data.selections.delete(data.selections.keys().next().value!);
+    return selection;
+  }
   const facets = Object.fromEntries(nodes.map(node => {
     const candidates = eligible.filter(product => {
       const failed = failures.get(product)!;
@@ -206,11 +214,15 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
 export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query, includeHidden = false) {
   const data = await snapshot(pool, organizationId, input.department, includeHidden);
   const params = new URLSearchParams(input.params);
-  const selection = selectProducts(data, params, input.fixedGender);
-  const filtered = [...selection.products];
+  const selection = selectProducts(data, params, input.fixedGender, input.prepareOnly !== '1');
+  const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key.startsWith('cf_')));
+  orderParams.sort();
+  const orderKey = JSON.stringify([input.fixedGender, orderParams.toString()]);
+  const preparedOrder = data.orders.get(orderKey);
+  const filtered = preparedOrder || [...selection.products];
   const collator = new Intl.Collator('sr-RS',{sensitivity:'base'});
   const sort = params.get('sort') || 'popular';
-  filtered.sort((a,b) => {
+  if (!preparedOrder) filtered.sort((a,b) => {
     if (includeHidden) {
       const aHidden = !a.active || !a.published;
       const bHidden = !b.active || !b.published;
@@ -218,15 +230,32 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
     }
     return sort === 'price-asc' ? a.price-b.price : sort === 'price-desc' ? b.price-a.price : sort === 'name' ? collator.compare(a.name,b.name) : 0;
   });
+  if (!preparedOrder) {
+    data.orders.set(orderKey, filtered);
+    while (data.orders.size > 64) data.orders.delete(data.orders.keys().next().value!);
+  }
   const total = filtered.length;
   const hiddenCount = includeHidden
     ? filtered.filter(product => !product.active || !product.published).length
     : undefined;
   const page = Math.min(input.page,Math.max(1,Math.ceil(total/32)));
-  const items = await cards(pool,organizationId,filtered.slice((page-1)*32,page*32).map(product => product.id),includeHidden);
+  const productIds = filtered.slice((page-1)*32,page*32).map(product => product.id);
+  // Planning resolves membership/order only. No card, gallery or stock query.
+  const items = input.prepareOnly === '1' ? [] : await cards(pool,organizationId,productIds,includeHidden);
   return {items,total,page,perPage:32,configurationVersion:data.version,
     ...(input.configurationVersion === data.version ? {} : {configuration:data.configuration}),
-    facets:selection.facets,...(hiddenCount === undefined ? {} : {hiddenCount})};
+    facets:selection.facets || {},...(input.prepareOnly === '1' ? {productIds} : {}),...(hiddenCount === undefined ? {} : {hiddenCount})};
+}
+// Batch the options of an opened filter into bounded, read-only planning work.
+export async function prepareCatalogPages(pool: Pool, organizationId: string,
+  input: z.infer<typeof catalogPreparationSchema>, includeHidden = false) {
+  const plans = [];
+  for (const request of input.requests) {
+    const plan = await publicCatalogPage(pool, organizationId, { ...request, prepareOnly: '1' }, includeHidden);
+    plans.push({ productIds: plan.productIds || [], page: plan.page, total: plan.total,
+      perPage: plan.perPage, configurationVersion: plan.configurationVersion });
+  }
+  return { plans };
 }
 const homeSlugs = ['casio-mtp-1314pl-8a','daniel-3271','qq-classic-qw12','ga-100-1a1','orient-diver','daniel-klein-dk13965-4'];
 export async function publicHomeProducts(pool: Pool, organizationId: string) {
