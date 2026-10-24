@@ -13,3 +13,5 @@ Explicit assignments win over automatic rules. Edited live automatic rules use t
 The web administrator can grant employees access through the “Grupe varijanti” checkbox in “Korisnici i dozvole”; existing assignments are preserved. Existing staff sessions may need renewing to receive a newly granted permission.
 
 Delivery verification for this change: source review and `git diff --check` only. Tests, build, runtime and migration execution were intentionally not performed.
+
+The public variants response also includes an opaque groupId for ProductGroup structured data (null for standalone products). It is derived from the resolver's effective group identity, never the internal display name. Existing items and grouping rules are unchanged; no additional migration is required.

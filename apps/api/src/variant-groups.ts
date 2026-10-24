@@ -2,6 +2,7 @@ import type { Database } from '@daja/database';
 import type { RequestContext } from '@daja/shared';
 import { ResourceConflictError, ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 
 type Client = Pick<Database['pool'], 'query'>;
 export interface GroupProduct {
@@ -154,8 +155,8 @@ export function resolveGroupMembers(state: GroupState, productId: string): strin
 }
 
 // Public product pages need only one group, not the admin catalog snapshot.
-export async function loadPublicGroupMembers(db: Client, organizationId: string, slug: string): Promise<{ sourceId: string; ids: string[] } | null> {
-  const result = await db.query<{ sourceId: string; ids: string[] }>(`WITH source AS (
+export async function loadPublicGroupMembers(db: Client, organizationId: string, slug: string): Promise<{ sourceId: string; ids: string[]; groupId: string } | null> {
+  const result = await db.query<{ sourceId: string; ids: string[]; groupKey: string }>(`WITH source AS (
     SELECT p.id, p.name,
       (policy.product_id IS NOT NULL OR rule.id IS NOT NULL) AS has_owner,
       CASE WHEN policy.product_id IS NOT NULL THEN policy.group_id
@@ -179,7 +180,10 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
     SELECT s.*, g.source_prefix AS owner_prefix, g.kind AS owner_kind, g.customized, g.follow_auto
     FROM source s LEFT JOIN catalog_variant_groups g ON g.organization_id=$1 AND g.id=s.owner_id
   )
-  SELECT t.id AS "sourceId", ARRAY(
+  SELECT t.id AS "sourceId",
+    CASE WHEN t.owner_id IS NOT NULL THEN 'group:' || t.owner_id::text
+      WHEN NOT t.has_owner AND t.base IS NOT NULL THEN 'auto:' || t.base
+      ELSE 'product:' || t.id::text END AS "groupKey", ARRAY(
     SELECT p.id FROM products p
     LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
     LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
@@ -208,7 +212,10 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
       )
     ORDER BY p.name, p.id
   ) AS ids FROM target t`, [organizationId, slug]);
-  return result.rows[0] ?? null;
+  const row = result.rows[0];
+  if (!row) return null;
+  return { sourceId: row.sourceId, ids: row.ids,
+    groupId: createHash('sha256').update(`${organizationId}:${row.groupKey}`).digest('hex') };
 }
 
 export async function mutateGroups(db: Database['pool'], ctx: RequestContext,

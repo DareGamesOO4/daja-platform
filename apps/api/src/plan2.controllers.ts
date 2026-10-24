@@ -442,11 +442,12 @@ export class PublicCatalogController {
     const group = await loadPublicGroupMembers(this.database.pool, ctx.organizationId, normalizedSlug);
     if (!group) throw new NotFoundException('Product not found');
     const { ids, sourceId } = group;
-    if (ids.length < 2) return { items: [] };
+    if (ids.length < 2) return { items: [], groupId: null };
     const result = await repository.listPublicProducts(ctx, { productIds: ids, limit: ids.length });
     // Internal names and private group metadata never enter the public payload.
     const unique = [...new Map(result.items.map(item => [item.productId, item])).values()];
-    return { items: unique.length < 2 || !unique.some(item => item.productId === sourceId) ? [] : unique.filter(item => item.productId !== sourceId) };
+    if (unique.length < 2 || !unique.some(item => item.productId === sourceId)) return { items: [], groupId: null };
+    return { items: unique.filter(item => item.productId !== sourceId), groupId: group.groupId };
   }
 
   @Get('products/:slug')
