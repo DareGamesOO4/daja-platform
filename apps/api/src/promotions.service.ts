@@ -116,6 +116,18 @@ export interface PromotionResolution {
 export class PromotionsService {
   constructor(@Inject(DATABASE) private readonly database: Database) {}
 
+  async welcomeCodeAvailable(organizationId: string, code: string): Promise<boolean> {
+    const result = await this.database.pool.query(
+      `SELECT id FROM promotions WHERE organization_id=$1 AND code=$2
+         AND deleted_at IS NULL AND active
+         AND (starts_at IS NULL OR starts_at <= now())
+         AND (ends_at IS NULL OR ends_at > now())
+         AND (total_usage_limit IS NULL OR uses_count < total_usage_limit)`,
+      [organizationId, code]
+    );
+    return result.rows.length > 0;
+  }
+
   async list(organizationId: string) {
     const result = await this.database.pool.query<PromotionRow>(
       `SELECT p.*, COALESCE(targets.customer_targets, '[]'::jsonb) AS customer_targets
@@ -370,7 +382,8 @@ export class PromotionsService {
       [input.organizationId, code]
     );
     const promotion = rowResult.rows[0];
-    if (!promotion || !promotion.active) throw new ValidationFailedError('Promo kod nije aktivan.');
+    if (!promotion) throw new ValidationFailedError('Promo kod ne postoji.');
+    if (!promotion.active) throw new ValidationFailedError('Promo kod nije aktivan.');
     const now = Date.now();
     if (promotion.starts_at && new Date(promotion.starts_at).getTime() > now) {
       throw new ValidationFailedError('Promo kod još nije počeo da važi.');
@@ -555,17 +568,19 @@ export class PromotionsService {
     );
     const customerStatus = status.rows[0];
     if (!customerStatus) throw new ValidationFailedError('Korisnički nalog nije dostupan.');
-    if (promotion.requires_verified_email && !customerStatus.email_verified) {
-      throw new ValidationFailedError('Za ovaj promo kod potreban je potvrđen email.');
-    }
-    if (promotion.requires_newsletter && !customerStatus.newsletter_subscribed) {
-      throw new ValidationFailedError('Za ovaj promo kod potrebna je prijava na newsletter.');
-    }
     const orderCount = Number(customerStatus.order_count);
     const lifetimeSpend = Number(customerStatus.lifetime_spend);
-    if (promotion.first_order_only && orderCount > 0) {
-      throw new ValidationFailedError('Promo kod važi samo za prvu porudžbinu.');
+    const missingRequirements: string[] = [];
+    if (promotion.requires_verified_email && !customerStatus.email_verified) {
+      missingRequirements.push('Za ovaj promo kod potrebno je da verifikujete email adresu.');
     }
+    if (promotion.requires_newsletter && !customerStatus.newsletter_subscribed) {
+      missingRequirements.push('Za ovaj promo kod potrebna je aktivna prijava na newsletter sa istom email adresom.');
+    }
+    if (promotion.first_order_only && orderCount > 0) {
+      missingRequirements.push('Promo kod važi samo za prvu porudžbinu, a već imate prethodnu porudžbinu.');
+    }
+    if (missingRequirements.length) throw new ValidationFailedError(missingRequirements.join(' '));
     if (
       promotion.min_customer_order_count !== null &&
       orderCount < promotion.min_customer_order_count

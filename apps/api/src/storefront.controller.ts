@@ -696,6 +696,7 @@ export class StorefrontContentController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
+    @Inject(PromotionsService) private readonly promotions: PromotionsService,
     private readonly productAlerts: ProductAlertService,
     private readonly privacy: PrivacyService
   ) {}
@@ -827,7 +828,8 @@ export class StorefrontContentController {
         organizationId,
         email: subscriber.email,
         ...(matchingCustomerId ? { customerId: matchingCustomerId } : {})
-      }));
+      })) &&
+      (await this.promotions.welcomeCodeAvailable(organizationId, KOD_DOBRODOSLICE));
     const poslatMailDobrodoslice = subscriber.isFirstSubscription;
     if (poslatMailDobrodoslice) {
       await this.novostiEmail.posaljiPorukuDobrodoslice({

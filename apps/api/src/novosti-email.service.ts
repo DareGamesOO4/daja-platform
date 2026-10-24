@@ -183,7 +183,7 @@ function tekstDobrodoslice(input: {
         '',
         'Kako se koristi:',
         '1. Otvorite ' + input.shopUrl + ' i dodajte artikle u korpu.',
-        '2. Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka.',
+        '2. Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka i verifikujte email. Newsletter pretplata mora biti aktivna.',
         '3. Kod se može automatski primeniti pri otvaranju korpe. Ako se ne prikaže, unesite ga ručno u polje „Kod”.',
         '4. Uslovi koda se proveravaju ponovo pri završetku porudžbine.',
         ''
@@ -220,7 +220,7 @@ function htmlDobrodoslice(input: {
       '<h2 style="margin:0 0 10px;color:#18181b;font-size:16px;line-height:1.35;font-weight:700">Kako se koristi kod</h2>' +
       '<table class="welcome-steps" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5">' +
       korakHtml('1', 'Dodajte željene artikle u korpu.') +
-      korakHtml('2', 'Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka.') +
+      korakHtml('2', 'Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka i verifikujte email. Newsletter pretplata mora biti aktivna.') +
       korakHtml('3', 'Kod se može automatski primeniti pri ulasku u korpu. Ako se ne prikaže, unesite ga ručno u polje „Kod”.') +
       korakHtml('4', 'Uslovi koda se proveravaju ponovo pri završetku porudžbine.') +
       '</table></section>'
