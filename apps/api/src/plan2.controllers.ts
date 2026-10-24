@@ -802,6 +802,21 @@ export class StaffCatalogController {
     return this.adminProductRows(ctx.organizationId, undefined, this.isCatalogContributor(ctx) ? ctx.userId : undefined);
   }
 
+  @Get('admin/catalog/batches')
+  async adminCatalogBatch(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    const input = parseWithSchema(z.object({
+      after: uuidSchema.optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+    }), query);
+    const rows = await this.adminProductRows(ctx.organizationId, undefined,
+      this.isCatalogContributor(ctx) ? ctx.userId : undefined, false,
+      { after: input.after ?? null, limit: input.limit + 1 });
+    const items = rows.slice(0, input.limit);
+    return { items, nextCursor: rows.length > input.limit ? String(items.at(-1)!.id) : null };
+  }
+
   @Get('admin/catalog/page')
   async adminCatalogPage(
     @Req() request: Request,
@@ -1123,10 +1138,18 @@ export class StaffCatalogController {
     this.requireWorkforceManager(ctx);
     const id = parseWithSchema(uuidSchema, userId);
     const rawProducts = await this.adminProductRows(ctx.organizationId, undefined, id, true);
-    const products = await Promise.all(rawProducts.map(async (product) => {
-      if (product.deletedAt) return { ...product, qualityMissing: [] };
-      const quality = await this.productQuality(this.database.pool, ctx.organizationId, product.id);
-      return { ...product, qualityMissing: quality.missing, qualityChecks: quality.checks };
+    const products = [...rawProducts];
+    let nextProduct = 0;
+    // Leave database connections available for the independent charts and
+    // pricing requests instead of queuing every product's quality query.
+    await Promise.all(Array.from({ length: Math.min(4, rawProducts.length) }, async () => {
+      while (nextProduct < rawProducts.length) {
+        const index = nextProduct++;
+        const product = rawProducts[index]!;
+        if (product.deletedAt) { products[index] = { ...product, qualityMissing: [] }; continue; }
+        const quality = await this.productQuality(this.database.pool, ctx.organizationId, product.id);
+        products[index] = { ...product, qualityMissing: quality.missing, qualityChecks: quality.checks };
+      }
     }));
     const activity = (await this.database.pool.query(
       `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
@@ -2518,7 +2541,8 @@ export class StaffCatalogController {
     return { checks, missing: checks.filter((check) => !check.complete).map((check) => check.label) };
   }
 
-  private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false) {
+  private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false,
+    page?: { after: string | null; limit: number }) {
     const rows = (
       await this.database.pool.query(
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
@@ -2610,8 +2634,9 @@ export class StaffCatalogController {
          AND ($2::uuid IS NULL OR p.id = $2)
          AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
          AND ($4::boolean OR p.deleted_at IS NULL)
-       ORDER BY p.updated_at DESC`,
-        [organizationId, productId ?? null, contributorId ?? null, includeDeleted]
+         AND ($5::uuid IS NULL OR p.id > $5)
+       ORDER BY ${page ? 'p.id' : 'p.updated_at DESC'} LIMIT $6`,
+        [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null]
       )
     ).rows;
     const states=await supplierStatesForProducts(this.database.pool,organizationId,rows.map(row=>String(row.id)));
