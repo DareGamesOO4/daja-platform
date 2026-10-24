@@ -19,6 +19,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { AppConfig } from '@daja/config';
 import type { RequestContext } from '@daja/shared';
 import {
@@ -47,6 +48,7 @@ import {
   attributesSchema,
   amountMinorSchema,
   currencySchema,
+  normalizeEpc,
   paginationLimitSchema,
   parseWithSchema,
   slugSchema,
@@ -175,6 +177,23 @@ const scheduledPriceSchema = z.object({
   priceType: z.enum(['sell', 'sale', 'cost']),
   validFrom: z.string().datetime().optional(),
   validUntil: z.string().datetime().nullable().optional()
+});
+
+const adminProductSaveSchema = z.object({
+  requestId: uuidSchema,
+  id: uuidSchema.optional(),
+  product: productCreateSchema,
+  variant: variantPatchSchema.extend({ id: uuidSchema.optional() }),
+  previousEpc: z.string().optional(),
+  stock: z.object({
+    quantity: z.number().int().nonnegative(), reconcileQuantity: z.boolean(), persistPlacement: z.boolean(),
+    pieces: z.array(z.object({ epc: z.string(), locationId: uuidSchema.nullable(), zoneId: uuidSchema.nullable(), binId: uuidSchema.nullable() }))
+  }),
+  sale: z.object({ replace: z.boolean(), price: scheduledPriceSchema.optional() }).optional(),
+  cost: scheduledPriceSchema.optional(),
+  media: z.array(z.object({ mediaId: uuidSchema, linkId: uuidSchema.optional(), position: z.number().int().nonnegative(), isPrimary: z.boolean(), altText: z.string().max(240) })),
+  removedMediaLinkIds: z.array(uuidSchema), deletedVariantIds: z.array(uuidSchema),
+  reviewNote: z.string().trim().min(1).max(2000).optional()
 });
 
 const brandSchema = z.object({
@@ -753,6 +772,213 @@ export class StaffCatalogController {
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
     this.publishCatalogTaxonomy(ctx.organizationId, 'departments');
     return result.rows[0];
+  }
+
+  @Post('admin/catalog/save')
+  async saveAdminProduct(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    const input = parseWithSchema(adminProductSaveSchema, body);
+    if (input.id) await this.assertContributorOwnsProduct(ctx, input.id);
+    if (input.reviewNote !== undefined) this.requireWorkforceManager(ctx);
+    const pieces = input.stock.pieces.map(piece => ({ ...piece, epc: piece.epc ? normalizeEpc(piece.epc) : '' }));
+    const previousEpc = input.previousEpc ? normalizeEpc(input.previousEpc) : '';
+    const nextEpc = pieces[0]?.epc || '';
+    if (pieces.length !== input.stock.quantity) throw new ValidationFailedError('Broj komada ne odgovara količini.');
+    if (new Set(pieces.filter(piece => piece.epc).map(piece => piece.epc)).size !== pieces.filter(piece => piece.epc).length) {
+      throw new ValidationFailedError('Svaki fizički komad mora imati različit EPC.');
+    }
+    const registeringPieces = pieces.filter((piece, index) => piece.epc && (index > 0 || !input.id || previousEpc !== piece.epc));
+    if (registeringPieces.length || previousEpc !== nextEpc) requirePermission(ctx, 'rfid.assign');
+    if (registeringPieces.some(piece => piece.locationId) ||
+      (pieces[0]?.locationId && (!input.id || input.stock.reconcileQuantity || input.stock.persistPlacement))) requirePermission(ctx, 'inventory.adjust');
+    if (input.sale?.price) {
+      if (input.sale.price.priceType !== 'sale') throw new ValidationFailedError('Nevažeći tip akcijske cene.');
+      const from = input.sale.price.validFrom ? new Date(input.sale.price.validFrom) : new Date();
+      const until = input.sale.price.validUntil ? new Date(input.sale.price.validUntil) : null;
+      if (!until || until <= from || until <= new Date()) throw new ValidationFailedError('Sale end must be after its start and in the future');
+    }
+    if (input.cost && input.cost.priceType !== 'cost') throw new ValidationFailedError('Nevažeći tip nabavne cene.');
+    const primaryMedia = input.media.find(image => image.isPrimary);
+    if (input.media.filter(image => image.isPrimary).length > 1) throw new ValidationFailedError('Samo jedna slika može biti glavna.');
+    if (primaryMedia) await ensurePrimaryMediaThumbnail({ config: this.config, database: this.database, organizationId: ctx.organizationId, mediaId: primaryMedia.mediaId });
+    const requestKey = `admin-product-save:${ctx.userId}:${input.requestId}`;
+    const requestHash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const saved = await new TransactionManager(this.database.pool, this.logger).run(async client => {
+      // Serialize retries before creating anything. A lost HTTP response must
+      // never create another product, stock adjustment, price or RFID piece.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`${ctx.organizationId}:${requestKey}`]);
+      type SaveResult = { productId: string; variantId: string; slug: string; previousSlug: string; epcs: string[]; staleMediaKeys: string[]; removedMediaIds: string[]; stockAdded: boolean; saleChanged: boolean; previousPriceAmount: number | null; currentPriceAmount: number };
+      const replay = await client.query<{ request_hash: string; response_payload: SaveResult }>(
+        `SELECT request_hash, response_payload FROM idempotency_records WHERE organization_id=$1 AND idempotency_key=$2 AND status='completed'`, [ctx.organizationId, requestKey]);
+      if (replay.rows[0]) {
+        if (replay.rows[0].request_hash !== requestHash) throw new ResourceConflictError('Isti zahtev za čuvanje ne može imati različite podatke.');
+        return replay.rows[0].response_payload;
+      }
+      const catalog = new CatalogRepository(client);
+      const audit = new AuditRepository(client);
+      const outbox = new OutboxRepository(client);
+      const inventory = new InventoryRepository(client);
+      const rfid = new RfidRepository(client);
+      const sync = new OperationalSyncProjector(client);
+      if (input.id) {
+        const locked = await client.query(`SELECT id FROM products WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, [ctx.organizationId, input.id]);
+        if (!locked.rows[0]) throw new TenantAccessDeniedError();
+        if (this.isCatalogContributor(ctx)) {
+          const own = await client.query(`SELECT 1 FROM products WHERE organization_id=$1 AND id=$2 AND created_by_user_id=$3`, [ctx.organizationId, input.id, ctx.userId]);
+          if (!own.rows[0]) throw new TenantAccessDeniedError();
+        }
+      }
+      const before = input.id ? await catalog.getProduct(ctx, input.id) : null;
+      const product = input.id ? await catalog.patchProduct(ctx, input.id, input.product) : await catalog.createProduct(ctx, input.product);
+      const productId = product.id;
+      if (!input.id) await client.query(`UPDATE products SET created_by_user_id=$3 WHERE organization_id=$1 AND id=$2`, [ctx.organizationId, productId, ctx.userId]);
+      else await client.query(`UPDATE products SET quality_review_status='pending', quality_review_note=NULL, quality_reviewed_by_user_id=NULL, quality_reviewed_at=NULL WHERE organization_id=$1 AND id=$2 AND quality_review_status<>'pending'`, [ctx.organizationId, productId]);
+      for (const provider of ['supplier', 'bultime', 'linkel', 'milano', 'timezone', 'qandq'] as const) {
+        const value = input.product[`${provider}Url`];
+        // A new product cannot have a supplier link to clear.
+        if (value === undefined || (!input.id && !value)) continue;
+        if (provider === 'supplier') await saveEkkaLink(client, ctx.organizationId, productId, value);
+        else if (provider === 'bultime') await saveBultimeLink(client, ctx.organizationId, productId, value);
+        else if (provider === 'linkel') await saveLinkelLink(client, ctx.organizationId, productId, value);
+        else await saveAdditionalLink(client, ctx.organizationId, productId, provider, value);
+      }
+      if (before && before.slug !== product.slug) await client.query(
+        `INSERT INTO product_slug_redirects (organization_id,product_id,old_slug) VALUES ($1,$2,$3) ON CONFLICT (organization_id,old_slug) DO UPDATE SET product_id=EXCLUDED.product_id,created_at=now()`, [ctx.organizationId, productId, before.slug]);
+      await audit.append({ ctx, aggregateType: 'product', aggregateId: productId, operation: before ? 'update' : 'create', ...(before ? { beforePayload: before } : {}), afterPayload: product });
+      const requestedVariantId = input.variant.id;
+      const variantInput = parseWithSchema(variantPatchSchema.omit({ epc: true }), input.variant);
+      // A recovered legacy draft may know the product ID but not its variant.
+      const existingVariant = requestedVariantId ? await catalog.getVariant(ctx, requestedVariantId) : input.id ?
+        (await client.query<{ id: string }>(`SELECT id FROM product_variants WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL ORDER BY created_at LIMIT 1`, [ctx.organizationId, productId])).rows[0] : null;
+      if (existingVariant && 'productId' in existingVariant && existingVariant.productId !== productId) throw new TenantAccessDeniedError();
+      const changed = existingVariant ? await catalog.patchVariant(ctx, existingVariant.id, variantInput) : null;
+      const variant = changed?.after ?? await catalog.createVariant(ctx, productId, parseWithSchema(variantCreateSchema, variantInput));
+      await audit.append({ ctx, aggregateType: 'variant', aggregateId: variant.id, operation: !changed ? 'create' : changed.priceChanged ? 'price_change' : 'update', ...(changed ? { beforePayload: changed.before } : {}), afterPayload: variant });
+      if (changed?.priceChanged) await outbox.append({ ctx, eventType: 'PriceChanged', aggregateType: 'variant', aggregateId: variant.id, payload: { variantId: variant.id, productId, price: variant.currentPriceAmount } });
+      if (input.sale?.replace) await client.query(`UPDATE variant_prices SET cancelled_at=now() WHERE organization_id=$1 AND variant_id=$2 AND price_type='sale' AND cancelled_at IS NULL AND (valid_until IS NULL OR valid_until>now())`, [ctx.organizationId, variant.id]);
+      for (const price of [input.sale?.replace ? input.sale.price : null, input.cost]) {
+        if (price) await client.query(`INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8)`,
+          [ctx.organizationId, variant.id, price.amountMinor, price.currency, price.priceType, price.validFrom ?? null, price.validUntil ?? null, ctx.userId]);
+      }
+      const epcs = new Set<string>([previousEpc, ...pieces.map(piece => piece.epc)].filter(Boolean));
+      if (previousEpc && previousEpc !== nextEpc) {
+        let tag;
+        try { tag = await rfid.getTagByEpc(ctx, previousEpc); } catch (error) { if (!(error instanceof ResourceNotFoundError)) throw error; }
+        if (tag && (tag.variantId || tag.inventoryItemId)) {
+          const owner = await client.query(`SELECT 1 FROM rfid_tags t LEFT JOIN inventory_items item ON item.organization_id=t.organization_id AND item.id=t.inventory_item_id WHERE t.organization_id=$1 AND t.id=$2 AND COALESCE(t.variant_id,item.variant_id)=$3`, [ctx.organizationId, tag.id, variant.id]);
+          if (!owner.rows[0]) throw new ResourceConflictError('Prethodni EPC pripada drugom artiklu.');
+          const unassigned = await rfid.unassignTag(ctx, { tagId: tag.id, reason: 'EPC uklonjen ili zamenjen iz admin artikla' });
+          await audit.append({ ctx, aggregateType: 'rfid_tag', aggregateId: tag.id, operation: 'unassign', afterPayload: unassigned, reason: 'EPC uklonjen ili zamenjen iz admin artikla' });
+          await outbox.append({ ctx, eventType: 'RfidTagUnassigned', aggregateType: 'rfid_tag', aggregateId: tag.id, payload: { tagId: tag.id } });
+        }
+      }
+      let stockAdded = false;
+      for (const [index, piece] of pieces.entries()) {
+        if (!piece.epc || (index === 0 && input.id && previousEpc === piece.epc)) continue;
+        let tag;
+        // A competing registration can hit the unique constraint; use a
+        // savepoint so the enclosing complete save remains a valid transaction.
+        let tagCreated = false;
+        await client.query('SAVEPOINT admin_tag_create');
+        try {
+          tag = await rfid.createTag(ctx, { epc: piece.epc, variantId: variant.id });
+          tagCreated = true;
+        } catch (error) {
+          if (!(error instanceof ResourceConflictError)) throw error;
+          await client.query('ROLLBACK TO SAVEPOINT admin_tag_create');
+          tag = await rfid.getTagByEpc(ctx, piece.epc);
+        }
+        await client.query('RELEASE SAVEPOINT admin_tag_create');
+        if (tagCreated) {
+          await audit.append({ ctx, aggregateType: 'rfid_tag', aggregateId: tag.id, operation: 'create', afterPayload: tag });
+          await outbox.append({ ctx, eventType: 'RfidTagStatusChanged', aggregateType: 'rfid_tag', aggregateId: tag.id, payload: { tagId: tag.id, status: tag.status } });
+        }
+        if (tag.variantId && tag.variantId !== variant.id) throw new ResourceConflictError('EPC već pripada drugom artiklu.');
+        if (tag.inventoryItemId) {
+          const owner = await client.query(`SELECT 1 FROM inventory_items WHERE organization_id=$1 AND id=$2 AND variant_id=$3 AND deleted_at IS NULL`, [ctx.organizationId, tag.inventoryItemId, variant.id]);
+          if (!owner.rows[0]) throw new ResourceConflictError('EPC već pripada drugom fizičkom komadu.');
+        } else if (piece.locationId) {
+          const item = await inventory.createItem(ctx, { variantId: variant.id, locationId: piece.locationId, zoneId: piece.zoneId, binId: piece.binId, status: 'in_stock' });
+          stockAdded = true;
+          await audit.append({ ctx, aggregateType: 'inventory_item', aggregateId: item.id, operation: 'create', afterPayload: item });
+          await outbox.append({ ctx, eventType: 'InventoryAdjusted', aggregateType: 'inventory_item', aggregateId: item.id, payload: { inventoryItemId: item.id, variantId: variant.id, locationId: item.currentLocationId, ...(item.currentZoneId ? { zoneId: item.currentZoneId } : {}), ...(item.currentBinId ? { binId: item.currentBinId } : {}) } });
+          const assigned = await rfid.assignTag(ctx, { tagId: tag.id, inventoryItemId: item.id, reason: index === 0 ? 'Unos proizvoda iz admin modala' : 'Unos fizičkog komada iz admin modala' });
+          await audit.append({ ctx, aggregateType: 'rfid_tag', aggregateId: tag.id, operation: 'assign', afterPayload: assigned, reason: 'Unos fizičkog komada iz admin modala' });
+          await outbox.append({ ctx, eventType: 'RfidTagAssigned', aggregateType: 'rfid_tag', aggregateId: tag.id, payload: { tagId: tag.id, inventoryItemId: item.id } });
+        }
+      }
+      const placement = pieces[0];
+      const reconcile = !input.id || input.stock.reconcileQuantity;
+      if (placement?.locationId && (reconcile || input.stock.persistPlacement)) {
+        const balances = await client.query<{ quantity: number }>(`SELECT quantity FROM inventory_balances WHERE organization_id=$1 AND variant_id=$2 AND location_id=$3 FOR UPDATE`, [ctx.organizationId, variant.id, placement.locationId]);
+        const current = balances.rows.reduce((sum, row) => sum + Number(row.quantity), 0);
+        const target = reconcile ? input.stock.quantity : current;
+        const delta = target - current;
+        if (delta !== 0) {
+          const balance = await inventory.adjust(ctx, { variantId: variant.id, locationId: placement.locationId, zoneId: placement.zoneId, binId: placement.binId, quantityDelta: delta, sourceType: 'admin_product_quantity_change', metadata: { previousQuantity: current, requestedQuantity: target } });
+          stockAdded ||= delta > 0;
+          await audit.append({ ctx, aggregateType: 'inventory_balance', aggregateId: variant.id, operation: 'adjust', beforePayload: { ...balance, quantity: balance.previousQuantity }, afterPayload: { ...balance, quantityDelta: delta, sourceType: 'admin_product_quantity_change', metadata: { previousQuantity: current, requestedQuantity: target } }, reason: 'admin_product_quantity_change' });
+          await outbox.append({ ctx, eventType: 'InventoryAdjusted', aggregateType: 'variant', aggregateId: variant.id, payload: { variantId: variant.id, locationId: placement.locationId, quantityDelta: delta, quantity: balance.quantity, ...(placement.zoneId ? { zoneId: placement.zoneId } : {}), ...(placement.binId ? { binId: placement.binId } : {}) } });
+        }
+      }
+      for (const variantId of input.deletedVariantIds) {
+        if (variantId === variant.id) throw new ValidationFailedError('Aktivna varijanta ne može biti obrisana.');
+        const deleted = await catalog.getVariant(ctx, variantId);
+        if (deleted.productId !== productId) throw new TenantAccessDeniedError();
+        const tags = await client.query<{ epc: string }>(`UPDATE rfid_tags t SET deleted_at=now(),status='retired',inventory_item_id=NULL,variant_id=NULL,epc=CASE WHEN length(t.epc)%2=1 THEN '0'||t.epc ELSE t.epc END,version=version+1,updated_at=now() WHERE t.organization_id=$1 AND t.deleted_at IS NULL AND (t.variant_id=$2 OR EXISTS (SELECT 1 FROM inventory_items item WHERE item.id=t.inventory_item_id AND item.organization_id=t.organization_id AND item.variant_id=$2)) RETURNING epc`, [ctx.organizationId, variantId]);
+        tags.rows.forEach(tag => epcs.add(tag.epc));
+        await client.query(`UPDATE product_variants SET deleted_at=now(),active=false,published=false,version=version+1,updated_at=now() WHERE organization_id=$1 AND id=$2`, [ctx.organizationId, variantId]);
+        await sync.publishProductChange(ctx, productId, variantId, 'delete');
+      }
+      // Compare canonical links on the server, so unchanged images cause no
+      // UPDATE, R2 work, repeated snapshot or extra client request.
+      const existingMedia = (await client.query<{ id: string; mediaId: string; position: number; isPrimary: boolean; altText: string | null }>(`SELECT id,media_asset_id AS "mediaId",position,is_primary AS "isPrimary",alt_text AS "altText" FROM product_media WHERE organization_id=$1 AND product_id=$2`, [ctx.organizationId, productId])).rows;
+      const removedMediaIds: string[] = [];
+      for (const linkId of input.removedMediaLinkIds) {
+        if (input.media.some(image => image.linkId === linkId)) continue;
+        const removed = await client.query<{ mediaId: string }>(`DELETE FROM product_media WHERE organization_id=$1 AND product_id=$2 AND id=$3 RETURNING media_asset_id AS "mediaId"`, [ctx.organizationId, productId, linkId]);
+        removed.rows.forEach(image => removedMediaIds.push(image.mediaId));
+      }
+      if (primaryMedia && !existingMedia.some(image => image.mediaId === primaryMedia.mediaId && image.isPrimary)) await client.query(`UPDATE product_media SET is_primary=false WHERE organization_id=$1 AND product_id=$2 AND is_primary`, [ctx.organizationId, productId]);
+      for (const image of input.media) {
+        const existing = image.linkId ? existingMedia.find(link => link.id === image.linkId && link.mediaId === image.mediaId) : existingMedia.find(link => link.mediaId === image.mediaId);
+        if (image.linkId && !existing) throw new TenantAccessDeniedError();
+        if (existing && existing.position === image.position && existing.isPrimary === image.isPrimary && (existing.altText || '') === image.altText) continue;
+        const asset = await client.query(`SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, [ctx.organizationId, image.mediaId]);
+        if (!asset.rows[0]) throw new TenantAccessDeniedError();
+        if (existing) await client.query(`UPDATE product_media SET position=$4,is_primary=$5,alt_text=$6 WHERE organization_id=$1 AND product_id=$2 AND id=$3`, [ctx.organizationId, productId, existing.id, image.position, image.isPrimary, image.altText]);
+        else await client.query(`INSERT INTO product_media (organization_id,product_id,media_asset_id,role,position,is_primary,alt_text) VALUES ($1,$2,$3,'gallery',$4,$5,$6)`, [ctx.organizationId, productId, image.mediaId, image.position, image.isPrimary, image.altText]);
+      }
+      await client.query(`UPDATE product_media SET is_primary=true WHERE id=(SELECT id FROM product_media WHERE organization_id=$1 AND product_id=$2 ORDER BY position,id LIMIT 1) AND NOT EXISTS (SELECT 1 FROM product_media WHERE organization_id=$1 AND product_id=$2 AND is_primary)`, [ctx.organizationId, productId]);
+      const relocated = before && before.slug !== product.slug ? await new MediaRepository(client).relocateProductMedia(ctx, { productId, previousSlug: before.slug, nextSlug: product.slug }, () => new R2MediaStorageAdapter(this.config)) : { sourceKeys: [] };
+      if (input.reviewNote !== undefined) {
+        const review = await client.query(`UPDATE products SET quality_review_status='changes_requested',quality_review_note=$3,quality_reviewed_by_user_id=$4,quality_reviewed_at=now() WHERE organization_id=$1 AND id=$2 RETURNING quality_review_status AS "qualityReviewStatus",quality_review_note AS "qualityReviewNote",compensation_amount_minor AS "compensationAmountMinor"`, [ctx.organizationId, productId, input.reviewNote, ctx.userId]);
+        await audit.append({ ctx, aggregateType: 'product', aggregateId: productId, operation: 'quality_changes_requested', beforePayload: product, afterPayload: review.rows[0], reason: input.reviewNote });
+      }
+      await new StorefrontRepository(client).refreshProductSnapshots({ organizationId: ctx.organizationId, productId });
+      const variants = await client.query<{ id: string }>(`SELECT id FROM product_variants WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL`, [ctx.organizationId, productId]);
+      for (const item of variants.rows) await sync.publishProductChange(ctx, productId, item.id, !input.id && item.id === variant.id ? 'create' : 'update');
+      await outbox.append({ ctx, eventType: before ? 'ProductUpdated' : 'ProductCreated', aggregateType: 'product', aggregateId: productId, payload: { productId, variantId: variant.id, slug: product.slug, published: product.published } });
+      const result: SaveResult = { productId, variantId: variant.id, slug: product.slug, previousSlug: before?.slug || product.slug, epcs: [...epcs], staleMediaKeys: relocated.sourceKeys, removedMediaIds, stockAdded, saleChanged: Boolean(input.sale?.replace && input.sale.price), previousPriceAmount: changed?.priceChanged ? changed.before.currentPriceAmount : null, currentPriceAmount: variant.currentPriceAmount };
+      await client.query(`INSERT INTO idempotency_records (organization_id,idempotency_key,request_hash,status,response_status,response_payload) VALUES ($1,$2,$3,'completed',200,$4::jsonb)`, [ctx.organizationId, requestKey, requestHash, JSON.stringify(result)]);
+      return result;
+    });
+    // These are the same public/staff signals and durable sync records used by
+    // the existing RFID routes. Publish only after the complete save commits.
+    if (saved.epcs.length) await this.redis.client.del(...saved.epcs.map(epc => `rfid:resolve:${ctx.organizationId}:${epc}`));
+    await this.invalidateCatalog(ctx.organizationId, ...new Set([saved.previousSlug, saved.slug]));
+    if (saved.previousPriceAmount !== null) await this.productAlerts.notifyPriceChanged({ organizationId: ctx.organizationId, variantId: saved.variantId, previousPriceAmount: saved.previousPriceAmount, currentPriceAmount: saved.currentPriceAmount });
+    if (saved.stockAdded) await this.productAlerts.notifyBackInStock({ organizationId: ctx.organizationId, variantId: saved.variantId });
+    if (saved.saleChanged) await this.productAlerts.dispatchDueSaleStarts();
+    // Removing obsolete storage objects is safe after committing references.
+    try {
+      if (saved.staleMediaKeys.length) await new MediaRepository(this.database.pool).deleteStorageObjects(new R2MediaStorageAdapter(this.config), saved.staleMediaKeys);
+      for (const mediaId of new Set(saved.removedMediaIds)) await new TransactionManager(this.database.pool, this.logger).run(client => new MediaRepository(client).discardUnreferenced(ctx, mediaId, new R2MediaStorageAdapter(this.config)));
+    } catch (error) { this.logger.warn({ err: error, productId: saved.productId }, 'Saved product media cleanup failed'); }
+    const product = (await this.adminProductRows(ctx.organizationId, saved.productId))[0];
+    const images = await this.listProductMedia(request, saved.productId);
+    return { product, productId: saved.productId, variantId: saved.variantId, images };
   }
 
   @Post('products')
