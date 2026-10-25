@@ -5,7 +5,7 @@
   "main": "dist/main.js",
   "types": "dist/main.d.ts",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "node --watch --env-file=../../.env dist/main.js",
     "build": "tsc -b",
     "start": "node dist/main.js",
     "typecheck": "tsc -b --pretty false"

@@ -11,7 +11,8 @@
     "node": ">=20.11.0"
   },
   "scripts": {
-    "dev": "npm run build:packages && npm-run-all --parallel dev:api dev:worker",
+    "dev": "npm run build && npm-run-all --parallel dev:types dev:api dev:worker",
+    "dev:types": "tsc -b --watch --preserveWatchOutput",
     "dev:api": "npm --workspace @daja/api run dev",
     "dev:worker": "npm --workspace @daja/worker run dev",
     "build": "npm-run-all build:packages build:apps",
