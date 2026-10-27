@@ -47,6 +47,7 @@ export async function workforceSummary(
  SELECT u.id, COALESCE(u.display_name,u.email) AS name, u.email,
   COALESCE(s.total,0)::int AS "createdTotal", COALESCE(s.period,0)::int AS "createdInPeriod",
   COALESCE(s.today,0)::int AS "createdToday", COALESCE(s.yesterday,0)::int AS "createdYesterday",
+  COALESCE(s.last_seven_days,0)::int AS "createdLast7Days",
   COALESCE(s.approved,0)::int AS "approvedCount", COALESCE(s.pending,0)::int AS "pendingCount",
   COALESCE(s.returned,0)::int AS "changesRequestedCount", COALESCE(s.incomplete,0)::int AS "incompleteCount",
   COALESCE(s.deleted,0)::int AS "deletedCount", COALESCE(s.amount,0) AS "approvedAmountMinor",
@@ -58,6 +59,7 @@ export async function workforceSummary(
  LEFT JOIN LATERAL (
   SELECT count(*) AS total, count(*) FILTER (WHERE created_at BETWEEN $2::timestamptz AND $3::timestamptz) AS period,
    count(*) FILTER (WHERE day = b.today) AS today, count(*) FILTER (WHERE day = b.today - 1) AS yesterday,
+   count(*) FILTER (WHERE day BETWEEN b.today - 6 AND b.today) AS last_seven_days,
    count(*) FILTER (WHERE deleted_at IS NULL AND quality_review_status='approved') AS approved,
    count(*) FILTER (WHERE deleted_at IS NULL AND quality_review_status='pending') AS pending,
    count(*) FILTER (WHERE deleted_at IS NULL AND quality_review_status='changes_requested') AS returned,
