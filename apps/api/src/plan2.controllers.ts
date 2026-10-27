@@ -70,7 +70,7 @@ import { canManageSupplierChecks } from './supplier-access.js';
 import { currentEurRsdMiddleRate } from './exchange-rates.js';
 import { readSearchSettings, saveSearchSettings, searchSettingsSchema, type SearchSettingsResult } from './catalog-search-settings.js';
 import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
-import { workforceSummary, meaningfulSpecsSql, effectiveRateSql } from './workforce-data.js';
+import { workforceSummary, workforceProducts, workforceTimelineEntries, effectiveRateSql } from './workforce-data.js';
 import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 import { loadGroupState, loadPublicGroupMembers, groupOverview, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
@@ -1363,20 +1363,7 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     this.requireWorkforceManager(ctx);
     const id = parseWithSchema(uuidSchema, userId);
-    const rawProducts = await this.adminProductRows(ctx.organizationId, undefined, id, true);
-    const products = [...rawProducts];
-    let nextProduct = 0;
-    // Leave database connections available for the independent charts and
-    // pricing requests instead of queuing every product's quality query.
-    await Promise.all(Array.from({ length: Math.min(4, rawProducts.length) }, async () => {
-      while (nextProduct < rawProducts.length) {
-        const index = nextProduct++;
-        const product = rawProducts[index]!;
-        if (product.deletedAt) { products[index] = { ...product, qualityMissing: [] }; continue; }
-        const quality = await this.productQuality(this.database.pool, ctx.organizationId, product.id);
-        products[index] = { ...product, qualityMissing: quality.missing, qualityChecks: quality.checks };
-      }
-    }));
+    const products = await workforceProducts(this.database.pool, ctx.organizationId, id);
     const activity = (await this.database.pool.query(
       `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
               audit.before_payload AS "beforePayload", audit.after_payload AS "afterPayload", audit.reason,
@@ -1387,10 +1374,8 @@ export class StaffCatalogController {
            SELECT 1 FROM products p WHERE p.organization_id=$1 AND p.id=audit.aggregate_id AND p.created_by_user_id=$2)))
        ORDER BY audit.occurred_at DESC LIMIT 250`, [ctx.organizationId, id]
     )).rows;
-    const summaries = await workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString());
-    const rates = (await this.database.pool.query(`SELECT p.id, ${effectiveRateSql('p')} AS "effectiveRateMinor"
-      FROM products p WHERE p.organization_id=$1 AND p.created_by_user_id=$2`, [ctx.organizationId,id])).rows;
-    return { products: products.map(product => ({ ...product, effectiveRateMinor: rates.find(rate => rate.id === product.id)?.effectiveRateMinor ?? 0 })), activity,
+    const summaries = await workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString(), id);
+    return { products, activity,
       summary: summaries.find(member => member.id === id) ?? null };
   }
 
@@ -1405,27 +1390,7 @@ export class StaffCatalogController {
         return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
       })
     }), query);
-    const entries = (await this.database.pool.query(
-      `WITH bounds AS (
-        SELECT $3::date::timestamp AT TIME ZONE 'Europe/Belgrade' AS start,
-          ($3::date + 1)::timestamp AT TIME ZONE 'Europe/Belgrade' AS finish
-      )
-      SELECT 'product:' || p.id::text AS id, 'created' AS operation, 'product' AS "aggregateType",
-        p.id AS "productId", p.name AS "productName", p.created_at AS "occurredAt", p.deleted_at AS "deletedAt"
-      FROM products p CROSS JOIN bounds b
-      WHERE p.organization_id=$1 AND p.created_by_user_id=$2 AND p.created_at >= b.start AND p.created_at < b.finish
-      UNION ALL
-      SELECT 'audit:' || a.id::text, a.operation, a.aggregate_type,
-        p.id, COALESCE(p.name, a.after_payload->>'name', a.before_payload->>'name', 'Artikal'), a.occurred_at, p.deleted_at
-      FROM audit_events a CROSS JOIN bounds b
-      LEFT JOIN product_variants v ON a.aggregate_type IN ('variant', 'inventory_balance') AND v.id=a.aggregate_id AND v.organization_id=$1
-      LEFT JOIN products p ON p.organization_id=$1 AND p.id=CASE WHEN a.aggregate_type='product' THEN a.aggregate_id ELSE v.product_id END
-      WHERE a.organization_id=$1 AND a.actor_user_id=$2
-        AND a.aggregate_type IN ('product', 'variant', 'inventory_balance')
-        AND a.occurred_at >= b.start AND a.occurred_at < b.finish
-        AND NOT (a.aggregate_type='product' AND a.operation IN ('create', 'created') AND COALESCE(p.created_by_user_id=$2, false))
-      ORDER BY "occurredAt", id`, [ctx.organizationId, id, input.date]
-    )).rows;
+    const entries = await workforceTimelineEntries(this.database.pool, ctx.organizationId, id, input.date);
     return { date: input.date, timeZone: 'Europe/Belgrade', entries };
   }
 
@@ -2725,46 +2690,6 @@ export class StaffCatalogController {
       [ctx.organizationId, productId, ctx.userId]
     );
     if (result.rowCount !== 1) throw new TenantAccessDeniedError();
-  }
-
-  private async productQuality(client: Pick<Database['pool'], 'query'>, organizationId: string, productId: string): Promise<{ missing: string[]; checks: Array<{ label: string; complete: boolean }> }> {
-    const product = (await client.query<{
-      name: string; description: string | null; department_id: string | null; brand_id: string | null; primary_category_id: string | null;
-      barcode: string | null; current_price_amount: number | null; gender: string | null; specs_count: number; media_count: number;
-      features_count: number; location_id: string | null; quantity: number | null;
-    }>(
-      `SELECT p.name, p.description, p.department_id, p.brand_id, p.primary_category_id, v.barcode, v.current_price_amount, v.gender,
-              ${meaningfulSpecsSql}::int AS specs_count,
-              jsonb_array_length(p.features)::int AS features_count,
-              inventory.location_id, inventory.quantity,
-              (SELECT count(*) FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready' WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id)::int AS media_count
-       FROM products p
-       LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id = p.organization_id AND product_id = p.id AND deleted_at IS NULL ORDER BY created_at LIMIT 1) v ON true
-       LEFT JOIN LATERAL (
-         SELECT location_id, quantity FROM inventory_balances
-         WHERE organization_id = p.organization_id AND variant_id = v.id
-         ORDER BY updated_at DESC LIMIT 1
-       ) inventory ON true
-       WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
-      [organizationId, productId]
-    )).rows[0];
-    if (!product) throw new TenantAccessDeniedError();
-    const checks = [
-      { label: 'Naziv', complete: Boolean(product.name?.trim()) },
-      { label: 'Cena', complete: Number(product.current_price_amount) > 0 },
-      { label: 'GTIN proizvoda', complete: Boolean(product.barcode?.trim()) },
-      { label: 'Opis', complete: Boolean(product.description?.trim()) },
-      { label: 'Odeljenje', complete: Boolean(product.department_id) },
-      { label: 'Brend', complete: Boolean(product.brand_id) },
-      { label: 'Kategorija', complete: Boolean(product.primary_category_id) },
-      { label: 'Pol', complete: Boolean(product.gender?.trim()) },
-      { label: 'Glavna lokacija', complete: Boolean(product.location_id) },
-      { label: 'Količina', complete: Number(product.quantity) > 0 },
-      { label: `Istaknute kartice (${Number(product.features_count)}/3)`, complete: Number(product.features_count) >= 3 },
-      { label: `Specifikacije (${Number(product.specs_count)}/5)`, complete: Number(product.specs_count) >= 5 },
-      { label: `Slike (${Number(product.media_count)}/1)`, complete: Number(product.media_count) >= 1 }
-    ];
-    return { checks, missing: checks.filter((check) => !check.complete).map((check) => check.label) };
   }
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false,
