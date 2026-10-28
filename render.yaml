@@ -28,8 +28,20 @@ services:
         sync: false
       - key: PRIVACY_TOKEN_SECRET
         sync: false
+      - key: CONTACT_NOTIFICATION_EMAIL
+        value: cvelenis42@yahoo.com
+      - key: STOREFRONT_PUBLIC_BASE_URL
+        value: https://dajashop.rs
+      - key: SES_ACCOUNT_FROM_EMAIL
+        value: DajaShop <nalog@dajashop.rs>
+      - key: SES_ORDER_FROM_EMAIL
+        value: DajaShop <porudzbine@dajashop.rs>
+      - key: SES_CONFIGURATION_SET
+        value: my-first-configuration-set
+      - key: SES_FEEDBACK_QUEUE_NAME
+        value: dajashop-email-feedback
       - key: SES_REGION
-        sync: false
+        value: eu-north-1
       - key: SES_ACCESS_KEY_ID
         sync: false
       - key: SES_SECRET_ACCESS_KEY
@@ -84,8 +96,20 @@ services:
         sync: false
       - key: PRIVACY_TOKEN_SECRET
         sync: false
+      - key: CONTACT_NOTIFICATION_EMAIL
+        value: cvelenis42@yahoo.com
+      - key: STOREFRONT_PUBLIC_BASE_URL
+        value: https://dajashop.rs
+      - key: SES_ACCOUNT_FROM_EMAIL
+        value: DajaShop <nalog@dajashop.rs>
+      - key: SES_ORDER_FROM_EMAIL
+        value: DajaShop <porudzbine@dajashop.rs>
+      - key: SES_CONFIGURATION_SET
+        value: my-first-configuration-set
+      - key: SES_FEEDBACK_QUEUE_NAME
+        value: dajashop-email-feedback
       - key: SES_REGION
-        sync: false
+        value: eu-north-1
       - key: SES_ACCESS_KEY_ID
         sync: false
       - key: SES_SECRET_ACCESS_KEY

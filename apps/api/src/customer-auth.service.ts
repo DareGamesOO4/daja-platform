@@ -40,14 +40,13 @@ export class CustomerAuthService {
 
   async requestEmailVerification(input: { organizationId: string; customerId: string }) {
     const token = randomBytes(32).toString('base64url');
-    const verification = await new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new StorefrontRepository(client).createCustomerEmailVerification({
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const verification = await new StorefrontRepository(client).createCustomerEmailVerification({
         organizationId: input.organizationId,
         customerId: input.customerId,
         tokenHash: sha256Hex(token),
         expiresAt: new Date(Date.now() + 15 * 60 * 1000)
-      })
-    );
+      });
     if (verification.alreadyVerified) return { status: 'already_verified' as const };
 
     const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
@@ -55,8 +54,9 @@ export class CustomerAuthService {
     await this.email.posaljiPotvrduEmailAdrese({
       recipient: verification.email,
       verificationUrl: verificationUrl.toString()
+    }, client);
+    return { status: 'queued' as const };
     });
-    return { status: 'sent' as const };
   }
 
   async confirmEmailVerification(token: string) {
@@ -65,24 +65,24 @@ export class CustomerAuthService {
 
   async requestPasswordReset(input: { organizationId: string; email: string }) {
     const token = randomBytes(32).toString('base64url');
-    const reset = await new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new StorefrontRepository(client).createCustomerPasswordReset({
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const reset = await new StorefrontRepository(client).createCustomerPasswordReset({
         organizationId: input.organizationId,
         email: input.email.trim().toLowerCase(),
         tokenHash: sha256Hex(token),
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
-      })
-    );
+      });
 
-    if (!reset) return { status: 'not_found' as const };
+    if (!reset) return { status: 'queued' as const };
 
     const resetUrl = new URL('/reset-password', this.config.STOREFRONT_PUBLIC_BASE_URL);
     resetUrl.searchParams.set('token', token);
     await this.email.posaljiLinkZaPromenuLozinke({
       recipient: reset.email,
       resetUrl: resetUrl.toString()
+    }, client);
+    return { status: 'queued' as const };
     });
-    return { status: 'sent' as const };
   }
 
   async resetPassword(input: { token: string; newPassword: string }): Promise<void> {
@@ -125,6 +125,18 @@ export class CustomerAuthService {
         principal.organizationId,
         principal.customerId
       );
+      if (principal.email) {
+        const verificationToken = randomBytes(32).toString('base64url');
+        const verification = await repo.createCustomerEmailVerification({
+          organizationId: principal.organizationId, customerId: principal.customerId,
+          tokenHash: sha256Hex(verificationToken), expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+        });
+        if (!verification.alreadyVerified) {
+          const url = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
+          url.searchParams.set('token', verificationToken);
+          await this.email.posaljiPotvrduEmailAdrese({ recipient: verification.email, verificationUrl: url.toString() }, client);
+        }
+      }
       const hydrated = await repo.buildCustomerPrincipal({
         organizationId: principal.organizationId,
         customerId: principal.customerId,

@@ -133,6 +133,16 @@ export class PrivacyController {
     return response.redirect(this.unsubscribeRedirect('newsletter', unsubscribed));
   }
 
+  @Post('unsubscribe/newsletter')
+  async newsletterOneClickUnsubscribe(@Query('token') token: string | undefined) {
+    return { unsubscribed: token ? await this.privacy.unsubscribeNewsletterToken(token) : false };
+  }
+
+  @Post('unsubscribe/product-alert')
+  async productAlertOneClickUnsubscribe(@Query('token') token: string | undefined) {
+    return { unsubscribed: token ? await this.privacy.unsubscribeProductAlertToken(token) : false };
+  }
+
   @Get('unsubscribe/product-alert')
   async productAlertUnsubscribe(@Query('token') token: string | undefined, @Res() response: Response) {
     const unsubscribed = token ? await this.privacy.unsubscribeProductAlertToken(token) : false;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+export * from './email-template.js';
 
 export interface RequestContext {
   requestId: string;

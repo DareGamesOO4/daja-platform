@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
+import type { DbClient } from '@daja/database';
 import { CONFIG } from './tokens.js';
 import { EmailDeliveryService, type TransactionalEmail } from './email-delivery.service.js';
 
@@ -48,19 +49,20 @@ export class OrderEmailService {
     private readonly delivery: EmailDeliveryService
   ) {}
 
-  async sendOrderCreated(order: OrderEmailPayload): Promise<void> {
-    const emails: Promise<void>[] = [this.delivery.send(this.adminNewOrderEmail(order))];
+  async sendOrderCreated(order: OrderEmailPayload, client?: DbClient): Promise<void> {
+    const admin = this.adminNewOrderEmail(order);
+    const emails: Promise<void>[] = admin.recipients.length ? [this.delivery.send(admin, client)] : [];
     const customerEmail = customerValue(order.customer, 'email');
     if (customerEmail) {
-      emails.push(this.delivery.send(this.customerConfirmationEmail(order, customerEmail)));
+      emails.push(this.delivery.send(this.customerConfirmationEmail(order, customerEmail), client));
     }
     await Promise.all(emails);
   }
 
-  async sendStatusUpdate(order: OrderEmailPayload): Promise<void> {
+  async sendStatusUpdate(order: OrderEmailPayload, client?: DbClient): Promise<void> {
     const customerEmail = customerValue(order.customer, 'email');
     if (!customerEmail) return;
-    await this.delivery.send(this.customerStatusEmail(order, customerEmail));
+    await this.delivery.send(this.customerStatusEmail(order, customerEmail), client);
   }
 
   private customerConfirmationEmail(order: OrderEmailPayload, recipient: string): TransactionalEmail {
@@ -80,6 +82,7 @@ export class OrderEmailService {
         footer: 'Obavestićemo vas emailom kada se status porudžbine promeni.'
       }),
       html: emailPage({
+        siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
         eyebrow: 'PORUDŽBINA #' + escapeHtml(order.displayId),
         title: 'Hvala, porudžbina je primljena.',
         introduction:
@@ -118,6 +121,7 @@ export class OrderEmailService {
         formatMoney(order.finalTotal, order.currency),
       text: adminOrderText(order, items, shipping, { name, email, phone }),
       html: emailPage({
+        siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
         eyebrow: 'NOVA PORUDŽBINA — ZA OBRADU',
         title: 'Porudžbina #' + escapeHtml(order.displayId),
         introduction:
@@ -152,6 +156,7 @@ export class OrderEmailService {
         footer: statusPresentation(order.status).description
       }),
       html: emailPage({
+        siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
         eyebrow: 'PORUDŽBINA #' + escapeHtml(order.displayId),
         title: 'Status porudžbine je ažuriran.',
         introduction:
@@ -366,6 +371,7 @@ function detailRowHtml(
 }
 
 function emailPage(input: {
+  siteUrl: string;
   eyebrow: string;
   title: string;
   introduction: string;
@@ -374,12 +380,12 @@ function emailPage(input: {
 }): string {
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-padding h1,.email-padding p,.email-padding td,.email-padding a,.email-padding strong,.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.email-padding .detail-label{color:#c7c7cc !important}.item-row td,.details-card td,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td,.details-card,.details-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}.email-logo-dark{display:none!important;max-height:0;overflow:hidden}@media only screen and (max-width:640px){.email-shell{width:100% !important}.email-outer{padding:0 !important}.email-header{padding:24px 20px !important}.email-padding{padding:28px 20px !important}.mobile-block{display:block !important;width:auto !important;margin-bottom:8px !important}.product-image{width:56px !important;height:56px !important}}@media (prefers-color-scheme:dark){.email-logo-light{display:none!important}.email-logo-dark{display:block!important;max-height:none!important;overflow:visible!important}.email-body,.email-page,.email-outer,.email-shell,.email-header,.email-footer{background:#2c2c2e !important}.email-header,.email-footer,.details-block{border-color:#48484a !important}.email-padding h1,.email-padding p,.email-padding td,.email-padding a,.email-padding strong,.email-brand,.email-title,.summary-heading,.item-name,.item-total,.summary-value,.summary-total,.status-title,.details-heading,.detail-value{color:#fafafa !important}.email-eyebrow,.email-copy,.email-footer,.item-copy,.item-muted,.summary-label,.status-copy,.email-padding .detail-label{color:#c7c7cc !important}.item-row td,.details-card td,.summary-total{border-color:#48484a !important}.promotion-label,.promotion-value{color:#86efac !important}.product-frame,.product-frame td,.details-card,.details-card td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}}</style>' +
     '</head><body class="email-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<table class="email-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="email-outer" align="center" style="padding:32px 16px">' +
     '<table class="email-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
     '<tr><td class="email-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
-    '<p class="email-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
+    '<img class="email-logo-light" src="' + escapeHtml(new URL('/images/dajashop-email-logo.png', input.siteUrl).toString()) + '" alt="DajaShop" width="106" style="display:block;width:106px;height:auto;border:0"><img class="email-logo-dark" src="' + escapeHtml(new URL('/images/dajashop-email-logo-dark.png', input.siteUrl).toString()) + '" alt="DajaShop" width="106" style="display:none;width:106px;height:auto;border:0;max-height:0;overflow:hidden">' +
     '<p class="email-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">' +
     input.eyebrow +
     '</p></td></tr>' +

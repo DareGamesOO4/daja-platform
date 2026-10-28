@@ -381,7 +381,8 @@ export class CustomerController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
-    private readonly privacy: PrivacyService
+    private readonly privacy: PrivacyService,
+    @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
   @Get()
@@ -584,6 +585,7 @@ export class StorefrontOrdersController {
         },
         client
       );
+      await this.orderEmail.sendOrderCreated(created, client);
       return created;
     });
     this.realtime.publish({
@@ -591,8 +593,7 @@ export class StorefrontOrdersController {
       event: 'orders.created',
       payload: { orderId: order.id, displayId: order.displayId }
     });
-    await this.orderEmail.sendOrderCreated(order);
-    return order;
+    return { ...order, emailStatus: 'queued' };
   }
 
   @Post('promotions/validate')
@@ -656,19 +657,22 @@ export class StorefrontOrdersController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'orders.write');
     const input = parseWithSchema(statusSchema, body);
-    const order = await new StorefrontRepository(this.database.pool).updateOrderStatus({
+    const order = await new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const updated = await new StorefrontRepository(client).updateOrderStatus({
       organizationId: ctx.organizationId,
       orderIdOrDisplayId: id,
       status: input.status,
       userId: ctx.userId
+      });
+      await this.orderEmail.sendStatusUpdate(updated, client);
+      return updated;
     });
     this.realtime.publish({
       organizationId: ctx.organizationId,
       event: 'orders.updated',
       payload: { orderId: order.id, status: order.status }
     });
-    await this.orderEmail.sendStatusUpdate(order);
-    return order;
+    return { ...order, emailStatus: 'queued' };
   }
 
   @Patch('admin/orders/:id/read')
@@ -698,7 +702,8 @@ export class StorefrontContentController {
     @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
     @Inject(PromotionsService) private readonly promotions: PromotionsService,
     private readonly productAlerts: ProductAlertService,
-    private readonly privacy: PrivacyService
+    private readonly privacy: PrivacyService,
+    @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
   @Get('products/:productId/reviews')
@@ -801,6 +806,7 @@ export class StorefrontContentController {
   }
 
   @Post('newsletter/subscribe')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async subscribe(@Req() request: Request, @Body() body: unknown) {
     const input = parseWithSchema(newsletterSchema, body);
     const organizationId = publicOrganizationId(this.config);
@@ -820,31 +826,28 @@ export class StorefrontContentController {
         ? { customerId: customer.customerId }
         : {})
     });
-    const matchingCustomerId =
-      customer?.email?.toLowerCase() === email.toLowerCase() ? customer.customerId : undefined;
-    const imaPravoNaKodDobrodoslice =
-      subscriber.isFirstSubscription &&
-      (await this.privacy.nemaPrethodnihPorudzbina({
-        organizationId,
-        email: subscriber.email,
-        ...(matchingCustomerId ? { customerId: matchingCustomerId } : {})
-      })) &&
-      (await this.promotions.welcomeCodeAvailable(organizationId, KOD_DOBRODOSLICE));
-    const poslatMailDobrodoslice = subscriber.isFirstSubscription;
-    if (poslatMailDobrodoslice) {
-      await this.novostiEmail.posaljiPorukuDobrodoslice({
-        recipient: subscriber.email,
-        odjavaUrl: subscriber.odjavaUrl,
-        ...(imaPravoNaKodDobrodoslice ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {})
-      });
-    }
-    return {
-      ...subscriber,
-      poslatMailDobrodoslice,
-      imaPravoNaKodDobrodoslice,
-      ...(imaPravoNaKodDobrodoslice ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {})
-    };
+    return { ...subscriber, poslatMailDobrodoslice: false, imaPravoNaKodDobrodoslice: false };
   }
+
+  @Post('newsletter/confirm')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async confirmNewsletter(@Body() body: unknown) {
+    const { token } = parseWithSchema(z.object({ token: z.string().min(24).max(160) }), body);
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const subscriber = await this.privacy.confirmNewsletter(token, client);
+      const eligible = !subscriber.welcome_queued_at &&
+        await this.privacy.nemaPrethodnihPorudzbina({ organizationId: subscriber.organization_id, email: subscriber.email }) &&
+        await this.promotions.welcomeCodeAvailable(subscriber.organization_id, KOD_DOBRODOSLICE);
+      if (!subscriber.welcome_queued_at) {
+        await this.novostiEmail.posaljiPorukuDobrodoslice({ recipient: subscriber.email,
+          odjavaUrl: subscriber.odjavaUrl, newsletterSubscriberId: subscriber.id,
+          ...(eligible ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {}) }, client);
+        await client.query('UPDATE newsletter_subscribers SET welcome_queued_at = now() WHERE id = $1', [subscriber.id]);
+      }
+      return { status: 'confirmed', active: true, ...(eligible ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {}) };
+    });
+  }
+
 }
 
 @Controller('media')

@@ -37,6 +37,7 @@ import { SmsDeliveryService } from './sms-delivery.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
+import { ContactController } from './contact.controller.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
@@ -75,6 +76,7 @@ const logger = createLogger(config, 'api');
     })
   ],
   controllers: [
+    ContactController,
     EngravingController,
     CatalogFiltersController,
     AuthController,

@@ -2,6 +2,8 @@ import { Injectable, Inject } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
 import { CONFIG } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
+import type { DbClient } from '@daja/database';
+import { brandedEmail } from '@daja/shared';
 
 @Injectable()
 export class NovostiEmailService {
@@ -13,42 +15,40 @@ export class NovostiEmailService {
   async posaljiPotvrduPrijave(input: {
     recipient: string;
     confirmationUrl: string;
-  }): Promise<void> {
-    const confirmationUrl = escapeHtml(input.confirmationUrl);
+  }, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
       subject: 'Potvrdite prijavu za DajaShop novosti',
       text: `Potvrdite prijavu za DajaShop novosti otvaranjem ovog linka: ${input.confirmationUrl}`,
-      html:
-        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite prijavu</h1><p style="font-size:16px;line-height:1.6">Još samo jedan korak vas deli od DajaShop novosti.</p><p style="margin:28px 0"><a href="' +
-        confirmationUrl +
-        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdite email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link važi 24 sata. Ako niste vi zatražili prijavu, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'DAJASHOP NOVOSTI',
+        title: 'Potvrdite prijavu.', content: '<p>Još samo jedan korak vas deli od DajaShop novosti. Potvrdite da želite da primate naše ponude i obaveštenja.</p><p>Link važi 24 sata. Ako niste tražili prijavu, zanemarite ovu poruku.</p>',
+        button: { label: 'Potvrdi prijavu', url: input.confirmationUrl } }),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       tag: 'novosti-potvrda'
-    });
+    }, client);
   }
 
   async posaljiPotvrduEmailAdrese(input: {
     recipient: string;
     verificationUrl: string;
-  }): Promise<void> {
-    const verificationUrl = escapeHtml(input.verificationUrl);
+  }, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
       subject: 'Potvrdite email adresu za DajaShop nalog',
       text: `Otvorite ovaj link da potvrdite email adresu za svoj DajaShop nalog: ${input.verificationUrl}\n\nLink važi 15 minuta.`,
-      html:
-        '<!doctype html><html lang="sr"><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#1f1f1f"><main style="max-width:560px;margin:32px auto;background:#fff;padding:40px;border-radius:12px"><h1 style="margin:0 0 16px;font-size:26px">Potvrdite email adresu</h1><p style="font-size:16px;line-height:1.6">Otvorite dugme ispod da potvrdite email adresu svog DajaShop naloga.</p><p style="margin:28px 0"><a href="' +
-        verificationUrl +
-        '" style="display:inline-block;background:#111;color:#fff;padding:14px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Potvrdi email adresu</a></p><p style="font-size:14px;line-height:1.6;color:#666">Link važi 15 minuta i može da se iskoristi samo jednom. Ako niste vi zatražili verifikaciju, slobodno zanemarite ovu poruku.</p></main></body></html>',
+      html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'VAŠ DAJASHOP NALOG',
+        title: 'Potvrdite email adresu.', content: '<p>Dobro došli u DajaShop. Potvrdite email adresu svog naloga.</p><p>Link važi 15 minuta i može da se iskoristi jednom. Ako niste tražili verifikaciju, zanemarite ovu poruku.</p>',
+        button: { label: 'Potvrdi email adresu', url: input.verificationUrl } }),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
       tag: 'potvrda-email-adrese'
-    });
+    }, client);
   }
 
   async posaljiLinkZaPromenuLozinke(input: {
     recipient: string;
     resetUrl: string;
-  }): Promise<void> {
+  }, client?: DbClient): Promise<void> {
     const resetUrl = escapeHtml(input.resetUrl);
     const emailAssetUrl = (path: string) =>
       escapeHtml(new URL(path, this.config.STOREFRONT_PUBLIC_BASE_URL).toString());
@@ -61,21 +61,19 @@ export class NovostiEmailService {
         resetUrl,
         logoUrl: emailAssetUrl('/images/dajashop-email-logo.png'),
         darkLogoUrl: emailAssetUrl('/images/dajashop-email-logo-dark.png'),
-        socialIcons: {
-          facebook: emailAssetUrl('/images/email-social-facebook-circle.png'),
-          instagram: emailAssetUrl('/images/email-social-instagram-circle.png'),
-          tiktok: emailAssetUrl('/images/email-social-tiktok-circle.png')
-        }
+        contactUrl: emailAssetUrl('/contact')
       }),
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
       tag: 'promena-lozinke'
-    });
+    }, client);
   }
 
   async posaljiPorukuDobrodoslice(input: {
     recipient: string;
     odjavaUrl: string;
     kodDobrodoslice?: string;
-  }): Promise<void> {
+    newsletterSubscriberId?: string;
+  }, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_FROM_EMAIL),
@@ -90,8 +88,10 @@ export class NovostiEmailService {
         odjavaUrl: input.odjavaUrl,
         ...(input.kodDobrodoslice ? { kodDobrodoslice: input.kodDobrodoslice } : {})
       }),
-      tag: 'poruka-dobrodoslice'
-    });
+      tag: 'poruka-dobrodoslice',
+      unsubscribeUrl: input.odjavaUrl,
+      ...(input.newsletterSubscriberId ? { newsletterSubscriberId: input.newsletterSubscriberId } : {})
+    }, client);
   }
 
   private async posaljiEmail(input: {
@@ -101,15 +101,21 @@ export class NovostiEmailService {
     text: string;
     html: string;
     tag: string;
-  }): Promise<void> {
+    expiresAt?: Date;
+    unsubscribeUrl?: string;
+    newsletterSubscriberId?: string;
+  }, client?: DbClient): Promise<void> {
     await this.delivery.send({
       recipients: [input.recipient],
       subject: input.subject,
       text: input.text,
       html: input.html,
       tag: input.tag,
+      ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+      ...(input.unsubscribeUrl ? { unsubscribeUrl: input.unsubscribeUrl } : {}),
+      ...(input.newsletterSubscriberId ? { newsletterSubscriberId: input.newsletterSubscriberId } : {}),
       ...(input.fromEmail ? { fromEmail: input.fromEmail } : {})
-    });
+    }, client);
   }
 }
 
@@ -117,9 +123,9 @@ function htmlPromenaLozinke(input: {
   resetUrl: string;
   logoUrl: string;
   darkLogoUrl: string;
-  socialIcons: { facebook: string; instagram: string; tiktok: string };
+  contactUrl: string;
 }): string {
-  const { resetUrl, logoUrl, darkLogoUrl, socialIcons } = input;
+  const { resetUrl, logoUrl, darkLogoUrl, contactUrl } = input;
   const currentYear = new Date().getFullYear();
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
@@ -151,20 +157,7 @@ function htmlPromenaLozinke(input: {
     '" style="color:#52525b;text-decoration:underline;word-break:break-all">' +
     resetUrl +
     '</a></p>' +
-    '<table class="reset-community" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:28px 0 0;padding-top:20px;border-top:1px solid #e5e7eb"><tr><td align="center">' +
-    '<p style="margin:0;color:#27272a;font-size:15px;line-height:1.45">Bezbednost vašeg DajaShop naloga nam je važna.</p>' +
-    '<p class="reset-community-copy" style="margin:11px 0 8px;color:#52525b;font-size:11px;line-height:1.4">Pratite nas</p>' +
-    '<table role="presentation" align="center" cellspacing="0" cellpadding="0" border="0"><tr>' +
-    '<td style="padding:0 8px"><a href="https://facebook.com" aria-label="Facebook" style="display:block;width:32px;height:32px;text-decoration:none"><img src="' +
-    socialIcons.facebook +
-    '" alt="Facebook" width="32" height="32" style="display:block;width:32px;height:32px;border:0" /></a></td>' +
-    '<td style="padding:0 8px"><a href="https://instagram.com" aria-label="Instagram" style="display:block;width:32px;height:32px;text-decoration:none"><img src="' +
-    socialIcons.instagram +
-    '" alt="Instagram" width="32" height="32" style="display:block;width:32px;height:32px;border:0" /></a></td>' +
-    '<td style="padding:0 8px"><a href="https://tiktok.com" aria-label="TikTok" style="display:block;width:32px;height:32px;text-decoration:none"><img src="' +
-    socialIcons.tiktok +
-    '" alt="TikTok" width="32" height="32" style="display:block;width:32px;height:32px;border:0" /></a></td>' +
-    '</tr></table></td></tr></table>' +
+    '<p class="reset-copy" style="margin:24px 0 0;font-size:14px;line-height:1.6">Potrebna vam je pomoć? <a href="' + contactUrl + '" style="color:inherit">Kontaktirajte DajaShop</a>.</p>' +
     '</td></tr><tr><td class="reset-footer" align="center" bgcolor="#fafafa" style="padding:20px 44px;background-color:#fafafa;border-top:1px solid #e5e7eb;color:#71717a;font-size:12px;line-height:1.55;text-align:center">Ovu poruku ste dobili jer je zatražena promena lozinke za vaš DajaShop nalog.<br>Ako zahtev niste poslali vi, možete slobodno zanemariti ovu poruku.<br><br>© ' +
     currentYear +
     ' DajaShop. Sva prava zadržana.</td></tr>' +
@@ -227,12 +220,12 @@ function htmlDobrodoslice(input: {
     : '<p class="welcome-copy" style="margin:0;color:#52525b;font-size:16px;line-height:1.6">Drago nam je što ste sa nama. Pratićemo vas kroz novitete, informacije o dostupnosti i korisne savete.</p>';
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
-    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media only screen and (max-width:640px){.welcome-shell{width:100% !important}.welcome-outer{padding:0 !important}.welcome-header{padding:24px 20px !important}.welcome-content{padding:28px 20px !important}.welcome-footer{padding:20px !important}.welcome-step-number{width:28px !important}}@media (prefers-color-scheme:dark){.welcome-body,.welcome-page,.welcome-outer,.welcome-shell,.welcome-header,.welcome-footer{background:#2c2c2e !important}.welcome-header,.welcome-footer,.welcome-section{border-color:#48484a !important}.welcome-content h1,.welcome-content h2,.welcome-content p,.welcome-content td,.welcome-content a,.welcome-brand{color:#fafafa !important}.welcome-copy,.welcome-footer,.welcome-eyebrow,.welcome-step-number{color:#c7c7cc !important}.welcome-code-card,.welcome-code-card td,.welcome-steps,.welcome-steps td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.welcome-code-card,.welcome-steps td{border-color:#48484a !important}.welcome-button{background:#fafafa !important;color:#2c2c2e !important}}</style>' +
+    '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}.welcome-logo-dark{display:none!important;max-height:0;overflow:hidden}@media only screen and (max-width:640px){.welcome-shell{width:100% !important}.welcome-outer{padding:0 !important}.welcome-header{padding:24px 20px !important}.welcome-content{padding:28px 20px !important}.welcome-footer{padding:20px !important}.welcome-step-number{width:28px !important}}@media (prefers-color-scheme:dark){.welcome-logo-light{display:none!important}.welcome-logo-dark{display:block!important;max-height:none!important;overflow:visible!important}.welcome-body,.welcome-page,.welcome-outer,.welcome-shell,.welcome-header,.welcome-footer{background:#2c2c2e !important}.welcome-header,.welcome-footer,.welcome-section{border-color:#48484a !important}.welcome-content h1,.welcome-content h2,.welcome-content p,.welcome-content td,.welcome-content a,.welcome-brand{color:#fafafa !important}.welcome-copy,.welcome-footer,.welcome-eyebrow,.welcome-step-number{color:#c7c7cc !important}.welcome-code-card,.welcome-code-card td,.welcome-steps,.welcome-steps td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.welcome-code-card,.welcome-steps td{border-color:#48484a !important}.welcome-button{background:#fafafa !important;color:#2c2c2e !important}}</style>' +
     '</head><body class="welcome-body" style="margin:0;padding:0;background:#f4f4f5;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
     '<table class="welcome-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f4f5"><tr><td class="welcome-outer" align="center" style="padding:32px 16px">' +
     '<table class="welcome-shell" role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="width:640px;max-width:640px;background:#ffffff">' +
     '<tr><td class="welcome-header" style="padding:28px 44px;border-bottom:1px solid #e4e4e7">' +
-    '<p class="welcome-brand" style="margin:0;color:#18181b;font-size:14px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase">DajaShop</p>' +
+    '<img class="welcome-logo-light" src="' + escapeHtml(new URL('/images/dajashop-email-logo.png', input.shopUrl).toString()) + '" alt="DajaShop" width="106" style="display:block;width:106px;height:auto;border:0"><img class="welcome-logo-dark" src="' + escapeHtml(new URL('/images/dajashop-email-logo-dark.png', input.shopUrl).toString()) + '" alt="DajaShop" width="106" style="display:none;width:106px;height:auto;border:0;max-height:0;overflow:hidden">' +
     '<p class="welcome-eyebrow" style="margin:8px 0 0;color:#71717a;font-size:12px;font-weight:700;letter-spacing:0.08em">DOBRO DOŠLI</p>' +
     '</td></tr><tr><td class="welcome-content" style="padding:38px 44px">' +
     '<h1 style="margin:0 0 12px;color:#18181b;font-size:26px;line-height:1.25;font-weight:700">Dobro došli u DajaShop.</h1>' +
