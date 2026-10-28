@@ -131,7 +131,7 @@ export class CatalogFiltersController {
     if (publish) {
       invalidateCatalogSearch(ctx.organizationId);
       invalidateCatalogPages(ctx.organizationId);
-      await this.redis.client.del(`catalog:sitemap:${ctx.organizationId}`, `catalog:sitemap:v2:${ctx.organizationId}`);
+      await this.redis.client.del(`catalog:sitemap:${ctx.organizationId}`, `catalog:sitemap:v2:${ctx.organizationId}`, `catalog:sitemap:v3:${ctx.organizationId}`, `catalog:sitemap:v4:${ctx.organizationId}`);
     }
     return result;
   }

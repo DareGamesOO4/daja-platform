@@ -67,7 +67,7 @@ import { previewSupplierLink } from './supplier-checks.js';
 import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
 import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
 import { canManageSupplierChecks } from './supplier-access.js';
-import { currentEurRsdMiddleRate } from './exchange-rates.js';
+import { currentEurRsdMiddleRate, currentNbsEurRate } from './exchange-rates.js';
 import { readSearchSettings, saveSearchSettings, searchSettingsSchema, type SearchSettingsResult } from './catalog-search-settings.js';
 import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, workforceProducts, workforceTimelineEntries, effectiveRateSql } from './workforce-data.js';
@@ -275,9 +275,9 @@ export class PublicCatalogController {
 
   @Get('exchange-rates')
   async exchangeRates(@Res({ passthrough: true }) response: Response) {
-    const eurRsdRate = await currentEurRsdMiddleRate();
-    response.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600');
-    return { base: 'RSD', eurRsdRate, rates: { RSD: 1, EUR: 1 / eurRsdRate }, source: 'NBS' };
+    const rate = await currentNbsEurRate();
+    response.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60');
+    return { ...rate, base: 'RSD', rates: { RSD: 1, EUR: 1 / rate.eurRsdRate } };
   }
 
   @Get('page')
@@ -315,7 +315,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v3:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v4:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -347,6 +347,12 @@ export class PublicCatalogController {
     ).rows;
     const siteUrl = storefrontSiteUrl();
     const brandPaths = await publicBrandPaths(this.database, ctx.organizationId, this.logger);
+    const localizedEntries = (path: string, details = '') => {
+      const serbianUrl = `${siteUrl}${path}`;
+      const englishUrl = `${siteUrl}/en${path === '/' ? '' : path}`;
+      const alternates = `<xhtml:link rel="alternate" hreflang="sr" href="${escapeXml(serbianUrl)}"/><xhtml:link rel="alternate" hreflang="en" href="${escapeXml(englishUrl)}"/><xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(serbianUrl)}"/>`;
+      return [serbianUrl, englishUrl].map(url => `<url><loc>${escapeXml(url)}</loc>${alternates}${details}</url>`).join('');
+    };
     const staticEntries = [
       '/',
       '/catalog',
@@ -367,19 +373,19 @@ export class PublicCatalogController {
       '/graviranje',
       ...brandPaths
     ]
-      .map((path) => `<url><loc>${escapeXml(`${siteUrl}${path}`)}</loc></url>`)
+      .map((path) => localizedEntries(path))
       .join('');
     const entries = rows
       .map((row) => {
-        const productUrl = `${siteUrl}/product/${encodeURIComponent(row.slug)}`;
+        const productPath = `/product/${encodeURIComponent(row.slug)}`;
         const images = (Array.isArray(row.images) ? row.images : [])
           .filter(Boolean)
           .map((image) => `<image:image><image:loc>${escapeXml(image)}</image:loc></image:image>`)
           .join('');
-        return `<url><loc>${escapeXml(productUrl)}</loc><lastmod>${sitemapLastmod(row.updated_at)}</lastmod>${images}</url>`;
+        return localizedEntries(productPath, `<lastmod>${sitemapLastmod(row.updated_at)}</lastmod>${images}`);
       })
       .join('');
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">${staticEntries}${entries}</urlset>`;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1" xmlns:xhtml="http://www.w3.org/1999/xhtml">${staticEntries}${entries}</urlset>`;
     await this.redis.client.set(cacheKey, xml, 'EX', 3600);
     response
       .type('application/xml')
@@ -2819,6 +2825,8 @@ export class StaffCatalogController {
     const keys = [
       `catalog:sitemap:${organizationId}`,
       `catalog:sitemap:v2:${organizationId}`,
+      `catalog:sitemap:v3:${organizationId}`,
+      `catalog:sitemap:v4:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       ...validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`)
