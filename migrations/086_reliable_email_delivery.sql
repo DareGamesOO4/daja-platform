@@ -37,13 +37,15 @@ CREATE TABLE email_sender_limits (
   next_attempt_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE newsletter_subscribers
-  ADD COLUMN confirmation_token_hash text,
-  ADD COLUMN confirmation_expires_at timestamptz,
-  ADD COLUMN confirmed_at timestamptz,
-  ADD COLUMN welcome_queued_at timestamptz;
+  ADD COLUMN IF NOT EXISTS confirmation_token_hash text,
+  ADD COLUMN IF NOT EXISTS confirmation_expires_at timestamptz,
+  -- Migration 030 already created this column on existing storefronts.
+  ADD COLUMN IF NOT EXISTS confirmed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS welcome_queued_at timestamptz;
 -- Preserve existing subscriptions and their welcome-offer history.
-UPDATE newsletter_subscribers SET confirmed_at = CASE WHEN active THEN COALESCE(consented_at, now()) ELSE NULL END,
-  welcome_queued_at = created_at;
+UPDATE newsletter_subscribers
+SET confirmed_at = COALESCE(confirmed_at, CASE WHEN active THEN COALESCE(consented_at, created_at) END),
+    welcome_queued_at = COALESCE(welcome_queued_at, created_at);
 CREATE UNIQUE INDEX newsletter_confirmation_token
   ON newsletter_subscribers (confirmation_token_hash)
   WHERE confirmation_token_hash IS NOT NULL;
