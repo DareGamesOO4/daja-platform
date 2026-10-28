@@ -2694,6 +2694,13 @@ export class StaffCatalogController {
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false,
     page?: { after: string | null; limit: number }) {
+    // Page in the same order the product table displays. Resolve the cursor's
+    // timestamps in PostgreSQL so sub-millisecond precision is preserved.
+    const sortColumns = contributorId
+      ? ["CASE WHEN p.quality_review_status = 'changes_requested' THEN 1 ELSE 0 END",
+          'COALESCE(p.quality_reviewed_at, p.updated_at)', 'p.updated_at', 'p.id']
+      : ['p.updated_at', 'p.id'];
+    const cursorColumns = sortColumns.map(column => column.replace(/\bp\./g, 'page_cursor.'));
     const rows = (
       await this.database.pool.query(
         `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
@@ -2732,6 +2739,7 @@ export class StaffCatalogController {
               tag.id AS "rfidTagId", tag.epc, tag.tid, tag.status AS "rfidTagStatus",
               media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
        FROM products p
+       LEFT JOIN products page_cursor ON page_cursor.organization_id = p.organization_id AND page_cursor.id = $5::uuid
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_provider_checks provider ON provider.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
@@ -2785,8 +2793,8 @@ export class StaffCatalogController {
          AND ($2::uuid IS NULL OR p.id = $2)
          AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
          AND ($4::boolean OR p.deleted_at IS NULL)
-         AND ($5::uuid IS NULL OR p.id > $5)
-       ORDER BY ${page ? 'p.id' : 'p.updated_at DESC'} LIMIT $6`,
+         AND ($5::uuid IS NULL OR (${sortColumns.join(', ')}) < (${cursorColumns.join(', ')}))
+       ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6`,
         [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null]
       )
     ).rows;
