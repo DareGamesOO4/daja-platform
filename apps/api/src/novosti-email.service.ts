@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable, Inject } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
 import { CONFIG } from './tokens.js';
@@ -24,7 +25,8 @@ export class NovostiEmailService {
         title: 'Potvrdite prijavu.', content: '<p>Još samo jedan korak vas deli od DajaShop novosti. Potvrdite da želite da primate naše ponude i obaveštenja.</p><p>Link važi 24 sata. Ako niste tražili prijavu, zanemarite ovu poruku.</p>',
         button: { label: 'Potvrdi prijavu', url: input.confirmationUrl } }),
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      tag: 'novosti-potvrda'
+      tag: 'novosti-potvrda',
+      linkTokenHash: linkTokenHash(input.confirmationUrl)
     }, client);
   }
 
@@ -41,7 +43,8 @@ export class NovostiEmailService {
         title: 'Potvrdite email adresu.', content: '<p>Dobro došli u DajaShop. Potvrdite email adresu svog naloga.</p><p>Link važi 15 minuta i može da se iskoristi jednom. Ako niste tražili verifikaciju, zanemarite ovu poruku.</p>',
         button: { label: 'Potvrdi email adresu', url: input.verificationUrl } }),
       expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-      tag: 'potvrda-email-adrese'
+      tag: 'potvrda-email-adrese',
+      linkTokenHash: linkTokenHash(input.verificationUrl)
     }, client);
   }
 
@@ -64,7 +67,8 @@ export class NovostiEmailService {
         contactUrl: emailAssetUrl('/contact')
       }),
       expiresAt: new Date(Date.now() + 30 * 60 * 1000),
-      tag: 'promena-lozinke'
+      tag: 'promena-lozinke',
+      linkTokenHash: linkTokenHash(input.resetUrl)
     }, client);
   }
 
@@ -101,6 +105,7 @@ export class NovostiEmailService {
     text: string;
     html: string;
     tag: string;
+    linkTokenHash?: string;
     expiresAt?: Date;
     unsubscribeUrl?: string;
     newsletterSubscriberId?: string;
@@ -111,12 +116,19 @@ export class NovostiEmailService {
       text: input.text,
       html: input.html,
       tag: input.tag,
+      ...(input.linkTokenHash ? { linkTokenHash: input.linkTokenHash } : {}),
       ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
       ...(input.unsubscribeUrl ? { unsubscribeUrl: input.unsubscribeUrl } : {}),
       ...(input.newsletterSubscriberId ? { newsletterSubscriberId: input.newsletterSubscriberId } : {}),
       ...(input.fromEmail ? { fromEmail: input.fromEmail } : {})
     }, client);
   }
+}
+
+function linkTokenHash(url: string): string {
+  const token = new URL(url).searchParams.get('token');
+  if (!token) throw new Error('Email link token is required');
+  return createHash('sha256').update(token).digest('hex');
 }
 
 function htmlPromenaLozinke(input: {
@@ -240,7 +252,7 @@ function htmlDobrodoslice(input: {
     '</td></tr><tr><td class="welcome-footer" style="padding:20px 44px;border-top:1px solid #e4e4e7;color:#71717a;font-size:12px;line-height:1.55">' +
     'Ne želite više ovakve poruke? <a href="' +
     odjavaUrl +
-    '" style="color:#52525b;text-decoration:underline">Odjavite se jednim klikom</a>.<br>DajaShop' +
+    '" style="color:#52525b;text-decoration:underline">Odjavite se</a>.<br>DajaShop' +
     '</td></tr></table></td></tr></table></body></html>'
   );
 }

@@ -499,7 +499,7 @@ export class CustomerController {
     const result = await new StorefrontRepository(this.database.pool).removeWishlistItem({
       organizationId: customer.organizationId,
       customerId: customer.customerId,
-      email: customer.email,
+      email: customer.emailVerified ? customer.email : null,
       productId: parseWithSchema(uuidSchema, productId)
     });
     await Promise.all(
@@ -508,7 +508,7 @@ export class CustomerController {
           organizationId: customer.organizationId,
           subscriptionId,
           customerId: customer.customerId,
-          customerEmail: customer.email,
+          customerEmail: customer.emailVerified ? customer.email : null,
           source: 'wishlist_removed'
         })
       )
@@ -652,6 +652,38 @@ export class StorefrontOrdersController {
     return new StorefrontRepository(this.database.pool).listAdminOrders(ctx.organizationId);
   }
 
+  @Get('admin/emails')
+  async emailHealth(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'privacy.manage');
+    const [counts, deliveries, worker] = await Promise.all([
+      this.database.pool.query(`SELECT status, count(*)::int AS count,
+        min(created_at) AS oldest_at FROM email_deliveries WHERE organization_id = $1 GROUP BY status`, [ctx.organizationId]),
+      this.database.pool.query(`SELECT id, recipient, tag, status, attempts, created_at, available_at, expires_at,
+        last_error, (status = 'pending' OR (status = 'failed' AND retryable))
+          AND expires_at > now() + minimum_validity_seconds * interval '1 second' AS can_retry
+        FROM email_deliveries WHERE organization_id = $1 AND status <> 'sent'
+        ORDER BY created_at DESC LIMIT 50`, [ctx.organizationId]),
+      this.database.pool.query('SELECT * FROM email_worker_health WHERE region = $1', [this.config.SES_REGION])
+    ]);
+    return { counts: counts.rows, deliveries: deliveries.rows, worker: worker.rows[0] ?? null };
+  }
+
+  @Post('admin/emails/:id/retry')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async retryEmail(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'privacy.manage');
+    const result = await this.database.pool.query(`UPDATE email_deliveries SET status = 'pending', available_at = now(),
+      last_error = NULL, locked_until = NULL WHERE id = $1 AND organization_id = $2
+      AND (status = 'pending' OR (status = 'failed' AND retryable)) AND payload <> '{}'::jsonb
+      AND expires_at > now() + minimum_validity_seconds * interval '1 second' RETURNING id`,
+      [parseWithSchema(uuidSchema, id), ctx.organizationId]);
+    if (!result.rowCount) throw new ValidationFailedError('Poruka se ne može ponoviti. Za istekao link zatražite novi email.');
+    this.logger.info({ deliveryId: id, userId: ctx.userId }, 'Administrator requested email retry');
+    return { queued: true };
+  }
+
   @Patch('admin/orders/:id/status')
   async updateStatus(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
@@ -664,7 +696,7 @@ export class StorefrontOrdersController {
       status: input.status,
       userId: ctx.userId
       });
-      await this.orderEmail.sendStatusUpdate(updated, client);
+      if (updated.statusChanged) await this.orderEmail.sendStatusUpdate(updated, client);
       return updated;
     });
     this.realtime.publish({
@@ -672,7 +704,7 @@ export class StorefrontOrdersController {
       event: 'orders.updated',
       payload: { orderId: order.id, status: order.status }
     });
-    return { ...order, emailStatus: 'queued' };
+    return { ...order, emailStatus: order.statusChanged ? 'queued' : 'unchanged' };
   }
 
   @Patch('admin/orders/:id/read')
@@ -836,6 +868,13 @@ export class StorefrontContentController {
       poslatMailDobrodoslice: false,
       imaPravoNaKodDobrodoslice: false
     };
+  }
+
+  @Post('product-alerts/confirm')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async confirmProductAlert(@Body() body: unknown) {
+    const { token } = parseWithSchema(z.object({ token: z.string().min(24).max(160) }), body);
+    return this.productAlerts.confirm(token);
   }
 
   @Post('newsletter/confirm')

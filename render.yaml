@@ -118,6 +118,14 @@ services:
         sync: false
       - key: SES_REPLY_TO_EMAIL
         sync: false
+      - key: SNS_SMS_REGION
+        value: eu-north-1
+      - key: SNS_SMS_ACCESS_KEY_ID
+        sync: false
+      - key: SNS_SMS_SECRET_ACCESS_KEY
+        sync: false
+      - key: SNS_SMS_SENDER_ID
+        value: DajaShop
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_BUCKET

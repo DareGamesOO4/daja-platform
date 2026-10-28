@@ -970,7 +970,7 @@ export class StaffCatalogController {
     await this.invalidateCatalog(ctx.organizationId, ...new Set([saved.previousSlug, saved.slug]));
     if (saved.previousPriceAmount !== null) await this.productAlerts.notifyPriceChanged({ organizationId: ctx.organizationId, variantId: saved.variantId, previousPriceAmount: saved.previousPriceAmount, currentPriceAmount: saved.currentPriceAmount });
     if (saved.stockAdded) await this.productAlerts.notifyBackInStock({ organizationId: ctx.organizationId, variantId: saved.variantId });
-    if (saved.saleChanged) await this.productAlerts.dispatchDueSaleStarts();
+    // Persisted sale events are dispatched by the independent worker.
     // Removing obsolete storage objects is safe after committing references.
     try {
       if (saved.staleMediaKeys.length) await new MediaRepository(this.database.pool).deleteStorageObjects(new R2MediaStorageAdapter(this.config), saved.staleMediaKeys);
@@ -2164,9 +2164,7 @@ export class StaffCatalogController {
       variantId
     );
     await this.invalidateCatalog(ctx.organizationId, product.slug);
-    if (input.priceType === 'sale') {
-      await this.productAlerts.dispatchDueSaleStarts();
-    }
+    // The worker dispatches persisted sale events, including future start dates.
     return result.rows[0];
   }
 

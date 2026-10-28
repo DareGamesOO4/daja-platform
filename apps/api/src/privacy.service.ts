@@ -147,18 +147,24 @@ export class PrivacyService {
   }
 
   async confirmNewsletter(token: string, client: DbClient) {
-    const confirmed = await client.query<{ id: string; email: string; organization_id: string;
-      welcome_queued_at: Date | null; consent_version: string }>(
-      `UPDATE newsletter_subscribers SET active = true, confirmed_at = now(), updated_at = now(),
-         confirmation_token_hash = NULL, confirmation_expires_at = NULL
-       WHERE confirmation_token_hash = $1 AND confirmation_expires_at > now() AND NOT active
-       RETURNING id, email, organization_id, welcome_queued_at, consent_version`, [sha256(token)]);
-    const subscriber = confirmed.rows[0];
-    if (!subscriber) throw new ValidationFailedError('Link je istekao ili je već iskorišćen. Zatražite novu prijavu na novosti.');
-    await client.query(`INSERT INTO marketing_consent_events (organization_id, subject_email_hash,
-      newsletter_subscriber_id, purpose, action, policy_version, source)
-      VALUES ($1,$2,$3,'newsletter','granted',$4,'email_confirmation')`,
-      [subscriber.organization_id, sha256(subscriber.email.toLowerCase()), subscriber.id, subscriber.consent_version]);
+    const found = await client.query<{ id: string; email: string; organization_id: string;
+      welcome_queued_at: Date | null; consent_version: string; active: boolean; repeated: boolean }>(
+      `SELECT *, (last_confirmation_hash = $1 AND active AND confirmed_at > now() - interval '24 hours') AS repeated
+       FROM newsletter_subscribers WHERE
+         (confirmation_token_hash = $1 AND confirmation_expires_at > now() AND NOT active)
+         OR (last_confirmation_hash = $1 AND active AND confirmed_at > now() - interval '24 hours')
+       FOR UPDATE`, [sha256(token)]);
+    const subscriber = found.rows[0];
+    if (!subscriber) throw new ValidationFailedError('Link je istekao ili je povučen. Zatražite novu prijavu na novosti.');
+    if (!subscriber.repeated) {
+      await client.query(`UPDATE newsletter_subscribers SET active = true, confirmed_at = now(), updated_at = now(),
+        last_confirmation_hash = confirmation_token_hash, confirmation_token_hash = NULL, confirmation_expires_at = NULL,
+        revoked_at = NULL WHERE id = $1`, [subscriber.id]);
+      await client.query(`INSERT INTO marketing_consent_events (organization_id, subject_email_hash,
+        newsletter_subscriber_id, purpose, action, policy_version, source)
+        VALUES ($1,$2,$3,'newsletter','granted',$4,'email_confirmation')`,
+        [subscriber.organization_id, sha256(subscriber.email.toLowerCase()), subscriber.id, subscriber.consent_version]);
+    }
     return { ...subscriber, odjavaUrl: this.odjavaUrlNovosti(subscriber.id) };
   }
 
@@ -271,53 +277,18 @@ export class PrivacyService {
       return current;
     }
 
-    const email = normalizeEmail(input.email);
-    if (input.acceptedTerms !== true) {
-      throw new ValidationFailedError('Potvrdite uslove korišćenja i politiku privatnosti.');
-    }
-    const managementToken = randomToken();
-    const result = await this.database.pool.query<{
-      id: string;
-      email: string;
-      terms_accepted_at: Date | null;
-    }>(
-      `INSERT INTO product_alert_contacts (
-         organization_id, email, management_token_hash, terms_accepted_at, policy_version
-       ) VALUES ($1, $2, $3, now(), $4)
-       ON CONFLICT (organization_id, normalized_email) DO UPDATE
-       SET email = EXCLUDED.email,
-           management_token_hash = EXCLUDED.management_token_hash,
-           terms_accepted_at = COALESCE(product_alert_contacts.terms_accepted_at, EXCLUDED.terms_accepted_at),
-           policy_version = COALESCE(product_alert_contacts.policy_version, EXCLUDED.policy_version),
-           updated_at = now()
-       RETURNING id, email, terms_accepted_at`,
-      [
-        input.organizationId,
-        email,
-        sha256(managementToken),
-        input.policyVersion ?? LEGAL_POLICY_VERSION
-      ]
-    );
-    const row = result.rows[0];
-    if (!row) throw new ValidationFailedError('Email za obaveštenje nije sačuvan.');
-    return {
-      id: row.id,
-      email: row.email,
-      maskedEmail: maskEmail(row.email),
-      managementToken,
-      termsAccepted: row.terms_accepted_at !== null
-    };
+    throw new ValidationFailedError('Potvrdite email preko linka iz poruke pre upravljanja obaveštenjima.');
   }
 
-  async alertContactByToken(organizationId: string, managementToken: string): Promise<AlertContact> {
-    const result = await this.database.pool.query<{
+  async alertContactByToken(organizationId: string, managementToken: string, client: DbClient = this.database.pool): Promise<AlertContact> {
+    const result = await client.query<{
       id: string;
       email: string;
       terms_accepted_at: Date | null;
     }>(
       `SELECT id, email, terms_accepted_at
        FROM product_alert_contacts
-       WHERE organization_id = $1 AND management_token_hash = $2
+       WHERE organization_id = $1 AND management_token_hash = $2 AND verified_at IS NOT NULL
        LIMIT 1`,
       [organizationId, sha256(managementToken)]
     );
@@ -339,7 +310,7 @@ export class PrivacyService {
     subscriptionId: string;
     policyVersion?: string | undefined;
     source: string;
-  }): Promise<void> {
+  }, client: DbClient = this.database.pool): Promise<void> {
     await this.recordMarketingEvent({
       organizationId: input.organizationId,
       contact: input.contact,
@@ -349,7 +320,7 @@ export class PrivacyService {
       action: 'granted',
       policyVersion: input.policyVersion,
       source: input.source
-    });
+    }, client);
   }
 
   async revokeProductAlertSubscription(input: {
@@ -489,9 +460,9 @@ export class PrivacyService {
     action: 'granted' | 'renewed' | 'revoked' | 'legacy';
     policyVersion?: string | undefined;
     source: string;
-  }): Promise<void> {
-    const subjectEmailHash = sha256(normalizeEmail(input.contact));
-    await this.database.pool.query(
+  }, client: DbClient = this.database.pool): Promise<void> {
+    const subjectEmailHash = sha256(input.contact.includes('@') ? normalizeEmail(input.contact) : input.contact.replace(/[\s()-]/g, ''));
+    await client.query(
       `INSERT INTO marketing_consent_events (
          organization_id, subject_email_hash, customer_id, newsletter_subscriber_id,
          product_alert_subscription_id, purpose, action, policy_version, source, retain_until

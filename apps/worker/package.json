@@ -19,6 +19,7 @@
     "bullmq": "^5.58.0",
     "sharp": "^0.35.3",
     "@daja/shared": "0.1.0",
-    "@aws-sdk/client-sqs": "^3.1158.0"
+    "@aws-sdk/client-sqs": "^3.1158.0",
+    "@aws-sdk/client-sns": "^3.1108.0"
   }
 }

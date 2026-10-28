@@ -89,7 +89,7 @@ export class PrivacyController {
       ...(await this.privacy.customerSnapshot({
         organizationId,
         customerId: customer.customerId,
-        email: customer.email
+        email: customer.emailVerified ? customer.email : null
       }))
     };
   }
@@ -98,6 +98,7 @@ export class PrivacyController {
   async unsubscribeMyNewsletter(@Req() request: Request) {
     const customer = await this.requiredCustomer(request);
     if (!customer.email) throw new ValidationFailedError('Nalog nema email adresu.');
+    if (!customer.emailVerified) throw new ValidationFailedError('Prvo potvrdite email adresu naloga.');
     const result = await this.privacy.newsletterSubscriber({
       organizationId: customer.organizationId,
       email: customer.email
@@ -121,7 +122,7 @@ export class PrivacyController {
         organizationId: customer.organizationId,
         subscriptionId: parseWithSchema(uuidSchema, id),
         customerId: customer.customerId,
-        customerEmail: customer.email,
+        customerEmail: customer.emailVerified ? customer.email : null,
         source: 'account'
       })
     };
@@ -129,8 +130,7 @@ export class PrivacyController {
 
   @Get('unsubscribe/newsletter')
   async newsletterUnsubscribe(@Query('token') token: string | undefined, @Res() response: Response) {
-    const unsubscribed = token ? await this.privacy.unsubscribeNewsletterToken(token) : false;
-    return response.redirect(this.unsubscribeRedirect('newsletter', unsubscribed));
+    return response.redirect(this.unsubscribeRedirect('newsletter', token));
   }
 
   @Post('unsubscribe/newsletter')
@@ -145,8 +145,7 @@ export class PrivacyController {
 
   @Get('unsubscribe/product-alert')
   async productAlertUnsubscribe(@Query('token') token: string | undefined, @Res() response: Response) {
-    const unsubscribed = token ? await this.privacy.unsubscribeProductAlertToken(token) : false;
-    return response.redirect(this.unsubscribeRedirect('product-alert', unsubscribed));
+    return response.redirect(this.unsubscribeRedirect('product-alert', token));
   }
 
   @Get('admin/publications')
@@ -182,10 +181,10 @@ export class PrivacyController {
     return this.customerAuth.requireCustomer(bearerToken(request));
   }
 
-  private unsubscribeRedirect(kind: string, success: boolean): string {
+  private unsubscribeRedirect(kind: string, token: string | undefined): string {
     const url = new URL('/unsubscribe', this.config.STOREFRONT_PUBLIC_BASE_URL);
     url.searchParams.set('kind', kind);
-    url.searchParams.set('status', success ? 'success' : 'already_unsubscribed');
+    if (token) url.searchParams.set('token', token);
     return url.toString();
   }
 }

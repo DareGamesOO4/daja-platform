@@ -43,7 +43,6 @@ export class EmailWorker {
     this.started = true;
     if (!this.isConfigured()) {
       this.logger.warn('Amazon SES is not configured on the worker; messages remain queued');
-      return;
     }
     this.timer = setInterval(() => this.scheduleDispatch(), 1200);
     this.feedbackTimer = setInterval(() => this.scheduleFeedback(), 5000);
@@ -78,7 +77,7 @@ export class EmailWorker {
   }
 
   private scheduleFeedback(): void {
-    if (this.stopping || this.feedbackTask) return;
+    if (this.stopping || this.feedbackTask || !this.isConfigured()) return;
     this.feedbackTask = this.readFeedback().finally(() => {
       this.feedbackTask = undefined;
     });
@@ -121,9 +120,16 @@ export class EmailWorker {
     this.dispatching = true;
     try {
       if (Date.now() >= this.maintenanceAt) {
+        await this.database.pool.query(`UPDATE email_deliveries d SET status = 'expired',
+          last_error = 'Link already used, superseded, or too close to expiry'
+          WHERE (d.status IN ('pending','failed') OR (d.status = 'sending' AND d.locked_until < now()))
+            AND d.payload->>'linkTokenHash' IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM email_active_links l WHERE l.token_hash = d.payload->>'linkTokenHash' AND l.tag = d.tag
+                AND l.expires_at > now() + d.minimum_validity_seconds * interval '1 second')`);
         await this.database.pool
           .query(`UPDATE email_deliveries SET status = 'expired', last_error = 'Message expired before delivery'
-        WHERE expires_at <= now() AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))`);
+        WHERE expires_at <= now() + minimum_validity_seconds * interval '1 second'
+          AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))`);
         await this.database.pool.query(`UPDATE email_deliveries d SET status = 'suppressed',
         last_error = s.reason FROM email_suppressions s WHERE d.recipient = s.email AND d.status = 'pending'`);
         await this.database.pool.query(`UPDATE email_deliveries d SET status = 'suppressed',
@@ -136,12 +142,29 @@ export class EmailWorker {
         FROM email_deliveries d WHERE d.status IN ('failed','expired','suppressed')
           AND d.payload->>'policyDeliveryId' = p.id::text AND p.status <> 'sent'`);
         await this.database.pool.query(`UPDATE email_deliveries SET payload = '{}'::jsonb
-        WHERE status IN ('failed','expired','suppressed') AND payload <> '{}'::jsonb`);
+        WHERE (status IN ('expired','suppressed') OR (status = 'failed' AND (NOT retryable OR expires_at <= now())))
+          AND payload <> '{}'::jsonb`);
         await this.database.pool
           .query(`DELETE FROM email_deliveries WHERE status IN ('sent','failed','suppressed','expired')
         AND created_at < now() - interval '30 days'`);
+        await this.database.pool.query(`INSERT INTO email_worker_health
+          (region, heartbeat_at, sender_configured, feedback_configured, product_alerts_configured) VALUES ($1, now(), $2, $3, $4)
+          ON CONFLICT (region) DO UPDATE SET heartbeat_at = now(), sender_configured = $2, feedback_configured = $3, product_alerts_configured = $4`,
+          [this.config.SES_REGION, this.isConfigured(), Boolean(this.isConfigured() && this.config.SES_FEEDBACK_QUEUE_NAME),
+            Boolean(this.config.PRIVACY_TOKEN_SECRET || this.config.JWT_ACCESS_SECRET)]);
+        const backlog = await this.database.pool.query<{ pending: number; oldest_seconds: number; oldest_security_seconds: number }>(`SELECT
+          count(*)::int AS pending, COALESCE(EXTRACT(epoch FROM now() - min(created_at)), 0)::int AS oldest_seconds,
+          COALESCE(EXTRACT(epoch FROM now() - min(created_at) FILTER (WHERE priority = 0)), 0)::int AS oldest_security_seconds
+          FROM email_deliveries WHERE status IN ('pending','sending')`);
+        const health = backlog.rows[0];
+        if (health && (health.oldest_seconds > 900 || health.oldest_security_seconds > 60)) {
+          this.logger.warn({ ...health, senderConfigured: this.isConfigured() }, 'Email queue requires operator attention');
+        }
+        await this.database.pool.query(`DELETE FROM product_alert_confirmations WHERE expires_at < now() - interval '1 day'`);
+        await this.database.pool.query(`DELETE FROM email_feedback_events WHERE created_at < now() - interval '90 days'`);
         this.maintenanceAt = Date.now() + 60_000;
       }
+      if (!this.isConfigured() || this.stopping) return;
       // This shared permit also limits multiple worker replicas to the sandbox rate.
       const permit = await this.database.pool.query(
         `INSERT INTO email_sender_limits (region, next_attempt_at)
@@ -151,14 +174,18 @@ export class EmailWorker {
       );
       if (!permit.rowCount) return;
       const claimed = await this.database.pool.query<DeliveryRow>(`WITH candidate AS (
-        SELECT queued.id FROM email_deliveries queued WHERE expires_at > now() AND available_at <= now()
+        SELECT queued.id FROM email_deliveries queued
+        WHERE expires_at > now() + minimum_validity_seconds * interval '1 second' AND available_at <= now()
           AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))
           AND NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = queued.recipient)
+          AND (queued.payload->>'linkTokenHash' IS NULL OR EXISTS (
+            SELECT 1 FROM email_active_links l WHERE l.token_hash = queued.payload->>'linkTokenHash' AND l.tag = queued.tag
+              AND l.expires_at > now() + queued.minimum_validity_seconds * interval '1 second'))
           AND (queued.payload->>'newsletterSubscriberId' IS NULL OR EXISTS (
             SELECT 1 FROM newsletter_subscribers s WHERE s.id::text = queued.payload->>'newsletterSubscriberId' AND s.active))
           AND (queued.payload->>'productAlertSubscriptionId' IS NULL OR EXISTS (
             SELECT 1 FROM product_alert_subscriptions s WHERE s.id::text = queued.payload->>'productAlertSubscriptionId' AND s.revoked_at IS NULL))
-        ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+        ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1
       ) UPDATE email_deliveries d SET status = 'sending', attempts = attempts + 1,
           locked_until = now() + interval '5 minutes'
         FROM candidate WHERE d.id = candidate.id RETURNING d.id, d.recipient, d.payload, d.attempts`);
@@ -225,17 +252,19 @@ export class EmailWorker {
       );
     } catch (error) {
       const name = error instanceof Error ? error.name : 'UnknownError';
-      // Sandbox recipient rejection may recover after production approval.
-      const failed = ['BadRequestException', 'MailFromDomainNotVerifiedException'].includes(name);
+      // Configuration and sandbox rejections can recover without replacing the message.
+      const failed = name === 'BadRequestException';
+      const retryable = failed && error instanceof Error && /configuration|verified|paused|account|sending disabled/i.test(error.message);
       const delay = Math.min(3600, 15 * 2 ** Math.min(row.attempts, 8));
       await this.database.pool.query(
         `UPDATE email_deliveries SET status = $2, locked_until = NULL,
-        available_at = now() + $3 * interval '1 second', last_error = $4 WHERE id = $1`,
+        available_at = now() + $3 * interval '1 second', last_error = $4, retryable = $5 WHERE id = $1`,
         [
           row.id,
           failed ? 'failed' : 'pending',
           delay,
-          error instanceof Error ? `${name}: ${error.message}`.slice(0, 500) : name
+          error instanceof Error ? `${name}: ${error.message}`.slice(0, 500) : name,
+          retryable
         ]
       );
       this.logger.error(
@@ -272,14 +301,28 @@ export class EmailWorker {
       for (const message of messages.Messages ?? []) {
         if (this.stopping) break;
         if (!message.Body || !message.ReceiptHandle || !message.MessageId) continue;
-        const event = JSON.parse(message.Body) as {
+        try {
+        const parsed: unknown = JSON.parse(message.Body);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid SES event');
+        const event = parsed as {
           notificationType?: string;
           eventType?: string;
           mail?: { messageId?: string };
           bounce?: { bounceType?: string; bouncedRecipients?: Array<{ emailAddress: string }> };
           complaint?: { complainedRecipients?: Array<{ emailAddress: string }> };
         };
-        const kind = event.notificationType || event.eventType || 'Unknown';
+        const kind = event.notificationType || event.eventType;
+        if (typeof kind !== 'string' || !['Bounce','Complaint','Delivery','DeliveryDelay','Reject','Rendering Failure',
+          'RenderingFailure','Send','Open','Click','Subscription'].includes(kind) || typeof event.mail?.messageId !== 'string') {
+          throw new Error('Invalid SES feedback envelope');
+        }
+        if (kind === 'Bounce' && !['Permanent','Transient','Undetermined'].includes(event.bounce?.bounceType ?? '')) {
+          throw new Error('Invalid SES bounce type');
+        }
+        const affected = kind === 'Complaint' ? event.complaint?.complainedRecipients : kind === 'Bounce' ? event.bounce?.bouncedRecipients : [];
+        if (!Array.isArray(affected) || (['Bounce', 'Complaint'].includes(kind) && !affected.length) || affected.some(value => !value || typeof value.emailAddress !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.emailAddress))) {
+          throw new Error('Invalid SES feedback recipients');
+        }
         const recipients =
           kind === 'Complaint'
             ? event.complaint?.complainedRecipients
@@ -340,7 +383,14 @@ export class EmailWorker {
           }),
           { abortSignal: this.requestSignal() }
         );
+        } catch (error) {
+          // Keep this receipt for SQS redrive; one bad event must not block the rest of the batch.
+          this.logger.error({ messageId: message.MessageId, errorName: error instanceof Error ? error.name : 'UnknownError' },
+            'SES feedback message failed; retained for retry or dead-letter queue');
+          await this.database.pool.query('UPDATE email_worker_health SET feedback_error_at = now() WHERE region = $1', [this.config.SES_REGION]);
+        }
       }
+      await this.database.pool.query('UPDATE email_worker_health SET feedback_checked_at = now() WHERE region = $1', [this.config.SES_REGION]);
     } catch (error) {
       this.logger.error(
         { errorName: error instanceof Error ? error.name : 'UnknownError' },

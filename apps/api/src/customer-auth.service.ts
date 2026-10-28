@@ -48,6 +48,7 @@ export class CustomerAuthService {
         expiresAt: new Date(Date.now() + 15 * 60 * 1000)
       });
     if (verification.alreadyVerified) return { status: 'already_verified' as const };
+    if (verification.queued === false) return { status: 'queued' as const };
 
     const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
     verificationUrl.searchParams.set('token', token);
@@ -660,6 +661,7 @@ export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
     id: principal.customerId,
     uid: principal.customerId,
     email: principal.email,
+    emailVerified: principal.emailVerified,
     phoneNumber: principal.phone,
     phoneVerified: principal.phoneVerified,
     displayName: principal.displayName,

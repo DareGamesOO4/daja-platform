@@ -5,6 +5,8 @@ import { CONFIG } from './tokens.js';
 import { EmailDeliveryService, type TransactionalEmail } from './email-delivery.service.js';
 
 interface OrderEmailPayload {
+  id?: string;
+  version?: number;
   displayId: string;
   customer: Record<string, unknown>;
   items: unknown[];
@@ -62,7 +64,8 @@ export class OrderEmailService {
   async sendStatusUpdate(order: OrderEmailPayload, client?: DbClient): Promise<void> {
     const customerEmail = customerValue(order.customer, 'email');
     if (!customerEmail) return;
-    await this.delivery.send(this.customerStatusEmail(order, customerEmail), client);
+    await this.delivery.send({ ...this.customerStatusEmail(order, customerEmail),
+      deduplicationKey: `order-status:${order.id ?? order.displayId}:${order.version}` }, client);
   }
 
   private customerConfirmationEmail(order: OrderEmailPayload, recipient: string): TransactionalEmail {

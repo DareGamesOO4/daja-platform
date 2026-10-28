@@ -15,3 +15,4 @@ export * from './sync.js';
 export * from './auth.js';
 export * from './storefront.js';
 export * from './email.js';
+export * from './product-alert-dispatcher.js';

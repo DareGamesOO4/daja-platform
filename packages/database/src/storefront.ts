@@ -12,6 +12,7 @@ export interface CustomerPrincipal {
   customerId: string;
   organizationId: string;
   email: string | null;
+  emailVerified: boolean;
   phone: string | null;
   phoneVerified: boolean;
   displayName: string;
@@ -99,6 +100,7 @@ export interface ProductAlertSubscription {
 }
 
 export interface ProductAlertNotification {
+  organizationId: string;
   subscriptionId: string;
   email: string | null;
   phone: string | null;
@@ -286,17 +288,20 @@ export class StorefrontRepository {
     const row = customer.rows[0];
     if (!row?.email) return null;
 
-    await this.client.query(
+    const saved = await this.client.query(
       `INSERT INTO customer_password_reset_tokens (
          organization_id, customer_id, token_hash, expires_at
        ) VALUES ($1, $2, $3, $4)
        ON CONFLICT (organization_id, customer_id) WHERE used_at IS NULL
        DO UPDATE SET token_hash = EXCLUDED.token_hash,
                      expires_at = EXCLUDED.expires_at,
-                     created_at = now()`,
+                     created_at = now()
+       WHERE customer_password_reset_tokens.expires_at <= now()
+          OR customer_password_reset_tokens.created_at < now() - interval '5 minutes'
+       RETURNING customer_id`,
       [input.organizationId, row.id, input.tokenHash, input.expiresAt]
     );
-    return { email: row.email };
+    return saved.rowCount ? { email: row.email } : null;
   }
 
   async consumeCustomerPasswordReset(tokenHash: string): Promise<CustomerPasswordResetRecord> {
@@ -1138,6 +1143,13 @@ export class StorefrontRepository {
     status: string;
     userId?: string;
   }) {
+    const current = await this.client.query<OrderRow>(
+      `SELECT * FROM orders WHERE organization_id = $1 AND (id::text = $2 OR display_id = $2)
+       AND deleted_at IS NULL FOR UPDATE`,
+      [input.organizationId, input.orderIdOrDisplayId]
+    );
+    const previous = requireRow(current);
+    if (previous.status === input.status) return { ...serializeOrder(previous), statusChanged: false };
     const order = await this.client.query<OrderRow>(
       `UPDATE orders
        SET status = $3, updated_at = now(), version = version + 1
@@ -1151,7 +1163,7 @@ export class StorefrontRepository {
        VALUES ($1, $2, $3, $4)`,
       [input.organizationId, row.id, input.status, input.userId ?? null]
     );
-    return serializeOrder(row);
+    return { ...serializeOrder(row), statusChanged: true };
   }
 
   async markOrderRead(input: { organizationId: string; orderIdOrDisplayId: string }) {
@@ -1431,7 +1443,7 @@ export class StorefrontRepository {
          AND product.active
          AND product.published
          AND inventory.available_quantity > 0
-       RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
+       RETURNING alert.organization_id, alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
                  product.name AS product_name, brand.name AS brand, variant.sku, variant.name AS variant_name,
                  product.slug, primary_asset.public_url AS image_url,
                  variant.currency, variant.current_price_amount,
@@ -1480,7 +1492,7 @@ export class StorefrontRepository {
          AND product.deleted_at IS NULL
          AND product.active
          AND product.published
-       RETURNING alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
+       RETURNING alert.organization_id, alert.id AS subscription_id, alert.email, alert.phone, alert.delivery_channel,
                  product.name AS product_name, brand.name AS brand, variant.sku, variant.name AS variant_name,
                  product.slug, primary_asset.public_url AS image_url,
                  variant.currency, $3::integer AS previous_price_amount,
@@ -1636,7 +1648,7 @@ export class StorefrontRepository {
     customerId: string;
     tokenHash: string;
     expiresAt: Date;
-  }): Promise<{ email: string; alreadyVerified: boolean }> {
+  }): Promise<{ email: string; alreadyVerified: boolean; queued?: boolean }> {
     const customer = await this.client.query<{ email: string | null; email_verified: boolean }>(
       `SELECT email, email_verified
        FROM customers
@@ -1647,17 +1659,20 @@ export class StorefrontRepository {
     if (!row.email) throw new ValidationFailedError('This account does not have an email address.');
     if (row.email_verified) return { email: row.email, alreadyVerified: true };
 
-    await this.client.query(
+    const saved = await this.client.query(
       `INSERT INTO customer_email_verification_tokens (
          organization_id, customer_id, token_hash, expires_at
        ) VALUES ($1, $2, $3, $4)
        ON CONFLICT (organization_id, customer_id) WHERE used_at IS NULL
        DO UPDATE SET token_hash = EXCLUDED.token_hash,
                      expires_at = EXCLUDED.expires_at,
-                     created_at = now()`,
+                     created_at = now()
+       WHERE customer_email_verification_tokens.expires_at <= now()
+          OR customer_email_verification_tokens.created_at < now() - interval '5 minutes'
+       RETURNING customer_id`,
       [input.organizationId, input.customerId, input.tokenHash, input.expiresAt]
     );
-    return { email: row.email, alreadyVerified: false };
+    return { email: row.email, alreadyVerified: false, queued: Boolean(saved.rowCount) };
   }
 
   async confirmCustomerEmailVerification(
@@ -1670,12 +1685,14 @@ export class StorefrontRepository {
     }>(
       `WITH matched_token AS (
          UPDATE customer_email_verification_tokens
-         SET used_at = now()
-         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+         SET used_at = COALESCE(used_at, now())
+         WHERE token_hash = $1 AND (used_at IS NOT NULL OR expires_at > now())
          RETURNING organization_id, customer_id
        )
        UPDATE customers c
-       SET email_verified = true, updated_at = now(), version = version + 1
+       SET email_verified = true,
+           updated_at = CASE WHEN c.email_verified THEN c.updated_at ELSE now() END,
+           version = c.version + CASE WHEN c.email_verified THEN 0 ELSE 1 END
        FROM matched_token token
        WHERE c.organization_id = token.organization_id
          AND c.id = token.customer_id
@@ -1788,6 +1805,7 @@ interface CustomerListProductSnapshotRow {
 }
 
 interface OrderRow {
+  version: number;
   id: string;
   display_id: string;
   customer_id: string | null;
@@ -1821,6 +1839,7 @@ interface ReviewRow {
 }
 
 interface ProductAlertNotificationRow {
+  organization_id: string;
   subscription_id: string;
   email: string | null;
   phone: string | null;
@@ -1862,6 +1881,7 @@ function mapCustomerPrincipal(
     customerId: row.id,
     organizationId: row.organization_id,
     email: row.email,
+    emailVerified: row.email_verified,
     phone: row.phone,
     phoneVerified: row.phone_verified,
     displayName: row.display_name,
@@ -1922,6 +1942,7 @@ function serializeOrder(row: OrderRow) {
   return {
     id: row.display_id,
     docId: row.id,
+    version: row.version,
     displayId: row.display_id,
     customer: row.customer_payload,
     items: row.items_payload,
@@ -1955,6 +1976,7 @@ function serializeReview(row: ReviewRow) {
 
 function mapProductAlertNotification(row: ProductAlertNotificationRow): ProductAlertNotification {
   return {
+    organizationId: row.organization_id,
     subscriptionId: row.subscription_id,
     email: row.email,
     phone: row.phone,

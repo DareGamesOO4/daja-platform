@@ -16,6 +16,7 @@ import {
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { EmailWorker } from './email-worker.js';
+import { ProductAlertWorker } from './product-alert-worker.js';
 
 export const FOUNDATION_QUEUE_NAME = 'daja-foundation';
 export const POLICY_NOTIFICATION_QUEUE_NAME = 'privacy-policy-notifications';
@@ -131,11 +132,14 @@ export function createPlatformWorkers(
   });
   const emailWorker = new EmailWorker(config, logger, database);
   emailWorker.start();
+  const productAlertWorker = new ProductAlertWorker(config, logger, database);
+  productAlertWorker.start();
   return {
     workers: [foundation.worker, mediaWorker, privacyWorker],
     queueEvents: [foundation.queueEvents, mediaEvents, privacyEvents],
     close: async () => {
       await emailWorker.close();
+      await productAlertWorker.close();
       await privacyWorker.close();
       await privacyEvents.close();
       await privacyConnection.quit();
@@ -154,17 +158,18 @@ async function processPolicyNotificationJob(
 ): Promise<void> {
   if (job.name !== 'deliver-policy-change') throw new Error('Unsupported privacy notification job');
   await new TransactionManager(database.pool, logger).run(async client => {
-    const claimed = await client.query<{ id: string; recipient_email: string; version: string;
+    const claimed = await client.query<{ id: string; organization_id: string; recipient_email: string; version: string;
       change_summary: string; effective_at: Date }>(
       `UPDATE policy_notification_deliveries delivery SET status = 'sending', attempts = attempts + 1, last_error = NULL
        FROM privacy_policy_publications publication
        WHERE delivery.id = $1 AND delivery.publication_id = publication.id AND delivery.status <> 'sent'
-       RETURNING delivery.id, delivery.recipient_email, publication.version, publication.change_summary, publication.effective_at`,
+       RETURNING delivery.id, publication.organization_id, delivery.recipient_email, publication.version, publication.change_summary, publication.effective_at`,
       [job.data.deliveryId]);
     const delivery = claimed.rows[0];
     if (!delivery) return;
     const policyUrl = new URL('/privacy', config.STOREFRONT_PUBLIC_BASE_URL).toString();
     await enqueueEmail(client, {
+      organizationId: delivery.organization_id,
       recipients: [delivery.recipient_email], fromEmail: dajaShopSender(config.SES_FROM_EMAIL),
       replyTo: config.SES_REPLY_TO_EMAIL ? [config.SES_REPLY_TO_EMAIL] : [],
       subject: 'Važno obaveštenje o politici privatnosti | DajaShop',
