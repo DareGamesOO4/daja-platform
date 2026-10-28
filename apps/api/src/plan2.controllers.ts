@@ -352,6 +352,11 @@ export class PublicCatalogController {
       '/contact',
       '/faq',
       '/usluge',
+      '/usluge/lasersko-graviranje',
+      '/usluge/zamena-baterije-sata',
+      '/usluge/zamena-narukvice-sata',
+      '/usluge/skracivanje-narukvice-sata',
+      '/usluge/programiranje-daljinskih-upravljaca',
       '/graviranje',
       ...brandPaths
     ]
