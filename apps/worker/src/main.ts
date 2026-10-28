@@ -1,7 +1,7 @@
 import { config as loadEnvironment } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '@daja/config';
-import { createDatabase, createRedisConnection } from '@daja/database';
+import { createDatabase, createRedisConnection, migrateWhenAvailable } from '@daja/database';
 import { createLogger } from '@daja/observability';
 import {
   createPlatformWorkers,
@@ -17,9 +17,20 @@ const redis = createRedisConnection(config, logger);
 const database = createDatabase(config, logger);
 await redis.ping();
 
+// The mail consumer must be able to start while the API is stopped. Both
+// processes share the migrator's advisory lock when a release starts them together.
+await migrateWhenAvailable(database.pool);
+
 const runtime = createPlatformWorkers(redis.client, database, config, logger);
 
-async function shutdown(signal: string): Promise<void> {
+let shutdownPromise: Promise<void> | undefined;
+
+function shutdown(signal: string): Promise<void> {
+  shutdownPromise ??= stop(signal);
+  return shutdownPromise;
+}
+
+async function stop(signal: string): Promise<void> {
   logger.info({ signal }, 'Worker shutdown started');
   await runtime.close();
   await database.close();
@@ -41,6 +52,6 @@ process.on('unhandledRejection', (reason) => {
 });
 
 logger.info(
-  { queueNames: [FOUNDATION_QUEUE_NAME, 'media-processing', POLICY_NOTIFICATION_QUEUE_NAME] },
+  { queueNames: [FOUNDATION_QUEUE_NAME, 'media-processing', POLICY_NOTIFICATION_QUEUE_NAME], emailConsumer: 'database-outbox' },
   'DAJA worker listening'
 );

@@ -26,5 +26,6 @@ COPY --from=build --chown=daja:daja /app/package.json ./package.json
 COPY --from=build --chown=daja:daja /app/apps/worker/package.json ./apps/worker/package.json
 COPY --from=build --chown=daja:daja /app/apps/worker/dist ./apps/worker/dist
 COPY --from=build --chown=daja:daja /app/packages ./packages
+COPY --from=build --chown=daja:daja /app/migrations ./migrations
 USER daja
 CMD ["node", "apps/worker/dist/main.js"]

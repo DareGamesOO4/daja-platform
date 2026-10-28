@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { loadConfig } from '@daja/config';
 import { createLogger } from '@daja/observability';
 import { createDatabase } from './pool.js';
-import { migrate, migrationStatus } from './migrations.js';
+import { migrateWhenAvailable, migrationStatus } from './migrations.js';
 
 const command = process.argv[2];
 const config = loadConfig();
@@ -11,7 +11,7 @@ const database = createDatabase(config, logger);
 
 try {
   if (command === 'migrate') {
-    const status = await migrate(database.pool);
+    const status = await migrateWhenAvailable(database.pool);
     for (const row of status) {
       console.log(`${row.applied ? 'applied' : 'pending'} ${row.version}_${row.name}`);
     }

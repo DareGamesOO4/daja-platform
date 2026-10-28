@@ -15,6 +15,7 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
+import { EmailWorker } from './email-worker.js';
 
 export const FOUNDATION_QUEUE_NAME = 'daja-foundation';
 export const POLICY_NOTIFICATION_QUEUE_NAME = 'privacy-policy-notifications';
@@ -128,10 +129,13 @@ export function createPlatformWorkers(
   privacyEvents.on('failed', ({ jobId, failedReason }) => {
     logger.error({ jobId, failedReason }, 'Privacy-policy notification job failed');
   });
+  const emailWorker = new EmailWorker(config, logger, database);
+  emailWorker.start();
   return {
     workers: [foundation.worker, mediaWorker, privacyWorker],
     queueEvents: [foundation.queueEvents, mediaEvents, privacyEvents],
     close: async () => {
+      await emailWorker.close();
       await privacyWorker.close();
       await privacyEvents.close();
       await privacyConnection.quit();
@@ -149,7 +153,6 @@ async function processPolicyNotificationJob(
   job: Job<{ deliveryId: string }>, database: Database, config: AppConfig, logger: Logger
 ): Promise<void> {
   if (job.name !== 'deliver-policy-change') throw new Error('Unsupported privacy notification job');
-  if (!config.SES_FROM_EMAIL) throw new Error('Amazon SES sender is required');
   await new TransactionManager(database.pool, logger).run(async client => {
     const claimed = await client.query<{ id: string; recipient_email: string; version: string;
       change_summary: string; effective_at: Date }>(

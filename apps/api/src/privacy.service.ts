@@ -119,8 +119,8 @@ export class PrivacyService {
         'SELECT id, email, active FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = $2',
         [input.organizationId, email]);
       const current = existing.rows[0];
-      if (current?.active) return { ...current, alreadySubscribed: true, isFirstSubscription: false,
-        requiresConfirmation: false, odjavaUrl: this.odjavaUrlNovosti(current.id) };
+      if (current?.active) return { active: true, alreadySubscribed: true, isFirstSubscription: false,
+        requiresConfirmation: false };
       const token = randomToken();
       const pending = await client.query<{ id: string; email: string; active: boolean }>(
         `INSERT INTO newsletter_subscribers (organization_id, email, source, active, consent_status,
@@ -141,7 +141,7 @@ export class PrivacyService {
         url.searchParams.set('token', token);
         await this.email.posaljiPotvrduPrijave({ recipient: email, confirmationUrl: url.toString() }, client);
       }
-      return { id: subscriber?.id ?? current?.id, email, active: false, alreadySubscribed: false,
+      return { active: false, alreadySubscribed: false,
         isFirstSubscription: !current, requiresConfirmation: true, status: 'pending_confirmation' as const };
     });
   }

@@ -826,7 +826,16 @@ export class StorefrontContentController {
         ? { customerId: customer.customerId }
         : {})
     });
-    return { ...subscriber, poslatMailDobrodoslice: false, imaPravoNaKodDobrodoslice: false };
+    // Anonymous callers receive status only, never subscriber identifiers or
+    // signed unsubscribe links. Unsubscribe links are sent to the mailbox owner.
+    return {
+      active: subscriber.active,
+      alreadySubscribed: subscriber.alreadySubscribed,
+      isFirstSubscription: subscriber.isFirstSubscription,
+      requiresConfirmation: subscriber.requiresConfirmation,
+      poslatMailDobrodoslice: false,
+      imaPravoNaKodDobrodoslice: false
+    };
   }
 
   @Post('newsletter/confirm')

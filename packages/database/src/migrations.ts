@@ -98,6 +98,23 @@ export async function migrationStatus(pool: pg.Pool): Promise<MigrationStatus[]>
   });
 }
 
+// Startup callers can wait for another service's migration without weakening
+// the fail-fast lock used by explicit migration callers and maintenance tools.
+export async function migrateWhenAvailable(
+  pool: pg.Pool,
+  timeoutMs = 60_000
+): Promise<MigrationStatus[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await migrate(pool);
+    } catch (error) {
+      if (!(error instanceof MigrationLockError) || Date.now() >= deadline) throw error;
+      await new Promise<void>(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+    }
+  }
+}
+
 export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
   const client = await pool.connect();
   try {
