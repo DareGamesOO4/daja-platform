@@ -7,9 +7,9 @@
 
 ## Jezici i valute web prodavnice
 
-Prodavnica `dajashopweb` podržava srpski/engleski i prikaz RSD/EUR. Kada dodaješ novu poruku namenjenu kupcima, u istom zadatku dopuni njen engleski prevod u web projektu (`src/localization/en.json`). Ne menjaj interne identifikatore ili vrednosti API parametara zbog jezika prikaza. Cene i porudžbine ostaju u osnovnoj valuti RSD; javni endpoint `GET /api/v1/public/catalog/exchange-rates` služi informativnom preračunu prikaza.
+Prodavnica `dajashopweb` podržava srpski/engleski i prikaz RSD/EUR/USD/BAM/MKD/CHF. Kada dodaješ novu poruku namenjenu kupcima, u istom zadatku dopuni njen engleski prevod u web projektu (`src/localization/en.json`). Ne menjaj interne identifikatore ili vrednosti API parametara zbog jezika prikaza. Cene i porudžbine ostaju u osnovnoj valuti RSD; javni endpoint `GET /api/v1/public/catalog/exchange-rates` služi informativnom preračunu prikaza. `rates` sadrži jedinice strane valute za 1 RSD; `eurRsdRate` se zadržava za postojeći prikaz dobavljačkih cena.
 
-Za EUR koristiti zvaničnu važeću srednju kursnu listu NBS (`CurrentMiddleRate`), sa datumom liste i proverom svakog dana po vremenu u Beogradu. Sitemap sadrži srpske i `/en` URL-ove uz uzajamne hreflang veze; pri invalidaciji obuhvatiti i aktuelnu verziju sitemap keša.
+Za strane valute koristiti zvaničnu važeću srednju kursnu listu NBS (`CurrentMiddleRate`), sa datumom liste i proverom svakog dana po vremenu u Beogradu. Poštovati broj jedinica za koji NBS navodi kurs. Sitemap sadrži srpske i `/en` URL-ove uz uzajamne hreflang veze; pri invalidaciji obuhvatiti i aktuelnu verziju sitemap keša.
 
 ## Mapa projekata i infrastrukture
 

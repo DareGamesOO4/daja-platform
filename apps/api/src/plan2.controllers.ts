@@ -67,7 +67,7 @@ import { previewSupplierLink } from './supplier-checks.js';
 import { ALL_PROVIDERS, acquireSupplierLease, requestSupplierProbe, supplierProviderSummary, supplierStates, supplierStatesForProducts, supplierStateFields } from './supplier-queue.js';
 import { pauseSuppliers, resumeSuppliers, supplierLinkActions, supplierLinksList, supplierStatistics, supplierTimeline, supplierCsv } from './supplier-admin.js';
 import { canManageSupplierChecks } from './supplier-access.js';
-import { currentEurRsdMiddleRate, currentNbsEurRate } from './exchange-rates.js';
+import { currentEurRsdMiddleRate, currentNbsExchangeRates } from './exchange-rates.js';
 import { readSearchSettings, saveSearchSettings, searchSettingsSchema, type SearchSettingsResult } from './catalog-search-settings.js';
 import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, workforceProducts, workforceTimelineEntries, effectiveRateSql } from './workforce-data.js';
@@ -275,9 +275,9 @@ export class PublicCatalogController {
 
   @Get('exchange-rates')
   async exchangeRates(@Res({ passthrough: true }) response: Response) {
-    const rate = await currentNbsEurRate();
+    const rate = await currentNbsExchangeRates();
     response.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60');
-    return { ...rate, base: 'RSD', rates: { RSD: 1, EUR: 1 / rate.eurRsdRate } };
+    return rate;
   }
 
   @Get('page')
