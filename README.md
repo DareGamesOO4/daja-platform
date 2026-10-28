@@ -1,5 +1,9 @@
 # DAJA Platform
 
+Mapa povezivanja backenda, sajta, aplikacija, Rendera, Cloudflare-a i mejlova je u
+[docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) (snimak od 28.10.2026).
+Uputstva za pronalaženje mape pri budućem radu su u [AGENTS.md](AGENTS.md).
+
 Central NestJS API, worker, and PostgreSQL datastore for DAJA business systems.
 
 PostgreSQL is the authoritative business datastore. Client applications must use
