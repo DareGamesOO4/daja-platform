@@ -273,6 +273,13 @@ export class PublicCatalogController {
     return searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
   }
 
+  @Get('exchange-rates')
+  async exchangeRates(@Res({ passthrough: true }) response: Response) {
+    const eurRsdRate = await currentEurRsdMiddleRate();
+    response.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600');
+    return { base: 'RSD', eurRsdRate, rates: { RSD: 1, EUR: 1 / eurRsdRate }, source: 'NBS' };
+  }
+
   @Get('page')
   async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
     return publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));

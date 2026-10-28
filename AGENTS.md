@@ -5,6 +5,10 @@
 - Novu verziju Android aplikacije instalirati ako je uređaj povezan; ako nije, preskočiti.
 - Ne proveravati da li je deploy završen.
 
+## Jezici i valute web prodavnice
+
+Prodavnica `dajashopweb` podržava srpski/engleski i prikaz RSD/EUR. Kada dodaješ novu poruku namenjenu kupcima, u istom zadatku dopuni njen engleski prevod u web projektu (`src/localization/en.json`). Ne menjaj interne identifikatore ili vrednosti API parametara zbog jezika prikaza. Cene i porudžbine ostaju u osnovnoj valuti RSD; javni endpoint `GET /api/v1/public/catalog/exchange-rates` služi informativnom preračunu prikaza.
+
 ## Mapa projekata i infrastrukture
 
 Ovaj repozitorijum sadrži zajednički backend za prodavnicu `dajashopweb` i desktop/Android aplikaciju `RFIDDaja`.
