@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "@daja/security": "0.1.0",
-    "zod": "^4.0.17"
+    "zod": "^4.6.7"
   }
 }

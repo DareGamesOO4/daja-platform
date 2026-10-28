@@ -9,6 +9,6 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "zod": "^4.0.17"
+    "zod": "^4.6.7"
   }
 }

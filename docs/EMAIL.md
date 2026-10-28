@@ -50,4 +50,6 @@ Email link pages reset when their token changes and ignore responses from earlie
 
 SES `Delivery` confirms acceptance by the recipient mail server, not placement in its inbox; see the [SES event definitions](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_EventDestination.html). Source review and compilation do not replace actual client rendering or inbox delivery verification.
 
+The final dependency review updates the email HTTP request stack to `body-parser` 2.4.0, `proxy-addr` 2.0.8 and `qs` 6.17.0, with Zod 4.6.7 as the minimum workspace validation version. The storefront router is separately updated to 7.18.5. These stay within existing major versions. A production-dependency audit still reports nine backend packages (five high, four moderate); this email review is not a clean security audit of the whole platform. General media/upload, realtime and document-tool advisories remain a separate security backlog. No forced major upgrades or application tests were run.
+
 The SES sandbox is intentional for current testing and must remain enabled. Arbitrary unverified recipients remain blocked by AWS; these code changes do not request production access. No synthetic messages are sent as part of deployment.
