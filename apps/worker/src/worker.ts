@@ -163,6 +163,8 @@ async function processPolicyNotificationJob(
       `UPDATE policy_notification_deliveries delivery SET status = 'sending', attempts = attempts + 1, last_error = NULL
        FROM privacy_policy_publications publication
        WHERE delivery.id = $1 AND delivery.publication_id = publication.id AND delivery.status <> 'sent'
+         AND NOT EXISTS (SELECT 1 FROM email_deliveries d
+           WHERE d.deduplication_key = 'privacy:' || delivery.id::text || ':' || lower(delivery.recipient_email))
        RETURNING delivery.id, publication.organization_id, delivery.recipient_email, publication.version, publication.change_summary, publication.effective_at`,
       [job.data.deliveryId]);
     const delivery = claimed.rows[0];

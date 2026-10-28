@@ -27,6 +27,10 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: false, limit: '1mb' }));
   app.use((req: Request & { id?: string }, res: Response, next: NextFunction) => {
+    if (/^\/api\/v1\/(?:customer-auth(?:\/|$)|privacy\/(?:me|unsubscribe)(?:\/|$)|newsletter(?:\/|$)|products\/[^/]+\/alerts(?:\/|$)|product-alerts\/confirm(?:\/|$)|admin\/emails(?:\/|$)|contact(?:\/|$))/.test(req.path)) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    }
     const startedAt = performance.now();
     const requestId =
       typeof req.headers['x-request-id'] === 'string'

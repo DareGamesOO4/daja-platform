@@ -19,6 +19,8 @@ export interface QueuedEmail {
 }
 
 export async function enqueueEmail(client: DbClient, input: QueuedEmail): Promise<void> {
+  // Catalog names and other dynamic subject fragments must remain a single header line.
+  input = { ...input, subject: input.subject.replace(/[\r\n\u0000]+/g, ' ').trim() };
   const recipients = [...new Set(input.recipients.map((value) => value.trim().toLowerCase()))];
   if (!recipients.length || recipients.some((value) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) {
     throw new Error('A valid email recipient is required');

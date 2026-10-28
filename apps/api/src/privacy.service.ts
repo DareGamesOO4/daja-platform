@@ -116,7 +116,7 @@ export class PrivacyService {
     const email = normalizeEmail(input.email);
     return new TransactionManager(this.database.pool, this.logger).run(async client => {
       const existing = await client.query<{ id: string; email: string; active: boolean }>(
-        'SELECT id, email, active FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = $2',
+        'SELECT id, email, active FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = $2 FOR UPDATE',
         [input.organizationId, email]);
       const current = existing.rows[0];
       if (current?.active) return { active: true, alreadySubscribed: true, isFirstSubscription: false,

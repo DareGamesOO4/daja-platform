@@ -16,7 +16,7 @@ import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { SmsDeliveryService } from './sms-delivery.service.js';
-import { brandedEmail } from '@daja/shared';
+import { brandedEmail, emailEscape } from '@daja/shared';
 
 type AlertInput = {
     organizationId: string;
@@ -127,10 +127,14 @@ export class ProductAlertService {
       const count = await client.query<{ total: number }>(`SELECT count(*)::int AS total FROM product_alert_confirmations
         WHERE organization_id = $1 AND email = $2 AND created_at > now() - interval '1 hour'`, [input.organizationId, email]);
       if ((count.rows[0]?.total ?? 0) >= 5) throw new ValidationFailedError('Već je zatraženo više potvrda. Proverite email ili pokušajte kasnije.');
-      const product = await client.query(`SELECT 1 FROM product_variants v JOIN products p ON p.id = v.product_id AND p.organization_id = v.organization_id
+      const product = await client.query<{ name: string; variant_name: string | null }>(`SELECT p.name, v.name AS variant_name
+        FROM product_variants v JOIN products p ON p.id = v.product_id AND p.organization_id = v.organization_id
         WHERE v.organization_id = $1 AND v.id = $2 AND p.id = $3 AND v.active AND v.published AND v.deleted_at IS NULL
         AND p.active AND p.published AND p.deleted_at IS NULL`, [input.organizationId, input.variantId, input.productId]);
       if (!product.rowCount) throw new ValidationFailedError('Artikal više nije dostupan.');
+      const item = product.rows[0]!;
+      const name = [item.name, item.variant_name].filter(Boolean).join(' — ');
+      const purpose = input.type === 'price_change' ? 'kada se cena promeni' : 'kada se artikal vrati na stanje';
       const token = randomBytes(32).toString('base64url');
       const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
       const intent = { ...input, email, managementToken: undefined, customerId: undefined };
@@ -141,10 +145,11 @@ export class ProductAlertService {
       await this.delivery.send({ recipients: [email], tag: 'product-alert-confirmation', expiresAt,
         linkTokenHash: createHash('sha256').update(token).digest('hex'),
         fromEmail: this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL,
-        subject: 'Potvrdite obaveštenje za artikal | DajaShop',
-        text: 'Potvrdite obaveštenje preko linka: ' + url + '\nLink važi 24 sata. Ako niste zatražili obaveštenje, zanemarite poruku.',
+        subject: 'Potvrdite obaveštenje: ' + name.slice(0, 120) + ' | DajaShop',
+        text: `Zatražili ste obaveštenje ${purpose} za artikal: ${name}.\nPotvrdite prijavu: ${url}\nLink važi 24 sata. Ako niste zatražili obaveštenje, zanemarite poruku.`,
         html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'OBAVEŠTENJE O ARTIKLU',
-          title: 'Potvrdite svoju email adresu', content: '<p>Aktivirajte traženo obaveštenje za artikal. Link važi 24 sata.</p><p>Ako niste zatražili obaveštenje, zanemarite ovu poruku.</p>',
+          title: 'Potvrdite obaveštenje za artikal',
+          content: `<p>Artikal: <strong>${emailEscape(name)}</strong>.</p><p>Javićemo vam ${purpose}. Aktivirajte prijavu preko dugmeta ispod. Link važi 24 sata.</p><p>Ako niste zatražili obaveštenje, zanemarite ovu poruku.</p>`,
           button: { label: 'Potvrdi obaveštenje', url: url.toString() } }) }, client);
     });
     return { requiresConfirmation: true, active: false };

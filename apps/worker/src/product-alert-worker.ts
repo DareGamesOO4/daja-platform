@@ -51,7 +51,8 @@ export class ProductAlertWorker {
     const run = () => {
       if (this.stopping || this.task) return;
       this.task = (async () => {
-        await dispatcher.dispatchDueRegularPriceChanges();
+        await dispatcher.dispatchDueBackInStock();
+        if (!this.stopping) await dispatcher.dispatchDueRegularPriceChanges();
         if (!this.stopping) await dispatcher.dispatchDueSaleStarts();
       })().catch(error => this.logger.error({ err: error }, 'Product alert scheduling failed'))
         .finally(() => { this.task = undefined; });

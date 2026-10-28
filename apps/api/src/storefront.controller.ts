@@ -229,6 +229,7 @@ export class CustomerAuthController {
   }
 
   @Post('email/verification')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async requestEmailVerification(@Req() request: Request) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     return this.auth.requestEmailVerification({
@@ -656,17 +657,20 @@ export class StorefrontOrdersController {
   async emailHealth(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'privacy.manage');
-    const [counts, deliveries, worker] = await Promise.all([
+    const [counts, deliveries, worker, outcomes] = await Promise.all([
       this.database.pool.query(`SELECT status, count(*)::int AS count,
-        min(created_at) AS oldest_at FROM email_deliveries WHERE organization_id = $1 GROUP BY status`, [ctx.organizationId]),
+        min(created_at) AS oldest_at, min(created_at) FILTER (WHERE priority = 0) AS oldest_security_at
+        FROM email_deliveries WHERE organization_id = $1 GROUP BY status`, [ctx.organizationId]),
       this.database.pool.query(`SELECT id, recipient, tag, status, attempts, created_at, available_at, expires_at,
-        last_error, (status = 'pending' OR (status = 'failed' AND retryable))
-          AND expires_at > now() + minimum_validity_seconds * interval '1 second' AS can_retry
-        FROM email_deliveries WHERE organization_id = $1 AND status <> 'sent'
+        last_error, can_retry, feedback_type, feedback_at FROM email_delivery_status
+        WHERE organization_id = $1 AND (status <> 'sent' OR feedback_type IN
+          ('Complaint','Bounce','Reject','Rendering Failure','RenderingFailure','DeliveryDelay'))
         ORDER BY created_at DESC LIMIT 50`, [ctx.organizationId]),
-      this.database.pool.query('SELECT * FROM email_worker_health WHERE region = $1', [this.config.SES_REGION])
+      this.database.pool.query('SELECT * FROM email_worker_health WHERE region = $1', [this.config.SES_REGION]),
+      this.database.pool.query(`SELECT feedback_type, count(*)::int AS count FROM email_delivery_status
+        WHERE organization_id = $1 AND status = 'sent' GROUP BY feedback_type`, [ctx.organizationId])
     ]);
-    return { counts: counts.rows, deliveries: deliveries.rows, worker: worker.rows[0] ?? null };
+    return { counts: counts.rows, deliveries: deliveries.rows, worker: worker.rows[0] ?? null, outcomes: outcomes.rows };
   }
 
   @Post('admin/emails/:id/retry')
@@ -674,10 +678,10 @@ export class StorefrontOrdersController {
   async retryEmail(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'privacy.manage');
-    const result = await this.database.pool.query(`UPDATE email_deliveries SET status = 'pending', available_at = now(),
-      last_error = NULL, locked_until = NULL WHERE id = $1 AND organization_id = $2
-      AND (status = 'pending' OR (status = 'failed' AND retryable)) AND payload <> '{}'::jsonb
-      AND expires_at > now() + minimum_validity_seconds * interval '1 second' RETURNING id`,
+    const result = await this.database.pool.query(`UPDATE email_deliveries d SET status = 'pending', available_at = now(),
+      last_error = NULL, locked_until = NULL WHERE d.id = $1 AND d.organization_id = $2
+      AND (d.status = 'pending' OR (d.status = 'failed' AND d.retryable))
+      AND EXISTS (SELECT 1 FROM email_delivery_status v WHERE v.id = d.id AND v.can_retry) RETURNING d.id`,
       [parseWithSchema(uuidSchema, id), ctx.organizationId]);
     if (!result.rowCount) throw new ValidationFailedError('Poruka se ne može ponoviti. Za istekao link zatražite novi email.');
     this.logger.info({ deliveryId: id, userId: ctx.userId }, 'Administrator requested email retry');

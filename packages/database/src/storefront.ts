@@ -1402,6 +1402,7 @@ export class StorefrontRepository {
   async claimBackInStockProductAlerts(input: {
     organizationId: string;
     variantId: string;
+    deliveryChannel?: ProductAlertDeliveryChannel;
   }): Promise<ProductAlertNotification[]> {
     const result = await this.client.query<ProductAlertNotificationRow>(
       `WITH inventory AS (
@@ -1433,6 +1434,7 @@ export class StorefrontRepository {
        WHERE alert.organization_id = $1
          AND alert.variant_id = $2
          AND alert.alert_type = 'back_in_stock'
+         AND ($3::text IS NULL OR alert.delivery_channel = $3)
          AND alert.active
          AND variant.id = alert.variant_id
          AND variant.organization_id = alert.organization_id
@@ -1448,7 +1450,7 @@ export class StorefrontRepository {
                  product.slug, primary_asset.public_url AS image_url,
                  variant.currency, variant.current_price_amount,
                  NULL::integer AS previous_price_amount`,
-      [input.organizationId, input.variantId]
+      [input.organizationId, input.variantId, input.deliveryChannel ?? null]
     );
     return result.rows.map(mapProductAlertNotification);
   }

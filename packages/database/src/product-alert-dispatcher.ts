@@ -1,6 +1,6 @@
 import type { AppConfig } from '@daja/config';
 import type { Logger } from '@daja/observability';
-import { brandedEmail } from '@daja/shared';
+import { brandedEmail, emailPreheader } from '@daja/shared';
 import { StorefrontRepository, type ProductAlertNotification } from './storefront.js';
 import { TransactionManager } from './transaction.js';
 import type { Database, DbClient } from './pool.js';
@@ -28,7 +28,24 @@ export class ProductAlertDispatcher {
     private readonly privacy: { productAlertUnsubscribeUrl(subscriptionId: string): string }
   ) {}
 
-  async notifyBackInStock(input: { organizationId: string; variantId: string }): Promise<void> {
+  async dispatchDueBackInStock(): Promise<void> {
+    // Catch up after API interruption or a failed enqueue following an inventory commit.
+    const targets = await this.database.pool.query<{ organization_id: string; variant_id: string }>(
+      `SELECT s.organization_id, s.variant_id FROM product_alert_subscriptions s
+       JOIN product_variants v ON v.id = s.variant_id AND v.organization_id = s.organization_id
+       JOIN products p ON p.id = s.product_id AND p.organization_id = s.organization_id
+       WHERE s.active AND s.alert_type = 'back_in_stock' AND s.delivery_channel = 'email' AND s.revoked_at IS NULL
+         AND v.active AND v.published AND v.deleted_at IS NULL AND p.active AND p.published AND p.deleted_at IS NULL
+         AND (SELECT COALESCE(sum(b.quantity), 0) FROM inventory_balances b
+           WHERE b.organization_id = s.organization_id AND b.variant_id = s.variant_id) > 0
+       GROUP BY s.organization_id, s.variant_id ORDER BY min(s.created_at) LIMIT 100`);
+    for (const target of targets.rows) {
+      try { await this.notifyBackInStock({ organizationId: target.organization_id, variantId: target.variant_id, deliveryChannel: 'email' }); }
+      catch (error) { this.logger.error({ err: error, variantId: target.variant_id }, 'Back-in-stock catch-up failed'); }
+    }
+  }
+
+  async notifyBackInStock(input: { organizationId: string; variantId: string; deliveryChannel?: 'email' }): Promise<void> {
     const sms = await new TransactionManager(this.database.pool, this.logger).run(async client => {
       const alerts = await new StorefrontRepository(client).claimBackInStockProductAlerts(input);
       for (const alert of alerts) if (alert.deliveryChannel !== 'sms') await this.sendBackInStockEmail(alert, client);
@@ -388,7 +405,7 @@ function priceChangeEmail(input: {
   return (
     '<!doctype html><html lang="sr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">' +
     '<style>:root{color-scheme:light dark;supported-color-schemes:light dark}.price-logo-dark{display:none!important;max-height:0;overflow:hidden}@media only screen and (max-width:640px){.price-shell{width:100% !important}.price-outer{padding:0 !important}.price-header{padding:24px 20px 8px !important}.price-content{padding:28px 20px !important}.price-footer{padding:20px !important}.price-product-top{padding:18px 16px 0 !important}.price-product-media,.price-product-info{display:block !important;width:auto !important}.price-product-media{padding:12px 0 6px !important}.price-product-info{padding:18px 4px 20px !important}.price-image-frame{width:220px !important;height:240px !important}.price-product-image{width:190px !important;height:226px !important}.price-button{display:block !important;text-align:center !important}.price-link{word-break:break-all !important}.price-product-feature{display:block !important;width:auto !important;padding-left:10px !important;border-bottom:1px solid #e5e7eb !important}.price-product-feature-divider,.price-benefit-divider{display:none !important}.price-product-feature:last-child,.price-benefit:last-child{border-bottom:0 !important}.price-benefit{display:block !important;width:auto !important;border-right:0 !important;border-bottom:1px solid #e5e7eb !important}}@media (prefers-color-scheme:dark){.price-logo-light{display:none!important}.price-logo-dark{display:block!important;max-height:none!important;overflow:visible!important}.price-body,.price-page,.price-outer{background:#27272a !important}.price-shell,.price-header{background:#2c2c2e !important}.price-footer{background:#353538 !important;border-color:#48484a !important}.price-product-card{border-color:#48484a !important}.price-content h1,.price-content h2,.price-content p,.price-content td,.price-content a,.price-brand,.price-product-name,.price-current,.price-price-label{color:#fafafa !important}.price-copy,.price-footer,.price-eyebrow,.price-product-copy,.price-old,.price-link,.price-sale-period{color:#d4d4d8 !important}.price-product-card,.price-product-card td,.price-product-media,.price-image-frame,.price-image-frame td,.price-summary,.price-summary td,.price-benefits,.price-benefits td{background-color:#3a3a3c !important;background-image:linear-gradient(#3a3a3c,#3a3a3c) !important}.price-benefit-copy,.price-social-copy{color:#d4d4d8 !important}.price-savings{background-color:#3a3a3c !important}.price-savings p{color:#b8f0c7 !important}.price-drop-badge td{background-color:#4d1c24 !important}.price-discount,.price-discount td,.price-button-cell{background-color:#e30613 !important}.price-button{color:#ffffff !important}}</style>' +
-    '</head><body class="price-body" style="margin:0;padding:0;background:#f7f7f8;color:#18181b;font-family:Arial,Helvetica,sans-serif">' +
+    '</head><body class="price-body" style="margin:0;padding:0;background:#f7f7f8;color:#18181b;font-family:Arial,Helvetica,sans-serif">' + emailPreheader('Novosti o ceni artikla koji pratite na DajaShop-u.') + '' +
     '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">' +
     priceMessage +
     '</div><table class="price-page" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f7f7f8"><tr><td class="price-outer" align="center" style="padding:32px 16px">' +

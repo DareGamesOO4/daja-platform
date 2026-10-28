@@ -131,12 +131,14 @@ export class EmailWorker {
         WHERE expires_at <= now() + minimum_validity_seconds * interval '1 second'
           AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))`);
         await this.database.pool.query(`UPDATE email_deliveries d SET status = 'suppressed',
-        last_error = s.reason FROM email_suppressions s WHERE d.recipient = s.email AND d.status = 'pending'`);
+        last_error = s.reason FROM email_suppressions s WHERE d.recipient = s.email AND (d.status = 'pending' OR (d.status = 'sending' AND d.locked_until < now()))`);
         await this.database.pool.query(`UPDATE email_deliveries d SET status = 'suppressed',
-        last_error = 'Consent revoked' WHERE d.status = 'pending' AND (
-          EXISTS (SELECT 1 FROM newsletter_subscribers s WHERE s.id::text = d.payload->>'newsletterSubscriberId' AND NOT s.active)
-          OR EXISTS (SELECT 1 FROM product_alert_subscriptions s
-            WHERE s.id::text = d.payload->>'productAlertSubscriptionId' AND s.revoked_at IS NOT NULL))`);
+        last_error = 'Consent revoked or subscription removed'
+        WHERE (d.status = 'pending' OR (d.status = 'sending' AND d.locked_until < now())) AND (
+          (d.payload->>'newsletterSubscriberId' IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM newsletter_subscribers s WHERE s.id::text = d.payload->>'newsletterSubscriberId' AND s.active))
+          OR (d.payload->>'productAlertSubscriptionId' IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM product_alert_subscriptions s WHERE s.id::text = d.payload->>'productAlertSubscriptionId' AND s.revoked_at IS NULL)))`);
         await this.database.pool
           .query(`UPDATE policy_notification_deliveries p SET status = 'failed', last_error = d.last_error
         FROM email_deliveries d WHERE d.status IN ('failed','expired','suppressed')
@@ -200,11 +202,14 @@ export class EmailWorker {
 
   private async deliver(row: DeliveryRow): Promise<void> {
     const input = row.payload;
+    let accepted = false;
+    let messageId: string | undefined;
     try {
       this.client ??= new SESv2Client({
         region: this.config.SES_REGION,
         credentials: this.credentials(),
-        maxAttempts: 3
+        // The outbox owns retries; avoid an additional SDK send retry after an ambiguous response.
+        maxAttempts: 1
       });
       const response = await this.client.send(
         new SendEmailCommand({
@@ -238,6 +243,8 @@ export class EmailWorker {
         }),
         { abortSignal: this.requestSignal() }
       );
+      accepted = true;
+      messageId = response.MessageId;
       await this.database.pool.query(
         `WITH sent AS (
         UPDATE email_deliveries SET status = 'sent', sent_at = now(), ses_message_id = $2,
@@ -251,6 +258,12 @@ export class EmailWorker {
         'Email accepted by SES'
       );
     } catch (error) {
+      if (accepted) {
+        // SES has already accepted the message. Keep its lease rather than immediately scheduling another send.
+        this.logger.error({ deliveryId: row.id, messageId, errorName: error instanceof Error ? error.name : 'UnknownError' },
+          'Email accepted by SES but database acknowledgement failed; reconcile this message before retrying');
+        return;
+      }
       const name = error instanceof Error ? error.name : 'UnknownError';
       // Configuration and sandbox rejections can recover without replacing the message.
       const failed = name === 'BadRequestException';
@@ -302,90 +315,69 @@ export class EmailWorker {
         if (this.stopping) break;
         if (!message.Body || !message.ReceiptHandle || !message.MessageId) continue;
         try {
-        const parsed: unknown = JSON.parse(message.Body);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid SES event');
-        const event = parsed as {
-          notificationType?: string;
-          eventType?: string;
-          mail?: { messageId?: string };
-          bounce?: { bounceType?: string; bouncedRecipients?: Array<{ emailAddress: string }> };
-          complaint?: { complainedRecipients?: Array<{ emailAddress: string }> };
-        };
-        const kind = event.notificationType || event.eventType;
-        if (typeof kind !== 'string' || !['Bounce','Complaint','Delivery','DeliveryDelay','Reject','Rendering Failure',
-          'RenderingFailure','Send','Open','Click','Subscription'].includes(kind) || typeof event.mail?.messageId !== 'string') {
-          throw new Error('Invalid SES feedback envelope');
-        }
-        if (kind === 'Bounce' && !['Permanent','Transient','Undetermined'].includes(event.bounce?.bounceType ?? '')) {
-          throw new Error('Invalid SES bounce type');
-        }
-        const affected = kind === 'Complaint' ? event.complaint?.complainedRecipients : kind === 'Bounce' ? event.bounce?.bouncedRecipients : [];
-        if (!Array.isArray(affected) || (['Bounce', 'Complaint'].includes(kind) && !affected.length) || affected.some(value => !value || typeof value.emailAddress !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.emailAddress))) {
-          throw new Error('Invalid SES feedback recipients');
-        }
-        const recipients =
-          kind === 'Complaint'
-            ? event.complaint?.complainedRecipients
-            : kind === 'Bounce' && event.bounce?.bounceType === 'Permanent'
-              ? event.bounce.bouncedRecipients
-              : [];
-        const client = await this.database.pool.connect();
-        try {
-          await client.query('BEGIN');
-          const inserted = await client.query(
-            `INSERT INTO email_feedback_events (event_id, event_type, ses_message_id)
-            VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id`,
-            [message.MessageId, kind, event.mail?.messageId ?? null]
-          );
-          if (inserted.rowCount) {
-            for (const recipient of recipients ?? []) {
-              const email = recipient.emailAddress.trim().toLowerCase();
-              await client.query(
-                `INSERT INTO email_suppressions (email, reason) VALUES ($1,$2)
-                ON CONFLICT (email) DO UPDATE SET reason = EXCLUDED.reason`,
-                [email, kind === 'Complaint' ? 'COMPLAINT' : 'BOUNCE']
-              );
-              const emailHash = createHash('sha256').update(email).digest('hex');
-              await client.query(
-                `WITH revoked AS (
-                UPDATE newsletter_subscribers SET active = false, revoked_at = now(),
-                  confirmation_token_hash = NULL, confirmation_expires_at = NULL, updated_at = now()
-                WHERE normalized_email = $1 AND (active OR confirmation_token_hash IS NOT NULL)
-                RETURNING id, organization_id
-              ) INSERT INTO marketing_consent_events (organization_id, subject_email_hash,
-                  newsletter_subscriber_id, purpose, action, source, retain_until)
-                SELECT organization_id, $2, id, 'newsletter', 'revoked', 'ses_feedback', now() + interval '3 years' FROM revoked`,
-                [email, emailHash]
-              );
-              await client.query(
-                `WITH revoked AS (
-                UPDATE product_alert_subscriptions SET active = false, revoked_at = now(), updated_at = now()
-                WHERE lower(email) = $1 AND revoked_at IS NULL RETURNING id, organization_id, customer_id
-              ) INSERT INTO marketing_consent_events (organization_id, subject_email_hash, customer_id,
-                  product_alert_subscription_id, purpose, action, source, retain_until)
-                SELECT organization_id, $2, customer_id, id, 'product_alert', 'revoked', 'ses_feedback',
-                  now() + interval '3 years' FROM revoked`,
-                [email, emailHash]
-              );
+          const event = parseSesFeedback(message.Body);
+          const kind = event.kind;
+          const recipients = event.suppressedRecipients;
+          const fingerprint = 'ses:' + createHash('sha256').update(message.Body).digest('hex');
+          const client = await this.database.pool.connect();
+          try {
+            await client.query('BEGIN');
+            const inserted = await client.query(
+              `INSERT INTO email_feedback_events (event_id, event_type, ses_message_id)
+              SELECT $1,$2,$3 WHERE NOT EXISTS (SELECT 1 FROM email_feedback_events WHERE event_id = $4)
+              ON CONFLICT DO NOTHING RETURNING event_id`,
+              [fingerprint, kind, event.messageId, message.MessageId]
+            );
+            if (inserted.rowCount) {
+              for (const recipient of recipients ?? []) {
+                const email = recipient;
+                await client.query(
+                  `INSERT INTO email_suppressions (email, reason) VALUES ($1,$2)
+                  ON CONFLICT (email) DO UPDATE SET reason = EXCLUDED.reason`,
+                  [email, kind === 'Complaint' ? 'COMPLAINT' : 'BOUNCE']
+                );
+                const emailHash = createHash('sha256').update(email).digest('hex');
+                await client.query(
+                  `WITH revoked AS (
+                  UPDATE newsletter_subscribers SET active = false, revoked_at = now(),
+                    confirmation_token_hash = NULL, confirmation_expires_at = NULL, updated_at = now()
+                  WHERE normalized_email = $1 AND (active OR confirmation_token_hash IS NOT NULL)
+                  RETURNING id, organization_id
+                ) INSERT INTO marketing_consent_events (organization_id, subject_email_hash,
+                    newsletter_subscriber_id, purpose, action, source, retain_until)
+                  SELECT organization_id, $2, id, 'newsletter', 'revoked', 'ses_feedback', now() + interval '3 years' FROM revoked`,
+                  [email, emailHash]
+                );
+                await client.query(
+                  `WITH revoked AS (
+                  UPDATE product_alert_subscriptions SET active = false, revoked_at = now(), updated_at = now()
+                  WHERE lower(email) = $1 AND revoked_at IS NULL RETURNING id, organization_id, customer_id
+                ) INSERT INTO marketing_consent_events (organization_id, subject_email_hash, customer_id,
+                    product_alert_subscription_id, purpose, action, source, retain_until)
+                  SELECT organization_id, $2, customer_id, id, 'product_alert', 'revoked', 'ses_feedback',
+                    now() + interval '3 years' FROM revoked`,
+                  [email, emailHash]
+                );
+              }
             }
+            await client.query('COMMIT');
+          } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+          } finally {
+            client.release();
           }
-          await client.query('COMMIT');
-        } catch (error) {
-          await client.query('ROLLBACK');
-          throw error;
-        } finally {
-          client.release();
-        }
-        await this.sqs.send(
-          new DeleteMessageCommand({
-            QueueUrl: this.queueUrl,
-            ReceiptHandle: message.ReceiptHandle
-          }),
-          { abortSignal: this.requestSignal() }
-        );
+          await this.sqs.send(
+            new DeleteMessageCommand({
+              QueueUrl: this.queueUrl,
+              ReceiptHandle: message.ReceiptHandle
+            }),
+            { abortSignal: this.requestSignal() }
+          );
         } catch (error) {
           // Keep this receipt for SQS redrive; one bad event must not block the rest of the batch.
-          this.logger.error({ messageId: message.MessageId, errorName: error instanceof Error ? error.name : 'UnknownError' },
+          this.logger.error({ messageId: message.MessageId, errorName: error instanceof Error ? error.name : 'UnknownError',
+            reason: error instanceof Error && error.message.startsWith('Invalid SES ') ? error.message : undefined },
             'SES feedback message failed; retained for retry or dead-letter queue');
           await this.database.pool.query('UPDATE email_worker_health SET feedback_error_at = now() WHERE region = $1', [this.config.SES_REGION]);
         }
@@ -400,4 +392,44 @@ export class EmailWorker {
       this.readingFeedback = false;
     }
   }
+}
+
+interface SesFeedback {
+  kind: string;
+  messageId: string;
+  suppressedRecipients: string[];
+}
+
+function parseSesFeedback(body: string): SesFeedback {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { throw new Error('Invalid SES JSON'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid SES event');
+  const event = parsed as {
+    eventType?: unknown; notificationType?: unknown; mail?: { messageId?: unknown };
+    bounce?: { bounceType?: unknown; bouncedRecipients?: unknown };
+    complaint?: { complainedRecipients?: unknown };
+  };
+  const kind = event.notificationType || event.eventType;
+  if (typeof kind !== 'string' || !['Bounce','Complaint','Delivery','DeliveryDelay','Reject','Rendering Failure',
+    'RenderingFailure','Send','Open','Click','Subscription'].includes(kind)
+    || typeof event.mail?.messageId !== 'string' || !event.mail.messageId.trim()) {
+    throw new Error('Invalid SES feedback envelope');
+  }
+  if (kind === 'Bounce' && !['Permanent','Transient','Undetermined'].includes(String(event.bounce?.bounceType))) {
+    throw new Error('Invalid SES bounce type');
+  }
+  const affected = kind === 'Complaint' ? event.complaint?.complainedRecipients
+    : kind === 'Bounce' ? event.bounce?.bouncedRecipients : [];
+  if (!Array.isArray(affected) || (['Bounce','Complaint'].includes(kind) && !affected.length)) {
+    throw new Error('Invalid SES feedback recipients');
+  }
+  const recipients = affected.map((value: unknown) => {
+    const address = value && typeof value === 'object' ? (value as { emailAddress?: unknown }).emailAddress : null;
+    if (typeof address !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address.trim())) {
+      throw new Error('Invalid SES feedback address');
+    }
+    return address.trim().toLowerCase();
+  });
+  return { kind, messageId: event.mail.messageId, suppressedRecipients:
+    kind === 'Complaint' || (kind === 'Bounce' && event.bounce?.bounceType === 'Permanent') ? [...new Set(recipients)] : [] };
 }
