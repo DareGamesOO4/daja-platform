@@ -166,3 +166,43 @@ Five manual-review cases and additional supplier inconsistencies are included
 in the owner report. Read-only persistence verification compares all saved
 descriptions/translations/specs and ensures prices and stock are unchanged;
 it is separate from deployment verification.
+
+### Selling packs and a permanent full-box discount
+
+The owner subsequently changed the selling unit from individual cells to the
+photographed factory pack, and authorized a choice of 4 cells or a full 40-cell
+box for alkaline AA/AAA, with 20% off the full box. This supersedes the per-cell
+selling unit above. `prepare-battery-packs.cjs` takes a fresh inventory snapshot,
+the reviewed enrichment plan and an output path. `apply-battery-packs.cjs`
+exports the same staff-session `run` interface as the other reviewed scripts.
+
+Thirty existing products become packs (2/4/5/6/40 cells); nineteen remain singles.
+Prices are explicit complete-pack totals. For each 40-cell box, the reference
+unit price comes from the corresponding existing 4-cell SKU, not its historical
+supplier bulk-cell price: full price = ten 4-packs; final box price = 80% of that.
+The final net price is saved as the server's current variant price. No invented
+sale end date, browser-only price override, extra inventory or duplicate SKU is
+needed. Existing AAA `LR03/4PK` / `LR03/40PK` and AA `LR6/4PK` / `LR6/40PK`
+products form two explicit custom variant groups. Their identifiers and stock
+balances are preserved, and a cart quantity of one now means one selling pack.
+
+Pack size, reference unit price, reference total, final total, discount and
+source SKU are recorded in `_catalog_import.packaging`; the versioned review
+hash and prior per-cell price are retained alongside it. The two new registered
+specifications describe pack size and selling unit. Existing offered answers
+and editor configuration rules are preserved while adding verified aliases.
+The five unresolved supplier conflicts remain for manual review.
+
+Serbian first paragraphs are 145–160 characters and are also saved as SEO meta
+descriptions. English text is prepared separately with the same 160-character
+limit. Descriptions use one newline per paragraph, avoiding empty spacer
+paragraphs; the storefront keeps the existing small paragraph margin. The
+storefront displays pack price, quantity × unit price, net per-cell price and
+the two labelled pack choices. An optional money precision preserves cents
+in these breakdowns without changing default formatting elsewhere.
+
+The 20% reference display is conditional on the saved price still matching the
+reviewed calculation; later price edits do not leave a stale discount claim.
+All checkout, cart, order and inventory operations continue to use the existing
+product/variant IDs and authoritative server pack price. The import verifies
+saved amounts, texts, versions, the two groups and unchanged stock using reads.
