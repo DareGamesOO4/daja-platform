@@ -72,7 +72,9 @@ export const syncPushSchema = z.object({
   events: z.array(syncPushEventSchema).min(1).max(100)
 });
 export const attributesSchema = z
-  .record(z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/), z.unknown())
+  // Storefront translations and import provenance are internal attributes.
+  // Keep ordinary specification keys normalized and reserve these two keys.
+  .record(z.union([z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/), z.enum(['_translations', '_catalog_import'])]), z.unknown())
   .default({})
   .superRefine((value, ctx) => {
     const encoded = JSON.stringify(value);
