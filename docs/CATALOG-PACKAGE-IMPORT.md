@@ -240,3 +240,35 @@ The storefront disables an unavailable five-cell choice and guards adding more
 cells than available. Pack and unit amounts use the normal RSD formatter with
 no forced decimal precision. Changes preserve the original factory photo count,
 review evidence, unresolved supplier conflicts and the underlying product/SKU.
+
+### 2026-10-30: 2/4/40 groups, Ni-MH formats and zinc-air five-packs
+
+`scripts/set-battery-groups-and-zinc-packs.cjs` builds a reviewed plan from a
+fresh snapshot and applies it through the authorized staff API. The owner's
+new choices supersede the earlier zinc-air single-cell option:
+
+- LR6 AA: `LR6/2PK`, `LR6/4PK`, `LR6/40PK` in one custom group.
+- LR03 AAA: `LR03/2PK`, `LR03/4PK`, `LR03/40PK` in one custom group.
+- Ni-MH AA: `NIMH1200` (capacity awaiting confirmation) and `NIMH2700` together.
+- Ni-MH AAA `NIMH1100`: a separate one-member custom group, excluding the AA models.
+- All four zinc-air sizes: fixed selling packs of FIVE, no single-cell choice.
+
+The existing AA/AAA group IDs are reused when extending their membership.
+Ni-MH choices show the format and confirmed capacity, or ask the buyer to
+confirm capacity; the pending 1200/1300 mAh conflict is not resolved by grouping.
+The AA/AAA box discount and previously rounded prices remain unchanged.
+
+Zinc-air prices become 650 RSD per five-cell pack (five times 130 RSD). Stock
+is converted from cells to whole five-cell packs. For each original six-cell
+blister, one five-cell pack is sellable and ONE loose cell is retained in
+`packaging.looseCellRemainder` and the conversion's inventory audit metadata.
+The invariant is `oldCells = packs * 5 + looseCells`; the loose cell is not
+silently discarded or advertised as another pack. The source photo count
+remains six. The normal cart quantity is now a count of complete five-cell
+packs, and the server's variant price is the full pack price.
+
+Deterministic inventory-event source IDs reconcile uncertain responses without
+repeating conversion. Historical order lines block unit conversion for review.
+Per-product expected versions, source snapshots and bounded retries protect
+concurrent edits. The report verifies saved names, descriptions, English text,
+prices, stock and exact custom-group membership; it does not poll deployment.
