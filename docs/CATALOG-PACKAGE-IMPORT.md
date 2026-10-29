@@ -79,7 +79,7 @@ for a deployment.
 ### Reviewed remote specifications and prices
 
 `scripts/enrich-linkel-remotes.cjs` exports `run({ planPath, reportPath,
-pool, token, apiBase, organizationId, apply })`. Use the existing authorized
+pool, token, apiBase, organizationId, apply, concurrency })`. Use the existing authorized
 staff session and configured tenant database pool; never store credentials
 in the plan or report. Preview is read-only. An explicit `apply: true`
 creates the department's specification definitions and offered answers,
@@ -112,3 +112,6 @@ operational synchronization. Atomic reports and per-product plan hashes
 allow interrupted runs to resume; changed user data is rejected rather
 than overwritten. Idle database disconnects and transient request errors
 receive bounded recovery without logging credentials.
+Concurrency defaults to three and is limited to six. Read requests retry
+transient HTTP/network failures, including non-JSON gateway responses;
+uncertain mutations return to their reconciliation logic before a retry.

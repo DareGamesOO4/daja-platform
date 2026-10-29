@@ -9,7 +9,7 @@ const { createHash } = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function run({ planPath, reportPath, pool, token, apiBase, organizationId, apply = false }) {
+async function run({ planPath, reportPath, pool, token, apiBase, organizationId, apply = false, concurrency = 3 }) {
   // pg removes a failed idle client itself; handle the event without dumping connection details.
   if (!pool.listenerCount('error')) pool.on('error', () => console.warn('Database idle connection closed; reconnecting.'));
   const bytes = await fs.readFile(planPath);
@@ -18,6 +18,7 @@ async function run({ planPath, reportPath, pool, token, apiBase, organizationId,
   const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
   if (claims.org !== organizationId || plan.organizationId !== organizationId) throw Error('Staff/plan tenant mismatch');
   if (new URL(apiBase).protocol !== 'https:') throw Error('HTTPS staff API required');
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 6) throw Error('Concurrency must be between 1 and 6');
   if (plan.schemaVersion !== 1 || plan.products.length !== 1071 || plan.review.images !== 1414) throw Error('Incomplete reviewed plan');
   const excluded = new Set(plan.excluded.map(p => p.externalId));
   if (!excluded.has('LINKEL-195') || plan.products.some(p => excluded.has(p.externalId))) throw Error('Excluded product present');
@@ -29,14 +30,23 @@ async function run({ planPath, reportPath, pool, token, apiBase, organizationId,
     if (p.specs.garancija_daljinskog !== '2 godine') throw Error('Missing confirmed shop warranty');
   }
   const api = async (endpoint, body, method = body === undefined ? 'GET' : 'POST') => {
-    const response = await fetch(apiBase.replace(/\/$/, '') + endpoint, {
-      method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60000)
-    });
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
-    if (!response.ok) { const error = Error(`${endpoint}: HTTP ${response.status}`); error.status = response.status; throw error; }
-    return data && typeof data === 'object' && 'data' in data ? data.data : data;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await fetch(apiBase.replace(/\/$/, '') + endpoint, {
+          method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60000)
+        });
+        const text = await response.text();
+        if (!response.ok) { const error = Error(`${endpoint}: HTTP ${response.status}`); error.status = response.status; throw error; }
+        if (text && !response.headers.get('content-type')?.includes('json')) { const error = Error(`${endpoint}: non-JSON response`); error.status = 502; throw error; }
+        const data = text ? JSON.parse(text) : {};
+        return data && typeof data === 'object' && 'data' in data ? data.data : data;
+      } catch (error) {
+        // Read retries are safe. Mutations return to their reconciliation logic.
+        if (method === 'GET' && attempt < 6 && ([429,500,502,503,504].includes(error.status) || error instanceof TypeError || error.name === 'TimeoutError')) { await delay(Math.min(8000, 500 * 2 ** attempt)); continue; }
+        throw error;
+      }
+    }
   };
   const report = { planHash: hash, startedAt: new Date().toISOString(), apply, review: plan.review, excluded: plan.excluded, definitions: [], completed: [], failures: [] };
   let writes = Promise.resolve();
@@ -115,7 +125,7 @@ async function run({ planPath, reportPath, pool, token, apiBase, organizationId,
       }
     }
   };
-  await Promise.all(Array.from({ length: 3 }, async () => { while (next < plan.products.length) await update(plan.products[next++]); }));
+  await Promise.all(Array.from({ length: concurrency }, async () => { while (next < plan.products.length) await update(plan.products[next++]); }));
   report.finishedAt = new Date().toISOString();
   report.success = report.completed.length === plan.products.length && !report.failures.length;
   await checkpoint();
