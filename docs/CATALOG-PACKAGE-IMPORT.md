@@ -121,3 +121,48 @@ receive bounded recovery without logging credentials.
 Concurrency defaults to three and is limited to six. Read requests retry
 transient HTTP/network failures, including non-JSON gateway responses;
 uncertain mutations return to their reconciliation logic before a retry.
+
+### Reviewed battery descriptions and equivalents
+
+`scripts/prepare-linkel-battery-enrichment.cjs <research-dir> <plan-path>`
+builds the reviewed 49-product battery plan from `before.json`,
+`linkel-details.json` and `photo-index.json`. The facts cover 88 individually
+reviewed supplier photographs, NEXcell's published model tables and primary
+manufacturer cross-reference documents. Source URLs and photo references
+are attached to every product. Catalogue dimensions describe the cell format;
+they are not measurements of the physical stock. Capacities from a different
+brand or NEXcell series are deliberately not transferred.
+
+`scripts/enrich-linkel-batteries.cjs` exports
+`run({ planPath, reportPath, pool, token, apiBase, organizationId, apply })`.
+Use an existing authorized staff session. With `apply: true` it registers 17
+department specification definitions with offered answers in five groups,
+saves Serbian descriptions and English names/descriptions, and replaces the
+old generic `tip` field with reviewed attributes. Prices, quantities, media,
+SKUs, publication, brands and categories are preserved. Each product and
+variant update uses the current version through the staff API, retaining
+audit, snapshots, cache invalidation and synchronization. Interrupted writes
+are reconciled independently; concurrent content changes are rejected.
+
+Five supplier records remain explicitly marked for the owner's manual review:
+`LINKEL-7826`, `LINKEL-7827`, `LINKEL-7849`, `LINKEL-8200`, `LINKEL-8202`.
+Their conflicting model/capacity claims are not filled in as confirmed specs.
+Misleading capacity/model text is removed from the display title, with the
+original inventory identifiers retained. The description asks buyers to
+confirm the actual item before ordering. Review evidence stays under
+`attributes._catalog_import.batteryReview`, outside public specification cards.
+
+Silver-oxide SR/number equivalents are separate from conditional alkaline
+AG/LR substitutes. In particular SR621SW/364 corresponds to the AG1/LR621
+format; the supplier's AG11 is not a valid equivalent. Silver-oxide labels
+state 1.55 V. Ni-MH batteries in the 9V physical format are labelled 8.4 V.
+For 14500 and 752540, the photographed 3.7 V cell label is kept separate
+from the supplier bag's 3.6 V designation. No unverified Li-ion protection,
+connector type, cycle life, expiry or generic AA compatibility is asserted.
+
+The price remains per individual battery. The factory pack count in a source
+photo is labelled separately and does not change the selling quantity.
+Five manual-review cases and additional supplier inconsistencies are included
+in the owner report. Read-only persistence verification compares all saved
+descriptions/translations/specs and ensures prices and stock are unchanged;
+it is separate from deployment verification.
