@@ -45,3 +45,33 @@ the last successful products and can be used for recovery.
 
 The script is intentionally scoped to this reviewed battery package. Review
 new supplier data and prices before adapting it to a different import.
+
+## Linkel remote controls
+
+`scripts/import-linkel-remotes.ts` accepts the reviewed 1,072-product
+`daja.catalog-package.v1` package with AVIF quality 60. It uses the existing
+`daljinski` department and C31 location, creates or reuses the compatibility
+brands and their category bindings, uploads every original and thumbnail,
+and publishes each product with one unit through `/admin/catalog/save`.
+The package records the user's temporary price of 900 RSD for 178 products
+whose source price was missing or zero. Supplier prices, supplier SKUs,
+availability and replacement models remain separate from these overrides.
+Unique import SKUs and slugs must already be resolved in the package.
+
+Use the same required flags and credential environment as the battery
+import, replacing the script, package and report paths. The default mode
+validates all local AVIF checksums, dimensions, identities and current
+catalogue conflicts without writes. `--apply` performs the import with four
+bounded workers and atomic report checkpoints. An advisory lock prevents a
+second remotes import from running concurrently. A retry reuses immutable
+media and idempotent staff-save requests; completed products are skipped
+without resetting stock. Transient API failures are retried only for reads
+and staff saves carrying a stable request ID; rolled-back database deadlocks
+also have bounded retries. Taxonomy POSTs are not blindly repeated.
+Untranslated supplier descriptions stay in the
+source language rather than being labelled as English translations.
+
+The report receives `completedAt` only after persisted product, price,
+publication, image and initial inventory totals match the package. This
+script runs locally against the staff API and does not require waiting
+for a deployment.
