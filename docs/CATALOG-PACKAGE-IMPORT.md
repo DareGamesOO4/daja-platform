@@ -75,3 +75,40 @@ The report receives `completedAt` only after persisted product, price,
 publication, image and initial inventory totals match the package. This
 script runs locally against the staff API and does not require waiting
 for a deployment.
+
+### Reviewed remote specifications and prices
+
+`scripts/enrich-linkel-remotes.cjs` exports `run({ planPath, reportPath,
+pool, token, apiBase, organizationId, apply })`. Use the existing authorized
+staff session and configured tenant database pool; never store credentials
+in the plan or report. Preview is read-only. An explicit `apply: true`
+creates the department's specification definitions and offered answers,
+configures its four admin editor groups, then patches the reviewed variants
+through the staff API with their current `expectedVersion`.
+
+The reviewed plan covers all 1,072 products and 1,414 source photos. It
+updates 1,071 products: `LINKEL-195` / `L021` remains completely excluded at
+the owner's request because its 36 RSD price needs manual review. Prices
+round down to a multiple of 100 RSD; the existing temporary 900 RSD prices
+remain 900. The owner's confirmed two-year warranty is separate evidence
+from supplier descriptions and photographs.
+
+Each populated specification has field or photo provenance. Unknown
+properties stay absent. Explicit negative supplier notes take precedence
+over photographed buttons; a microphone symbol alone does not establish
+voice functionality, and a HEAT button does not establish heating support.
+Conflicting battery markings or frequency ranges are withheld. Model and
+compatibility text remain free text; categorical and boolean definitions
+have offered answers. The controls group uses dropdowns so an unknown
+answer is not displayed as “Ne” in the admin editor.
+
+Only imported legacy `tip` and `supplier_sku` attributes are replaced by
+registered specifications. Other attributes and translations are retained;
+review evidence and original prices live under `_catalog_import`.
+Compatibility brands must remain `Za Sony`, `Za Samsung`, etc. This script
+does not change brands, inventory, publication, media, descriptions or EPCs.
+API patches provide audit records, snapshots, cache invalidation and
+operational synchronization. Atomic reports and per-product plan hashes
+allow interrupted runs to resume; changed user data is rejected rather
+than overwritten. Idle database disconnects and transient request errors
+receive bounded recovery without logging credentials.
