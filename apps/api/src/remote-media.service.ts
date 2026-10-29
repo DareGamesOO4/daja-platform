@@ -40,6 +40,17 @@ interface DownloadedRemoteImage {
   contentType: string | null;
 }
 
+/** Prepares the same image variants for uploads and offline catalogue packages. */
+export async function prepareRemoteImage(sourceUrl: string) {
+  const downloaded = await downloadRemoteImage(sourceUrl);
+  const processed = await createWebpVariants(downloaded.buffer);
+  return {
+    ...processed,
+    sourceContentType: downloaded.contentType,
+    sourceSizeBytes: downloaded.buffer.length
+  };
+}
+
 /**
  * Imports a direct image URL into our own R2 bucket. The database only keeps
  * metadata and R2 keys; it never stores image blobs in PostgreSQL.
@@ -52,8 +63,7 @@ export async function importRemoteImage(input: {
   productSlug?: string;
   imageIndex?: number;
 }): Promise<RemoteMediaImportResult> {
-  const downloaded = await downloadRemoteImage(input.sourceUrl);
-  const processed = await createWebpVariants(downloaded.buffer);
+  const processed = await prepareRemoteImage(input.sourceUrl);
   const mediaId = randomUUID();
   const storage = new R2MediaStorageAdapter(input.config);
   const originalKey = productMediaStorageKey({
@@ -108,8 +118,8 @@ export async function importRemoteImage(input: {
           sha256(processed.original.data),
           JSON.stringify({
             sourceUrl: input.sourceUrl,
-            sourceMimeType: downloaded.contentType,
-            sourceSizeBytes: downloaded.buffer.length,
+            sourceMimeType: processed.sourceContentType,
+            sourceSizeBytes: processed.sourceSizeBytes,
             productSlug: input.productSlug ?? null,
             imageIndex: input.imageIndex ?? null,
             importedAt: new Date().toISOString()
