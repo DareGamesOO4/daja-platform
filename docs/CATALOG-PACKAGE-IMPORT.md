@@ -88,7 +88,9 @@ through the staff API with their current `expectedVersion`.
 
 The reviewed plan covers all 1,072 products and 1,414 source photos. It
 updates 1,071 products: `LINKEL-195` / `L021` remains completely excluded at
-the owner's request because its 36 RSD price needs manual review. Prices
+the owner's request because its earlier 36 RSD price needed manual review.
+At final verification it already had a separate 3,600 RSD edit dated before
+the first enrichment write; that edit is preserved. Prices
 round down to a multiple of 100 RSD; the existing temporary 900 RSD prices
 remain 900. The owner's confirmed two-year warranty is separate evidence
 from supplier descriptions and photographs.
@@ -101,6 +103,10 @@ Conflicting battery markings or frequency ranges are withheld. Model and
 compatibility text remain free text; categorical and boolean definitions
 have offered answers. The controls group uses dropdowns so an unknown
 answer is not displayed as “Ne” in the admin editor.
+Final photo refinements are recorded separately from the immutable base
+plan. In particular, a physical button marked only “Amazon” keeps that
+literal label rather than inferring “Prime Video”. Refinements retain the
+base plan hash and update their own evidence through versioned staff patches.
 
 Only imported legacy `tip` and `supplier_sku` attributes are replaced by
 registered specifications. Other attributes and translations are retained;

@@ -120,7 +120,7 @@ async function run({ planPath, reportPath, pool, token, apiBase, organizationId,
         if (report.completed.length % 50 === 0) console.log(`Saved ${report.completed.length}/${plan.products.length}`);
         return;
       } catch (error) {
-        if (([409,429,500,502,503,504].includes(error.status) || error.name === 'TimeoutError' || error instanceof TypeError || /connection terminated|connection timeout|ECONNRESET|ETIMEDOUT/i.test(error.message)) && attempt < 6) { await delay(Math.min(8000, 500 * 2 ** attempt)); continue; }
+        if (([409,429,500,502,503,504].includes(error.status) || ['57P01','57P03'].includes(error.code) || error.name === 'TimeoutError' || error instanceof TypeError || /connection terminated|connection timeout|ECONNRESET|ETIMEDOUT|recovery mode|not yet accepting connections/i.test(error.message)) && attempt < 6) { await delay(Math.min(8000, 500 * 2 ** attempt)); continue; }
         report.failures.push({ externalId: p.externalId, error: error.message }); await checkpoint(); return;
       }
     }
