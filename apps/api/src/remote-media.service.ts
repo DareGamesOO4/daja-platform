@@ -40,10 +40,15 @@ interface DownloadedRemoteImage {
   contentType: string | null;
 }
 
+export interface ImageOutputOptions {
+  format?: 'webp' | 'avif';
+  quality?: number;
+}
+
 /** Prepares the same image variants for uploads and offline catalogue packages. */
-export async function prepareRemoteImage(sourceUrl: string) {
+export async function prepareRemoteImage(sourceUrl: string, options: ImageOutputOptions = {}) {
   const downloaded = await downloadRemoteImage(sourceUrl);
-  const processed = await createWebpVariants(downloaded.buffer);
+  const processed = await prepareImageVariants(downloaded.buffer, options);
   return {
     ...processed,
     sourceContentType: downloaded.contentType,
@@ -248,23 +253,33 @@ export async function ensurePrimaryMediaThumbnail(input: {
   return publicUrl;
 }
 
-async function createWebpVariants(source: Buffer): Promise<{
+export async function prepareImageVariants(source: Buffer, options: ImageOutputOptions = {}): Promise<{
+  format: 'webp' | 'avif';
+  mimeType: 'image/webp' | 'image/avif';
+  extension: '.webp' | '.avif';
   original: { data: Buffer; width: number; height: number };
   thumbnail: { data: Buffer; width: number; height: number };
 }> {
+  const format = options.format ?? 'webp';
+  const quality = options.quality ?? (format === 'avif' ? 65 : 84);
+  if (!['webp', 'avif'].includes(format) || !Number.isInteger(quality) || quality < 1 || quality > 100) {
+    throw new ValidationFailedError('Image output must be WebP or AVIF with quality between 1 and 100');
+  }
   let originalData: Buffer | undefined;
   let width: number | undefined;
   let height: number | undefined;
   try {
-    const original = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
+    const pipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
       .rotate()
       .resize({
         width: MAX_MAIN_WIDTH,
         height: MAX_MAIN_WIDTH,
         fit: 'inside',
         withoutEnlargement: true
-      })
-      .webp({ quality: 84, effort: 4, smartSubsample: true })
+      });
+    const original = await (format === 'avif'
+      ? pipeline.avif({ quality, effort: 4 })
+      : pipeline.webp({ quality, effort: 4, smartSubsample: true }))
       .toBuffer({ resolveWithObject: true });
     originalData = original.data;
     width = original.info.width;
@@ -285,15 +300,20 @@ async function createWebpVariants(source: Buffer): Promise<{
     throw new ValidationFailedError('Image dimensions are unsupported');
   }
 
-  const thumbnail = await sharp(originalData, { limitInputPixels: MAX_INPUT_PIXELS })
-    .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 80, effort: 4, smartSubsample: true })
+  const thumbnailPipeline = sharp(originalData, { limitInputPixels: MAX_INPUT_PIXELS })
+    .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true });
+  const thumbnail = await (format === 'avif'
+    ? thumbnailPipeline.avif({ quality, effort: 4 })
+    : thumbnailPipeline.webp({ quality: 80, effort: 4, smartSubsample: true }))
     .toBuffer({ resolveWithObject: true });
   if (!thumbnail.info.width || !thumbnail.info.height) {
     throw new ValidationFailedError('Thumbnail dimensions could not be determined');
   }
 
   return {
+    format,
+    mimeType: format === 'avif' ? 'image/avif' : 'image/webp',
+    extension: format === 'avif' ? '.avif' : '.webp',
     original: { data: originalData, width, height },
     thumbnail: {
       data: thumbnail.data,
@@ -303,7 +323,7 @@ async function createWebpVariants(source: Buffer): Promise<{
   };
 }
 
-async function downloadRemoteImage(value: string): Promise<DownloadedRemoteImage> {
+export async function downloadRemoteImage(value: string): Promise<DownloadedRemoteImage> {
   let url: URL;
   try {
     url = new URL(value);

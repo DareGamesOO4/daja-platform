@@ -1,13 +1,16 @@
 /**
  * Offline only: downloads and processes catalogue images without database or R2 writes.
  * Usage: npx tsx scripts/prepare-catalog-media.ts input.json output-dir [excel-preview-dir]
+ *        [--format webp|avif] [--quality 1-100] [--compare-webp]
  * Input: { products: [{ source_id, sku?, image_url }] }
  */
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { parseArgs } from 'node:util';
 import sharp from 'sharp';
-import { prepareRemoteImage } from '../apps/api/src/remote-media.service.js';
+import { downloadRemoteImage, prepareImageVariants } from '../apps/api/src/remote-media.service.js';
 
 interface SourceProduct {
   source_id: string;
@@ -15,7 +18,19 @@ interface SourceProduct {
   image_url: string;
 }
 
-const [inputFile, outputDirectory, previewDirectory] = process.argv.slice(2);
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    format: { type: 'string', default: 'webp' },
+    quality: { type: 'string' },
+    'compare-webp': { type: 'boolean', default: false }
+  }
+});
+const [inputFile, outputDirectory, previewDirectory] = positionals;
+const format = values.format;
+if (format !== 'webp' && format !== 'avif') throw new Error('Format must be webp or avif');
+const quality = values.quality === undefined ? (format === 'avif' ? 65 : 84) : Number(values.quality);
+if (!Number.isInteger(quality) || quality < 1 || quality > 100) throw new Error('Quality must be between 1 and 100');
 if (!inputFile || !outputDirectory) {
   throw new Error('Usage: tsx scripts/prepare-catalog-media.ts input.json output-dir [excel-preview-dir]');
 }
@@ -49,8 +64,9 @@ async function saveManifest() {
   await writeFile(path.join(output, 'media-manifest.json'), JSON.stringify({
     schemaVersion: 'daja.catalog-media.v1',
     createdAt: new Date().toISOString(),
-    processor: 'daja-platform/apps/api/src/remote-media.service.ts#prepareRemoteImage',
-    presets: { main: { maxWidth: 2048, maxHeight: 2048, quality: 84 }, thumbnail: { maxWidth: 512, quality: 80 }, format: 'webp', withoutEnlargement: true },
+    processor: 'daja-platform/apps/api/src/remote-media.service.ts#prepareImageVariants',
+    presets: { main: { maxWidth: 2048, maxHeight: 2048, quality }, thumbnail: { maxWidth: 512, quality: format === 'avif' ? quality : 80 }, format, effort: 4, withoutEnlargement: true },
+    measurement: { timingIncludes: 'main image and thumbnail encoding', timingExcludes: 'network download, file writes and Excel preview', concurrency: values['compare-webp'] ? 1 : 2 },
     sourceCount: products.length,
     processedCount: files.length,
     files: [...files].sort((a, b) => String(a.sourceId).localeCompare(String(b.sourceId), undefined, { numeric: true })),
@@ -58,12 +74,24 @@ async function saveManifest() {
   }, null, 2) + '\n');
 }
 
-for (let offset = 0; offset < products.length; offset += 2) {
-  await Promise.all(products.slice(offset, offset + 2).map(async product => {
+const batchSize = values['compare-webp'] ? 1 : 2;
+for (let offset = 0; offset < products.length; offset += batchSize) {
+  await Promise.all(products.slice(offset, offset + batchSize).map(async product => {
     try {
-      const processed = await prepareRemoteImage(product.image_url);
-      const imagePath = `images/${product.stem}.webp`;
-      const thumbnailPath = `thumbnails/${product.stem}.webp`;
+      const downloadStarted = performance.now();
+      const downloaded = await downloadRemoteImage(product.image_url);
+      const downloadMs = Math.round(performance.now() - downloadStarted);
+      const processingStarted = performance.now();
+      const processed = await prepareImageVariants(downloaded.buffer, { format, quality });
+      const processingMs = Math.round(performance.now() - processingStarted);
+      let webp84: { imageBytes: number; thumbnailBytes: number; processingMs: number } | undefined;
+      if (values['compare-webp'] && format === 'avif') {
+        const comparisonStarted = performance.now();
+        const comparison = await prepareImageVariants(downloaded.buffer, { format: 'webp', quality: 84 });
+        webp84 = { imageBytes: comparison.original.data.length, thumbnailBytes: comparison.thumbnail.data.length, processingMs: Math.round(performance.now() - comparisonStarted) };
+      }
+      const imagePath = `images/${product.stem}${processed.extension}`;
+      const thumbnailPath = `thumbnails/${product.stem}${processed.extension}`;
       await writeFile(path.join(output, imagePath), processed.original.data);
       await writeFile(path.join(output, thumbnailPath), processed.thumbnail.data);
       if (previewDirectory) {
@@ -74,10 +102,11 @@ for (let offset = 0; offset < products.length; offset += 2) {
       }
       files.push({
         sourceId: String(product.source_id), sku: product.sku ?? null,
-        sourceUrl: product.image_url, sourceContentType: processed.sourceContentType,
-        sourceSizeBytes: processed.sourceSizeBytes,
-        image: { path: imagePath, mimeType: 'image/webp', width: processed.original.width, height: processed.original.height, sizeBytes: processed.original.data.length, sha256: checksum(processed.original.data) },
-        thumbnail: { path: thumbnailPath, mimeType: 'image/webp', width: processed.thumbnail.width, height: processed.thumbnail.height, sizeBytes: processed.thumbnail.data.length, sha256: checksum(processed.thumbnail.data) }
+        sourceUrl: product.image_url, sourceContentType: downloaded.contentType,
+        sourceSizeBytes: downloaded.buffer.length,
+        downloadMs, processingMs, ...(webp84 ? { webp84 } : {}),
+        image: { path: imagePath, mimeType: processed.mimeType, width: processed.original.width, height: processed.original.height, sizeBytes: processed.original.data.length, sha256: checksum(processed.original.data) },
+        thumbnail: { path: thumbnailPath, mimeType: processed.mimeType, width: processed.thumbnail.width, height: processed.thumbnail.height, sizeBytes: processed.thumbnail.data.length, sha256: checksum(processed.thumbnail.data) }
       });
       console.log(`Prepared ${product.source_id} ${product.sku ?? ''}`);
     } catch (error) {

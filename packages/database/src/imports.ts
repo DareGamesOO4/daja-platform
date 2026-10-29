@@ -297,7 +297,7 @@ export class ImportRepository {
          organization_id, storage_provider, storage_bucket, storage_key, public_url,
          mime_type, status, metadata
        )
-       VALUES ($1, 'r2', 'dajashop-images', $2, $3, 'image/webp', 'ready', $4::jsonb)
+       VALUES ($1, 'r2', 'dajashop-images', $2, $3, $4, 'ready', $5::jsonb)
        ON CONFLICT (organization_id, storage_bucket, storage_key) WHERE deleted_at IS NULL
        DO UPDATE SET
          public_url = EXCLUDED.public_url,
@@ -311,6 +311,7 @@ export class ImportRepository {
         ctx.organizationId,
         input.storageKey,
         input.publicUrl,
+        importedImageMimeType(input.publicUrl),
         JSON.stringify({ sourceSystem: 'firestore', role: input.role })
       ]
     );
@@ -326,7 +327,7 @@ export class ImportRepository {
       `INSERT INTO media_derivatives (
          organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes
        )
-       VALUES ($1, $2, 512, 512, 'image/webp', $3, $4, 0)
+       VALUES ($1, $2, 512, 512, $3, $4, $5, 0)
        ON CONFLICT (media_asset_id, width)
        DO UPDATE SET
          height = EXCLUDED.height,
@@ -334,7 +335,7 @@ export class ImportRepository {
          storage_key = EXCLUDED.storage_key,
          public_url = EXCLUDED.public_url,
          size_bytes = EXCLUDED.size_bytes`,
-      [ctx.organizationId, mediaId, storageKeyFromPublicUrl(thumbUrl), thumbUrl]
+      [ctx.organizationId, mediaId, importedImageMimeType(thumbUrl), storageKeyFromPublicUrl(thumbUrl), thumbUrl]
     );
   }
 
@@ -779,6 +780,10 @@ function collectFirestoreSpecs(
     }
   }
   return specs;
+}
+
+function importedImageMimeType(url: string): 'image/avif' | 'image/webp' {
+  return storageKeyFromPublicUrl(url).toLowerCase().endsWith('.avif') ? 'image/avif' : 'image/webp';
 }
 
 function isThumbnailUrl(url: string): boolean {
