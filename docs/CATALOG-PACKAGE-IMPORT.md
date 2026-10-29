@@ -206,3 +206,37 @@ reviewed calculation; later price edits do not leave a stale discount claim.
 All checkout, cart, order and inventory operations continue to use the existing
 product/variant IDs and authoritative server pack price. The import verifies
 saved amounts, texts, versions, the two groups and unchanged stock using reads.
+
+### Button cells sold as one or five; prices without fractions
+
+The owner's next instruction supersedes the fixed selling packs for button
+cells: offer one cell or five, and remove fractional dinar prices. The reviewed
+`prepare-battery-single-choice.cjs <snapshot> <plan>` plan selects 19 miniature
+models (the SR/LR/CR cells, 1/3N and four hearing-aid sizes). Manufacturer photos
+still describe their original 5/6-cell factory strips; buying five does not
+claim that the original hearing-aid strip contains five.
+
+Round the reference price of ONE cell to the nearest 10 RSD, with a positive
+minimum of 10 RSD. Recalculate the pack prices from that unit price so the
+quantity × price breakdown remains exact and has no fractional dinars. Keep
+the 40-cell boxes at 80% of ten corresponding 4-packs. Consequently the AA
+4-pack is 360 RSD / box 2,880 RSD; AAA is 320 RSD / box 2,560 RSD.
+
+`apply-battery-single-choice.cjs` uses the existing authorized staff API for
+all price, description, definition and inventory writes. A button-cell variant
+now has a single-cell price and `_catalog_import.packaging.selectableQuantities`
+`[1,5]`. The page displays the selected total, but the cart submits that same
+existing variant's SINGLE-cell price and quantity 1 or 5. There are no clone
+products or independent copies of stock. Other existing packs and their
+4/40 product groups remain intact. Inventory conversion is required: one
+previous strip of five becomes five individually tracked cells in the SAME
+variant/location (a strip of six becomes six). The movement's deterministic
+source ID prevents duplicate conversion after an uncertain response. Its
+audit metadata records old unit, new unit, pack size and unchanged physical
+cell count. Serialized inventory or historical order lines block the migration
+until their unit handling is reviewed, rather than silently reinterpreting them.
+
+The storefront disables an unavailable five-cell choice and guards adding more
+cells than available. Pack and unit amounts use the normal RSD formatter with
+no forced decimal precision. Changes preserve the original factory photo count,
+review evidence, unresolved supplier conflicts and the underlying product/SKU.
