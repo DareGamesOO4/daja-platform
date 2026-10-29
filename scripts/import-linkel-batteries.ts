@@ -187,7 +187,7 @@ try {
         product: { name: productName, slug: productSlug, externalId: product.externalId, description,
           departmentId: department.id, brandId: brand.id, primaryCategoryId: categoryIds[product.source.categorySlug],
           itemCondition: 'new', active: true, published: true, linkelUrl: product.source.url,
-          seo: { metaTitle: `${productName} | Nextcell | DajaShop`, metaDescription: summary(`Nextcell ${description}`) } },
+          seo: { metaTitle: `${productName} | Nextcell`, metaDescription: summary(`Nextcell ${description}`) } },
         variant: { ...(old ? { id: old.variant_id } : {}), sku: product.supplierSku, mpn: product.supplierSku, currentPriceAmount: product.normalizedRow.priceMinor,
           currency: 'RSD', active: true, published: true,
           attributes: { tip: categories[product.source.categorySlug] } },
