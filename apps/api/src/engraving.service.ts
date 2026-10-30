@@ -52,7 +52,15 @@ export class EngravingService {
   }
 
   async list(organizationId: string, customerId: string) {
-    const result = await this.database.pool.query('SELECT id, product_id AS "productId", variant_id AS "variantId", version, preview, updated_at AS "updatedAt" FROM engraving_drafts WHERE organization_id=$1 AND customer_id=$2 ORDER BY updated_at DESC LIMIT 100', [organizationId, customerId]);
+    const result = await this.database.pool.query(`SELECT draft.id, draft.product_id AS "productId", draft.variant_id AS "variantId",
+      draft.version, draft.preview, draft.updated_at AS "updatedAt", p.slug, p.name
+      FROM engraving_drafts draft
+      JOIN products p ON p.id=draft.product_id AND p.organization_id=draft.organization_id
+      JOIN product_variants v ON v.id=draft.variant_id AND v.product_id=p.id AND v.organization_id=p.organization_id
+      WHERE draft.organization_id=$1 AND draft.customer_id=$2
+        AND p.deleted_at IS NULL AND p.active AND p.published
+        AND v.deleted_at IS NULL AND v.active AND v.published
+      ORDER BY draft.updated_at DESC LIMIT 100`, [organizationId, customerId]);
     return result.rows;
   }
 
