@@ -14,27 +14,27 @@ export interface Database {
   close(): Promise<void>;
 }
 
-function sslForDatabaseUrl(connectionString: string): pg.PoolConfig['ssl'] | undefined {
+export function databaseConnectionOptions(connectionString: string): Pick<pg.PoolConfig, 'connectionString' | 'ssl'> {
   const databaseUrl = new URL(connectionString);
   const sslMode = databaseUrl.searchParams.get('sslmode')?.toLowerCase();
-  const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(databaseUrl.hostname);
+  const isLocalHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(databaseUrl.hostname);
   const needsTls =
     sslMode === 'require' ||
     sslMode === 'verify-ca' ||
     sslMode === 'verify-full' ||
     (!isLocalHost && databaseUrl.hostname.includes('.'));
 
-  // Managed Postgres providers (Render/Neon) present a TLS certificate that is
-  // not available in local development's certificate store. The encrypted
-  // channel is still required; CA verification is handled by the provider
-  // connection URL in environments that supply a root certificate.
-  return needsTls ? { rejectUnauthorized: false } : undefined;
+  // pg reparses SSL URL parameters and can override an explicit ssl object.
+  // Do not let sslmode=require silently disable certificate verification.
+  for (const key of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'uselibpqcompat']) {
+    databaseUrl.searchParams.delete(key);
+  }
+  return { connectionString: databaseUrl.toString(), ssl: needsTls ? { rejectUnauthorized: true } : false };
 }
 
 export function createDatabase(config: AppConfig, logger: Logger): Database {
   const pool = new pg.Pool({
-    connectionString: config.DATABASE_URL,
-    ssl: sslForDatabaseUrl(config.DATABASE_URL),
+    ...databaseConnectionOptions(config.DATABASE_URL),
     max: config.DB_POOL_MAX,
     statement_timeout: config.DB_STATEMENT_TIMEOUT_MS,
     idle_in_transaction_session_timeout: config.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS,

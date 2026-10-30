@@ -37,7 +37,7 @@ import { PhoneOtpService } from './phone-otp.service.js';
 
 const registerSchema = z.object({
   identity: z.string().trim().min(3).max(240),
-  password: z.string().min(6).max(240),
+  password: z.string().min(8).max(240).regex(/^(?=.*[A-Z])(?=.*\d).+$/, 'Lozinka mora imati veliko slovo i broj.'),
   name: z.string().trim().min(1).max(240)
 });
 
@@ -170,13 +170,20 @@ export class CustomerAuthController {
     private readonly realtime: RealtimeGateway
   ) {}
 
+  @Get('security-capabilities')
+  securityCapabilities() {
+    return { googleOAuthBrowserState: true };
+  }
+
   @Post('register')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   register(@Body() body: unknown) {
     const input = parseWithSchema(registerSchema, body);
     return this.auth.register({ organizationId: publicOrganizationId(this.config), ...input });
   }
 
   @Post('login')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   login(@Body() body: unknown) {
     const input = parseWithSchema(loginSchema, body);
     return this.auth.login({ organizationId: publicOrganizationId(this.config), ...input });
@@ -251,6 +258,7 @@ export class CustomerAuthController {
   }
 
   @Post('admin/session')
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
   async adminSession(@Req() request: Request, @Body() body: unknown) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     const input = parseWithSchema(adminSessionSchema, body);
@@ -316,10 +324,12 @@ export class CustomerAuthController {
   @Get('oauth/google/start')
   googleOauthStart(
     @Query('returnTo') returnTo: string | undefined,
+    @Query('browserState') browserState: unknown,
     @Res() response: Response
   ) {
     const organizationId = publicOrganizationId(this.config);
-    const url = this.auth.startGoogleOAuth(organizationId, returnTo);
+    const url = this.auth.startGoogleOAuth(organizationId,
+      parseWithSchema(z.string().regex(/^[a-f0-9]{64}$/), browserState), returnTo);
     response.redirect(url);
   }
 
@@ -568,7 +578,7 @@ export class StorefrontOrdersController {
       const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
-        items: frozenItems as typeof input.items,
+        items: frozenItems,
         subtotalAmount: subtotalMinor,
         discountAmount: promotion.discountAmountMinor,
         shippingAmount: shippingMinor,
@@ -666,7 +676,7 @@ export class StorefrontOrdersController {
         WHERE organization_id = $1 AND (status <> 'sent' OR feedback_type IN
           ('Complaint','Bounce','Reject','Rendering Failure','RenderingFailure','DeliveryDelay'))
         ORDER BY created_at DESC LIMIT 50`, [ctx.organizationId]),
-      this.database.pool.query('SELECT * FROM email_worker_health WHERE region = $1', [this.config.SES_REGION]),
+      this.database.pool.query<Record<string, unknown>>('SELECT * FROM email_worker_health WHERE region = $1', [this.config.SES_REGION]),
       this.database.pool.query(`SELECT feedback_type, count(*)::int AS count FROM email_delivery_status
         WHERE organization_id = $1 AND status = 'sent' GROUP BY feedback_type`, [ctx.organizationId])
     ]);

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Headers, Inject, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
 import { requirePermission } from '@daja/security';
@@ -13,7 +14,7 @@ const loginSchema = z.object({
   // organization only when that email belongs to exactly one tenant.
   organizationId: z.string().uuid().optional(),
   email: z.string().email(),
-  password: z.string().min(1),
+  password: z.string().min(1).max(1024),
   deviceId: z.string().uuid(),
   // Optional so existing desktop clients keep their exact login contract.
   deviceType: z.enum(['rfiddaja_desktop', 'rfiddaja_mobile']).optional(),
@@ -77,6 +78,7 @@ export class AuthController {
   ) {}
 
   @Post('desktop/google/start')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   desktopGoogleStart(@Body() body: unknown) {
     return this.desktopGoogle.start(parseBody(desktopGoogleStartSchema, body));
   }
@@ -87,6 +89,7 @@ export class AuthController {
   }
 
   @Post('mobile/google/start')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   mobileGoogleStart(@Body() body: unknown) {
     return this.desktopGoogle.startMobile(parseBody(mobileGoogleStartSchema, body));
   }
@@ -97,6 +100,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async login(
     @Body() body: unknown,
     @Headers('x-request-id') requestId?: string,
@@ -111,6 +115,7 @@ export class AuthController {
   }
 
   @Post('card/login')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async loginWithCard(@Body() body: unknown) {
     const result = await this.authService.loginWithNfcCard(parseBody(nfcCardLoginSchema, body));
     return { ...result.tokens, user: serializePrincipal(result.principal) };

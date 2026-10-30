@@ -92,7 +92,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         Key: input.key,
         ContentType: input.mimeType,
         ContentLength: input.sizeBytes,
-        ChecksumSHA256: input.checksumSha256
+        ChecksumSHA256: input.checksumSha256 ? Buffer.from(input.checksumSha256, 'hex').toString('base64') : undefined
       }),
       { expiresIn }
     );
@@ -251,8 +251,18 @@ export class MediaRepository {
       throw new ValidationFailedError('Media asset is not pending upload');
     }
     const object = await storage.headObject(asset.storage_key);
+    validateUploadMetadata({ mimeType: object.mimeType || '', sizeBytes: object.sizeBytes });
+    if (object.mimeType !== asset.mime_type) {
+      throw new ValidationFailedError('Uploaded object MIME type does not match requested type');
+    }
     if (asset.size_bytes !== null && object.sizeBytes !== Number(asset.size_bytes)) {
       throw new ValidationFailedError('Uploaded object size does not match requested size');
+    }
+    const bytes = await storage.getObject(asset.storage_key);
+    if (bytes.length !== object.sizeBytes) throw new ValidationFailedError('Uploaded content size changed');
+    validateMediaBytes(bytes, asset.mime_type);
+    if (asset.checksum_sha256 && sha256(bytes) !== asset.checksum_sha256.toLowerCase()) {
+      throw new ValidationFailedError('Uploaded content checksum does not match');
     }
     await this.client.query(
       `UPDATE media_assets
@@ -264,7 +274,7 @@ export class MediaRepository {
         mediaId,
         object.mimeType,
         object.sizeBytes,
-        object.checksumSha256 ?? null
+        sha256(bytes)
       ]
     );
     return { mediaId, status: 'uploaded' };
@@ -534,6 +544,16 @@ export function sha256(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+export function validateMediaBytes(bytes: Buffer, mimeType: string): void {
+  const head = bytes.subarray(0, 32);
+  const valid = mimeType === 'image/jpeg' ? head.subarray(0, 3).equals(Buffer.from([255, 216, 255]))
+    : mimeType === 'image/png' ? head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    : mimeType === 'image/webp' ? head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP'
+    : mimeType === 'image/avif' ? head.toString('ascii', 4, 8) === 'ftyp' && ['avif', 'avis'].some(brand => head.includes(Buffer.from(brand)))
+    : mimeType === 'application/pdf' && head.toString('ascii', 0, 5) === '%PDF-';
+  if (!valid) throw new ValidationFailedError('File content does not match the declared media type');
+}
+
 function validateUploadMetadata(input: { mimeType: string; sizeBytes: number }): void {
   if (
     !['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'application/pdf'].includes(
@@ -610,11 +630,19 @@ export function productMediaThumbnailStorageKey(input: {
 }
 
 async function readObjectBody(body: unknown): Promise<Buffer> {
-  if (body instanceof Uint8Array) return Buffer.from(body);
+  const maximum = 25 * 1024 * 1024;
+  if (body instanceof Uint8Array) {
+    if (body.byteLength > maximum) throw new ValidationFailedError('Media exceeds 25 MiB');
+    return Buffer.from(body);
+  }
   if (body instanceof Readable) {
     const chunks: Buffer[] = [];
+      let size = 0;
     for await (const chunk of body) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        size += bytes.length;
+        if (size > maximum) throw new ValidationFailedError('Media exceeds 25 MiB');
+        chunks.push(bytes);
     }
     return Buffer.concat(chunks);
   }

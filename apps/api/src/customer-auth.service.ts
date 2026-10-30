@@ -250,8 +250,9 @@ export class CustomerAuthService {
     });
   }
 
-  startGoogleOAuth(organizationId: string, returnTo?: string): string {
+  startGoogleOAuth(organizationId: string, browserState: string, returnTo?: string): string {
     this.assertGoogleOAuthConfigured();
+    if (!/^[a-f0-9]{64}$/.test(browserState)) throw new InvalidTokenError();
     const state = signJwt(
       {
         typ: 'access',
@@ -259,6 +260,7 @@ export class CustomerAuthService {
         org: organizationId,
         jti: randomUUID(),
         provider: 'google',
+        browserState,
         returnTo: this.resolveOAuthReturnUrl(returnTo)
       },
       this.config.JWT_ACCESS_SECRET,
@@ -288,7 +290,8 @@ export class CustomerAuthService {
     if (
       state.sub !== 'google-oauth-state' ||
       state.org !== input.organizationId ||
-      state.provider !== 'google'
+      state.provider !== 'google' ||
+      typeof state.browserState !== 'string' || !/^[a-f0-9]{64}$/.test(state.browserState)
     ) {
       throw new InvalidTokenError();
     }
@@ -430,8 +433,11 @@ export class CustomerAuthService {
 
   oauthSuccessRedirect(tokens: CustomerTokenPair, state?: string): string {
     const url = new URL(this.oauthReturnUrlFromState(state));
+    const browserState = state ? verifyJwt(state, this.config.JWT_ACCESS_SECRET, 'access').browserState : undefined;
+    if (typeof browserState !== 'string' || !/^[a-f0-9]{64}$/.test(browserState)) throw new InvalidTokenError();
     url.hash = new URLSearchParams({
       oauth: 'success',
+      browserState,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken
     }).toString();

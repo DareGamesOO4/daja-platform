@@ -7,7 +7,8 @@ import { migrateWhenAvailable, migrationStatus } from './migrations.js';
 const command = process.argv[2];
 const config = loadConfig();
 const logger = createLogger(config, 'database-cli');
-const database = createDatabase(config, logger);
+// Runtime can use a DML-only role; DDL migrations use a separate credential.
+const database = createDatabase({ ...config, DATABASE_URL: config.MIGRATION_DATABASE_URL || config.DATABASE_URL }, logger);
 
 try {
   if (command === 'migrate') {

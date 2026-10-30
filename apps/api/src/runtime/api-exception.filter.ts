@@ -15,8 +15,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
       response.status(exception.statusCode).json({
         error: {
           code: exception.code,
-          message: exception.message,
-          details: exception.details,
+          message: exception.statusCode >= 500 ? 'Service temporarily unavailable' : exception.message,
+          details: exception.statusCode >= 500 ? {} : exception.details,
           requestId
         }
       });
@@ -26,8 +26,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       response.status(exception.getStatus()).json({
         error: {
-          code: exception.getStatus() === HttpStatus.TOO_MANY_REQUESTS ? 'RATE_LIMITED' : ERROR_CODES.validationFailed,
-          message: exception.message,
+          code: exception.getStatus() === 429 ? 'RATE_LIMITED' : ERROR_CODES.validationFailed,
+          message: exception.getStatus() >= 500 ? 'Service temporarily unavailable' : exception.message,
           details: {},
           requestId
         }

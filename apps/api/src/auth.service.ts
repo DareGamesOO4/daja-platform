@@ -178,7 +178,7 @@ export class AuthService {
       );
       if (user.rowCount !== 1) throw new ResourceNotFoundError('aktivan korisnik sa tom e-adresom');
       const userId = user.rows[0]!.id;
-      const occupied = await client.query(`SELECT id, user_id FROM staff_nfc_cards WHERE card_id = $1 FOR UPDATE`, [input.cardId]);
+      const occupied = await client.query<{ id: string; user_id: string }>(`SELECT id, user_id FROM staff_nfc_cards WHERE card_id = $1 FOR UPDATE`, [input.cardId]);
       if (occupied.rowCount && occupied.rows[0]?.user_id !== userId) {
         throw new ResourceConflictError('Kartica je već povezana sa drugim korisnikom.');
       }
@@ -349,7 +349,7 @@ export class AuthService {
     input: { deviceId?: string | undefined; locationId?: string | undefined } = {}
   ): Promise<RequestContext & { sessionId?: string }> {
     const payload = verifyJwt(token, this.config.JWT_ACCESS_SECRET, 'access');
-    if (!payload.dev || !payload.fam) {
+    if (!payload.dev || !payload.fam || typeof payload.sid !== 'string') {
       throw new InvalidTokenError();
     }
     if (input.deviceId && input.deviceId !== payload.dev) {

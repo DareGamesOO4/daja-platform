@@ -15,6 +15,7 @@ import type { Database } from '@daja/database';
 import { AuthService } from './auth.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { CONFIG, DATABASE } from './tokens.js';
+import { allowedRealtimeOrigin } from './runtime/cors-policy.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 import { invalidateCatalogPages } from './catalog-page.js';
 
@@ -51,10 +52,9 @@ const allowedEvents: RealtimeEvent[] = [
 
 @WebSocketGateway({
   namespace: '/realtime',
-  // Socket.IO has its own CORS layer, separate from Express. Reflect the
-  // Android Capacitor origin here; connection authorization still requires a
-  // valid access token in handleConnection.
-  cors: { origin: true, credentials: true }
+  cors: { origin: (origin, callback) => callback(null, allowedRealtimeOrigin(origin)), credentials: true },
+  // CORS alone does not reject raw WebSocket handshakes.
+  allowRequest: (request, callback) => callback(null, allowedRealtimeOrigin(request.headers.origin))
 })
 export class RealtimeGateway {
   constructor(
@@ -80,7 +80,7 @@ export class RealtimeGateway {
         instancePid: process.pid
       }, 'Realtime transport rejected');
     });
-    engine.on('connection', (connection) => {
+    engine.on('connection', (connection: { on(event: 'close', listener: (reason: string) => void): void; transport: { name: string } }) => {
       connection.on('close', (reason: string) => {
         if (reason === 'ping timeout' || reason === 'transport error') {
           logger.warn({ reason, transport: connection.transport.name, instancePid: process.pid }, 'Realtime transport interrupted');

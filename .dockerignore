@@ -2,6 +2,10 @@ node_modules
 **/dist
 .git
 .env
+.env.*
+.dev.vars*
+*.pem
+*.key
 tmp
 coverage
 npm-debug.log

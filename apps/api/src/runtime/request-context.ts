@@ -15,7 +15,8 @@ export function resolveRequestContext(request: Request): RequestContext {
     };
   }
 
-  if (process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
+  if (!['development', 'test'].includes(process.env.NODE_ENV || '')
+    || process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
     throw new AuthenticationRequiredError();
   }
 

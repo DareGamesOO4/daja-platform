@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=20.11.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "npm run build && npm-run-all --parallel dev:types dev:api dev:worker",
@@ -35,7 +35,7 @@
     "preflight:production": "tsx scripts/preflight-production.ts",
     "backup:restore:drill": "tsx scripts/backup-restore-drill.ts",
     "check:no-demo": "tsx scripts/check-no-demo.ts",
-    "security:deps": "npm audit --audit-level=high"
+    "security:deps": "npm audit --audit-level=low"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1108.0",
@@ -48,7 +48,6 @@
     "@nestjs/platform-express": "^11.1.6",
     "@nestjs/platform-socket.io": "^11.1.6",
     "@nestjs/swagger": "^11.2.0",
-    "@nestjs/testing": "^11.1.6",
     "@nestjs/throttler": "^6.4.0",
     "@nestjs/websockets": "^11.1.6",
     "argon2": "^0.43.1",
@@ -61,20 +60,20 @@
     "ioredis": "^5.7.0",
     "pg": "^8.16.3",
     "pino": "^9.9.0",
-    "pino-http": "^10.5.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "sharp": "0.35.3",
+    "sharp": "0.35.5",
     "socket.io": "^4.8.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
+    "@nestjs/testing": "^11.1.6",
     "@types/express": "^5.0.3",
     "@types/node": "^24.2.1",
     "@types/pg": "^8.15.5",
     "@types/supertest": "^6.0.3",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^9.33.0",
     "globals": "^16.3.0",
     "npm-run-all": "^4.1.5",
@@ -84,10 +83,15 @@
     "tsx": "^4.20.4",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.39.0",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "js-yaml": "5.2.3",
-    "sharp": "0.35.3"
+    "js-yaml": "5.5.0",
+    "sharp": "0.35.5",
+    "multer": "2.5.0",
+    "exceljs": {
+      "uuid": "11.1.1"
+    },
+    "vite": "^7.3.7"
   }
 }

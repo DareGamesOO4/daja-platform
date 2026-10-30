@@ -30,6 +30,24 @@ export async function resetDatabase(pool: pg.Pool): Promise<void> {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error('Refusing to reset database outside NODE_ENV=test');
   }
+  let host = '';
+  try {
+    host = pool.options.connectionString
+      ? new URL(pool.options.connectionString).hostname
+      : pool.options.host || 'localhost';
+  } catch {
+    /* Reject malformed connection options without exposing credentials. */
+  }
+  if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) {
+    throw new Error('Refusing to reset a database outside the isolated local test environment');
+  }
+  // A local Docker port-forward legitimately reports a bridge address inside
+  // Postgres. Check the actual pool's destination and the live database name.
+  const identity = await pool.query<{ name: string }>('SELECT current_database() AS name');
+  const target = identity.rows[0];
+  if (!target || !/^(?:daja_platform|daja_test_[a-z0-9_]+)$/.test(target.name)) {
+    throw new Error('Refusing to reset a database outside the isolated local test environment');
+  }
   await pool.query('DROP SCHEMA IF EXISTS public CASCADE');
   await pool.query('CREATE SCHEMA public AUTHORIZATION daja_app');
   await pool.query('GRANT ALL ON SCHEMA public TO public');
