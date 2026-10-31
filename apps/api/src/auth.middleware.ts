@@ -10,6 +10,10 @@ export class AuthMiddleware implements NestMiddleware {
 
   async use(request: Request, _response: Response, next: NextFunction): Promise<void> {
     try {
+      if (/^\/(?:api\/v1\/)?health\/(?:live|ready)\/?$/.test(request.path)) {
+        next();
+        return;
+      }
       if (isCustomerRoute(request.path) || isCustomerRoute(request.originalUrl) || isCustomerRoute(request.url)) {
         next();
         return;

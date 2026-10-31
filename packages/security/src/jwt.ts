@@ -34,6 +34,7 @@ export function verifyJwt(
   expectedType: JwtPayload['typ']
 ): JwtPayload {
   assertSecret(secret);
+  if (typeof token !== 'string' || token.length > 8192) throw new InvalidTokenError();
   const parts = token.split('.');
   if (parts.length !== 3) {
     throw new InvalidTokenError();

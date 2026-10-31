@@ -18,6 +18,9 @@ import { CONFIG, DATABASE } from './tokens.js';
 import { allowedRealtimeOrigin } from './runtime/cors-policy.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 import { invalidateCatalogPages } from './catalog-page.js';
+import { AdmissionBudget } from './runtime/abuse-protection.js';
+
+const transportBudget = new AdmissionBudget(1);
 
 type RealtimeEvent =
   | 'catalog.variant-groups.updated'
@@ -52,12 +55,18 @@ const allowedEvents: RealtimeEvent[] = [
 
 @WebSocketGateway({
   namespace: '/realtime',
+  maxHttpBufferSize: 16 * 1024,
+  connectTimeout: 10_000,
   cors: { origin: (origin, callback) => callback(null, allowedRealtimeOrigin(origin)), credentials: true },
   // CORS alone does not reject raw WebSocket handshakes.
-  allowRequest: (request, callback) => callback(null, allowedRealtimeOrigin(request.headers.origin))
+  allowRequest: (request, callback) => callback(null,
+    allowedRealtimeOrigin(request.headers.origin) && transportBudget.take('global', 600, 60_000))
 })
 export class RealtimeGateway {
   private readonly authTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly connections = new Set<string>();
+  private readonly connectionBudget = new AdmissionBudget();
+  private pendingAuthentication = 0;
   constructor(
     @Inject(AuthService) private readonly authService: AuthService,
     @Inject(CustomerAuthService) private readonly customerAuth: CustomerAuthService,
@@ -81,7 +90,9 @@ export class RealtimeGateway {
         instancePid: process.pid
       }, 'Realtime transport rejected');
     });
-    engine.on('connection', (connection: { on(event: 'close', listener: (reason: string) => void): void; transport: { name: string } }) => {
+    engine.on('connection', (connection: { close(): void; on(event: 'close', listener: (reason: string) => void): void; transport: { name: string } }) => {
+      // Also cover transports that never authenticate into a namespace.
+      if (engine.clientsCount > 320) { connection.close(); return; }
       connection.on('close', (reason: string) => {
         if (reason === 'ping timeout' || reason === 'transport error') {
           logger.warn({ reason, transport: connection.transport.name, instancePid: process.pid }, 'Realtime transport interrupted');
@@ -91,6 +102,26 @@ export class RealtimeGateway {
   }
 
   async handleConnection(socket: Socket): Promise<void> {
+    // Engine.IO is outside the HTTP guard. Bound total sockets and expensive
+    // authentication, including visitors allowed into the public catalog room.
+    if (this.connections.size >= 256 || this.pendingAuthentication >= 16
+      || !this.connectionBudget.take('global', 600, 60_000)) {
+      deny(socket);
+      return;
+    }
+    this.connections.add(socket.id);
+    socket.once('disconnect', () => this.connections.delete(socket.id));
+    const packets = new AdmissionBudget(1);
+    socket.use((_packet, next) => {
+      if (packets.take('socket', 60, 60_000)) next();
+      else { socket.disconnect(true); next(new Error('Rate limit exceeded')); }
+    });
+    this.pendingAuthentication++;
+    try { await this.authenticateConnection(socket); }
+    finally { this.pendingAuthentication--; }
+  }
+
+  private async authenticateConnection(socket: Socket): Promise<void> {
     const token = bearerToken(socket);
     if (token) {
       try {
@@ -184,6 +215,7 @@ export class RealtimeGateway {
   }
 
   handleDisconnect(socket: Socket): void {
+    this.connections.delete(socket.id);
     const timer = this.authTimers.get(socket.id);
     if (timer) clearInterval(timer);
     this.authTimers.delete(socket.id);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { hash, argon2id } from 'argon2';
+import { hash, argon2id } from './password-work.js';
 import {
   InventoryRepository,
   MediaRepository,

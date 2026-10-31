@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { argon2id, hash, verify } from 'argon2';
+import { argon2id, hash, verify } from './password-work.js';
 import type { AppConfig } from '@daja/config';
 import {
   AuthRepository,
@@ -23,6 +23,7 @@ import {
 import type { RequestContext } from '@daja/shared';
 import { createRequestId } from '@daja/shared';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
+import { consumeLoginAttempt } from './login-attempts.js';
 
 export interface TokenPair {
   accessToken: string;
@@ -61,6 +62,7 @@ export class AuthService {
       if (!user || !user.active) {
         throw new InvalidCredentialsError();
       }
+      await consumeLoginAttempt(this.config, `staff:${user.organizationId}:${user.id}`);
       const passwordOk = await verify(user.passwordHash, input.password);
       if (!passwordOk) {
         throw new InvalidCredentialsError();

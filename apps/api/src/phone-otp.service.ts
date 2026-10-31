@@ -1,4 +1,4 @@
-import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomInt } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import type { AppConfig } from '@daja/config';
@@ -87,24 +87,40 @@ export class PhoneOtpService {
     const client = await this.redisClient();
     const scope = this.scope(input);
     const key = this.challengeKey(scope);
-    const challenge = parseChallenge(await client.get(key));
-    if (!challenge) {
+    // Compare, count and consume in one Redis operation. Separate GET/SET/DEL
+    // allowed concurrent wrong guesses to overwrite each other's attempt count,
+    // and concurrent correct guesses to consume the same one-time code twice.
+    const result = Number(await client.eval(`
+      local raw = redis.call('GET', KEYS[1])
+      if not raw then return 0 end
+      local ok, challenge = pcall(cjson.decode, raw)
+      if not ok or type(challenge) ~= 'table' or type(challenge.codeHash) ~= 'string'
+          or #challenge.codeHash ~= 64 or type(challenge.attempts) ~= 'number'
+          or challenge.attempts < 0 or challenge.attempts >= tonumber(ARGV[2]) then
+        redis.call('DEL', KEYS[1])
+        return 0
+      end
+      local difference = 0
+      for i = 1, 64 do
+        difference = bit.bor(difference, bit.bxor(string.byte(challenge.codeHash, i), string.byte(ARGV[1], i)))
+      end
+      if difference == 0 then redis.call('DEL', KEYS[1]); return 1 end
+      challenge.attempts = challenge.attempts + 1
+      local ttl = redis.call('PTTL', KEYS[1])
+      if challenge.attempts >= tonumber(ARGV[2]) or ttl <= 0 then
+        redis.call('DEL', KEYS[1])
+        return -2
+      end
+      redis.call('SET', KEYS[1], cjson.encode(challenge), 'PX', ttl)
+      return -1
+    `, 1, key, this.hash(scope, input.code), MAX_VERIFY_ATTEMPTS));
+    if (result === 0) {
       throw new ValidationFailedError('Kod je istekao ili nije ispravan. Zatražite novi kod.');
     }
-
-    const expected = this.hash(scope, input.code);
-    if (!safeHashEquals(challenge.codeHash, expected)) {
-      const attempts = challenge.attempts + 1;
-      if (attempts >= MAX_VERIFY_ATTEMPTS) {
-        await client.del(key);
-        throw new ValidationFailedError('Previše pogrešnih pokušaja. Zatražite novi kod.');
-      }
-      const ttl = await client.ttl(key);
-      if (ttl > 0) await client.set(key, JSON.stringify({ ...challenge, attempts }), 'EX', ttl);
+    if (result === -2) throw new ValidationFailedError('Previše pogrešnih pokušaja. Zatražite novi kod.');
+    if (result !== 1) {
       throw new ValidationFailedError('Kod nije ispravan.');
     }
-
-    await client.del(key);
     return { status: 'verified' as const };
   }
 
@@ -153,29 +169,4 @@ export class PhoneOtpService {
   private hash(scope: string, code: string): string {
     return createHmac('sha256', this.config.JWT_ACCESS_SECRET).update(`${scope}:${code}`).digest('hex');
   }
-}
-
-function parseChallenge(raw: string | null): PhoneOtpChallenge | null {
-  if (!raw) return null;
-  try {
-    const value = JSON.parse(raw) as Partial<PhoneOtpChallenge>;
-    const attempts = value.attempts;
-    if (
-      typeof value.codeHash !== 'string' ||
-      !Number.isInteger(attempts) ||
-      attempts === undefined ||
-      attempts < 0
-    ) {
-      return null;
-    }
-    return { codeHash: value.codeHash, attempts };
-  } catch {
-    return null;
-  }
-}
-
-function safeHashEquals(first: string, second: string): boolean {
-  const firstBuffer = Buffer.from(first, 'utf8');
-  const secondBuffer = Buffer.from(second, 'utf8');
-  return firstBuffer.length === secondBuffer.length && timingSafeEqual(firstBuffer, secondBuffer);
 }

@@ -1,6 +1,7 @@
 import { config as loadEnvironment } from 'dotenv';
 import 'reflect-metadata';
 import { fileURLToPath } from 'node:url';
+import type { Server } from 'node:http';
 import { NestFactory } from '@nestjs/core';
 import { loadConfig } from '@daja/config';
 import { type Database } from '@daja/database';
@@ -27,6 +28,11 @@ process.on('uncaughtException', (error) => {
 
 const app = await NestFactory.create(AppModule, { bufferLogs: true });
 configureApiApp(app, config, logger);
+const server = app.getHttpServer() as Server;
+server.requestTimeout = 30_000;
+server.headersTimeout = 15_000;
+server.keepAliveTimeout = 5_000;
+server.maxHeadersCount = 60;
 
 await app.listen(config.PORT);
 startSupplierChecks(app.get<Database>(DATABASE), logger);

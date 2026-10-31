@@ -1,5 +1,6 @@
 import { MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { clientNetwork } from './runtime/abuse-protection.js';
 import { APP_GUARD } from '@nestjs/core';
 import type { RequestWithAuthContext } from './auth.controller.js';
 import { loadConfig } from '@daja/config';
@@ -65,7 +66,7 @@ const logger = createLogger(config, 'api');
         const ctx = (request as RequestWithAuthContext).authContext;
         // AuthMiddleware verifies this identity. Never trust device/user headers
         // directly, or rotating a header would bypass the limiter.
-        return ctx ? `staff:${ctx.organizationId}:${ctx.userId}:${ctx.deviceId || 'web'}` : `ip:${request.ip}`;
+        return ctx ? `staff:${ctx.organizationId}:${ctx.userId}` : `ip:${clientNetwork(request.ip ?? 'unknown')}`;
       },
       throttlers: [{
         ttl: 60_000,

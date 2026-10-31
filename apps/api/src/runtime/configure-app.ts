@@ -11,6 +11,7 @@ import { createRequestId } from '@daja/shared';
 import { ApiExceptionFilter } from './api-exception.filter.js';
 import { EnvelopeInterceptor } from './envelope.interceptor.js';
 import { allowedCorsOrigins } from './cors-policy.js';
+import { admissionMiddleware } from './abuse-protection.js';
 
 export function configureApiApp(app: INestApplication, config: AppConfig, logger: Logger): void {
   // Trust only the configured number of proxies, not an arbitrary forwarded
@@ -27,6 +28,8 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
     credentials: true,
     exposedHeaders: ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset']
   });
+  // Must precede body parsing and AuthMiddleware (which queries PostgreSQL).
+  app.use(admissionMiddleware());
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: false, limit: '1mb' }));
   app.use((req: Request & { id?: string }, res: Response, next: NextFunction) => {

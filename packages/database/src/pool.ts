@@ -36,6 +36,7 @@ export function createDatabase(config: AppConfig, logger: Logger): Database {
   const pool = new pg.Pool({
     ...databaseConnectionOptions(config.DATABASE_URL),
     max: config.DB_POOL_MAX,
+    connectionTimeoutMillis: 5_000,
     statement_timeout: config.DB_STATEMENT_TIMEOUT_MS,
     idle_in_transaction_session_timeout: config.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS,
     application_name: 'daja-platform',

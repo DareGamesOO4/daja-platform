@@ -555,6 +555,7 @@ export class StorefrontOrdersController {
   ) {}
 
   @Post('orders')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async createOrder(@Req() request: Request, @Body() body: unknown) {
     const token = bearerToken(request);
     const customer = token
@@ -774,6 +775,7 @@ export class StorefrontContentController {
   }
 
   @Post('products/:productId/reviews')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async addReview(
     @Req() request: Request,
     @Param('productId') productId: string,

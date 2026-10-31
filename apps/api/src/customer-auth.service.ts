@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { argon2id, hash, verify } from 'argon2';
+import { argon2id, hash, verify } from './password-work.js';
 import type { AppConfig } from '@daja/config';
 import {
   StorefrontRepository,
@@ -20,6 +20,7 @@ import {
 } from '@daja/security';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { NovostiEmailService } from './novosti-email.service.js';
+import { consumeLoginAttempt } from './login-attempts.js';
 
 export interface CustomerTokenPair {
   accessToken: string;
@@ -192,7 +193,9 @@ export class CustomerAuthService {
         organizationId: input.organizationId,
         identity: input.identity
       });
-      if (!customer?.active || !(await verify(customer.passwordHash, input.password))) {
+      if (!customer?.active) throw new InvalidCredentialsError();
+      await consumeLoginAttempt(this.config, `customer:${customer.organizationId}:${customer.id}`);
+      if (!(await verify(customer.passwordHash, input.password))) {
         throw new InvalidCredentialsError();
       }
       const session = await this.createSession(repo, customer.organizationId, customer.id);

@@ -12,6 +12,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const requestId = request.id ?? response.getHeader('x-request-id')?.toString() ?? 'unknown';
 
     if (exception instanceof AppError) {
+      if (exception.statusCode === 429 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '900');
+      if (exception.statusCode === 503 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '5');
       response.status(exception.statusCode).json({
         error: {
           code: exception.code,
