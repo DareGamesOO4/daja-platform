@@ -28,8 +28,9 @@ odvojeno. Zatečene korisničke izmene `.env.example` i `.idea` nisu uključene 
   ostati usklađena: platform `infra/edge-gateway/worker.mjs` i web `src/edge/apiProxy.js`.
 - Backend proverava dokaz pre obrade poslovnog HTTP zahteva i na svim Engine.IO
   transport zahtevima. Posle potvrđenog prebacivanja uključuje se `enforce`.
-- Izuzeci su ograničeni health endpointi i tačan Google callback GET, jer je ta
-  adresa registrovana kod provajdera. Signed OAuth state i browser nonce ostaju obavezni.
+- Izuzeci su samo ograničeni health endpointi. Proveren Google callback je
+  `https://dajashop.rs/api/v1/customer-auth/oauth/google/callback` i prolazi kroz
+  Pages. Signed OAuth state i browser nonce ostaju obavezni.
 - Cloudflare ograničava saobraćaj pre aplikacije, ali serverski dokaz nije mrežna
   izolacija Rendera. Javni origin i dalje prima mrežni saobraćaj i odbija poslovne zahteve.
 
@@ -77,13 +78,15 @@ Web build koristi cookie režim osim ako je `VITE_DAJA_BROWSER_SESSIONS=false`.
 
 ## Povratak
 
-1. Prvo postaviti Render `EDGE_ENFORCEMENT=off` i `BROWSER_SESSIONS_ENABLED=false`
-   uz aktiviranje te konfiguracije. Ne vraćati klijente pre otvaranja starog puta.
+1. Prvo postaviti Render `EDGE_ENFORCEMENT=off` uz aktiviranje te konfiguracije.
+   `BROWSER_SESSIONS_ENABLED=true` ostaje dok se novi web koristi. Ne vraćati
+   klijente pre otvaranja starog puta.
 2. Vratiti kod sa navedenih Git oznaka novim revert/restore commit-om, bez
    `reset --hard`, forsiranog push-a ili brisanja korisničkih lokalnih izmena.
    Alternativa za web je build sa `VITE_DAJA_BROWSER_SESSIONS=false`.
 3. Vratiti Pages javne API/WS promenljive iz sačuvane konfiguracije ako su menjane.
    Uklanjanje novog Pages secret-a nije neophodno za funkcionalan povratak.
+   Tek posle vraćanja starog web-a opciono postaviti `BROWSER_SESSIONS_ENABLED=false`.
 4. RFID vratiti na prethodni izvor/konfiguraciju; originalni `.env` je u privatnoj kopiji.
 5. Tek kad stari put radi, opcionalno ukloniti novi custom domain i Worker. Ne
    brisati postojeći CDN Worker, R2 bucket, podatke ili sesijske tabele.

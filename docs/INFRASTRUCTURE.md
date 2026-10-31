@@ -1,5 +1,38 @@
 # DAJA — mapa infrastrukture i veza
 
+## Aktuelna dopuna: zaštićen API i web sesije, 31.10.2026.
+
+Ova dopuna ima prednost nad istorijskim snimkom ispod. Detalji, prethodne revizije,
+privatne kopije i bezbedan povratak opisani su u `docs/EDGE_SESSION_ROLLOUT.md`.
+
+- Sajt koristi isti origin: `https://dajashop.rs/api/v1` i `/socket.io`, kroz Pages
+  Worker projekta `dajashopweb`. Browser sesije koriste HttpOnly/Secure host-only
+  kolačiće, CSRF i Origin proveru; tokeni se ne vraćaju novom web-u u JSON-u.
+- Android, desktop i RFID PWA koriste `https://api.dajashop.rs/api/v1` i WebSocket
+  na tom originu, preko novog Worker-a `daja-api-gateway`. Native bearer ugovor ostaje.
+- Worker custom domain: `api.dajashop.rs`, ID `1b1c6f60eed844474c799fdad177ee732d6f94df`.
+  `workers.dev` i preview pristup za gateway su isključeni.
+- Render origin ostaje `https://daja-platform-api.onrender.com`. U režimu
+  `EDGE_ENFORCEMENT=enforce` poslovni HTTP i Engine.IO zahtevi bez serverskog
+  dokaza se odbijaju. Health probe imaju zasebna ograničenja i ostaju dostupne.
+- `EDGE_SHARED_SECRET` je serverska tajna na Render API-ju, Pages-u i API Worker-u.
+  Vrednost nije deo dokumentacije, frontend build promenljivih ili Git-a.
+  Render `BROWSER_SESSIONS_ENABLED=true`; ove promenljive se upravljaju kroz
+  service environment, bez prepisivanja ostalih vrednosti ili Google redirect URI-ja.
+- Proveren početak Google prijave koristi postojeći callback na `dajashop.rs`, uz
+  dodatni HttpOnly browser nonce. Potpun Google/admin login zahteva zasebnu proveru
+  stvarnim nalogom; ovim pregledom nije izvršen.
+- Customer sesije pre cookie prelaska se opozivaju migracijom 090; RFID device
+  sesije ostaju. Očekivana je ponovna prijava web korisnika.
+- Nije uveden novi CAPTCHA ekran, promenjen katalog/korpa, niti menjana SES sandbox
+  odluka ili email infrastruktura. Sam serverski dokaz nije mrežno skrivanje origin IP-a.
+
+Potvrđeni su gateway HTTP 200 i javni WebSocket preko oba nova ulaza, i odbijanje
+odgovarajućih direktnih Render zahteva. Rad fizičkog RFID uređaja i uspešan
+Google/admin login nisu potvrđeni. Pre/posle merenja su laboratorijska, sa jednog računara.
+
+## Istorijski snimak infrastrukture, 28.10.2026.
+
 Pregled: 28.10.2026, Europe/Belgrade. Izvori: uspešni read-only pozivi Render, Cloudflare i AWS konektora, PostgreSQL SELECT nad šemom i zbirnim email stanjem, lokalni izvorni kod i odabrana javna podešavanja. Ovo je snimak stanja, ne potvrda rada svih funkcija.
 
 Tokom izvornog pregleda nisu menjani kod, infrastruktura, DNS, tajne, baze ni podešavanja. Nisu pokretani testovi, aplikacije, migracije, slanje mejlova ili instalacija na Android. Nije proveravan završetak deploya. Korisnik je zatim zatražio da mapa bude sačuvana i u sva tri repozitorijuma: ovaj dokument je ta verzija podsetnika, a korenski AGENTS.md i README vode do njega. Ova dokumentaciona dopuna ne potvrđuje novu produkcijsku konfiguraciju.
