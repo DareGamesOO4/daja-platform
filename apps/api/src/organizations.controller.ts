@@ -5,6 +5,9 @@ import { AuditRepository, OrganizationRepository, TransactionManager } from '@da
 import type { Logger } from '@daja/observability';
 import { DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { requireScopedPermission } from './access-policy.js';
+import { z } from 'zod';
+import { parseWithSchema } from '@daja/validation';
 
 @Controller('organizations')
 export class OrganizationsController {
@@ -23,9 +26,11 @@ export class OrganizationsController {
   async updateName(
     @Req() request: Request,
     @Param('id') id: string,
-    @Body() body: { expectedVersion: number; name: string; reason?: string }
+    @Body() body: { expectedVersion: number; name: string; reason?: string | undefined }
   ) {
     const ctx = resolveRequestContext(request);
+    requireScopedPermission(ctx, ['settings.configure', 'admin.users']);
+    body = parseWithSchema(z.object({ expectedVersion: z.number().int().positive(), name: z.string().trim().min(1).max(240), reason: z.string().trim().max(2000).optional() }), body);
     const tx = new TransactionManager(this.database.pool, this.logger);
     return tx.run(async (client) => {
       const repository = new OrganizationRepository(client);

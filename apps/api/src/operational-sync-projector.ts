@@ -12,6 +12,8 @@ import type { RequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
+import { authorizeSyncEvent } from './sync-authorization.js';
+import { assertGrantablePermissions, assignableLocation, grantableRole, lockAccessPolicy, manageableUser, requireActiveOwner } from './access-policy.js';
 
 type ItemCommand = {
   kind: 'item.create' | 'item.update' | 'item.archive' | 'item.delete';
@@ -212,6 +214,7 @@ export class OperationalSyncProjector {
   }
 
   async materialize(ctx: RequestContext, event: SyncPushEvent): Promise<SyncPushEvent> {
+    await authorizeSyncEvent(this.client, ctx, event);
     const envelope = record(event.payload);
     const operationalSnapshot = record(envelope?.operationalSnapshot);
     if (operationalSnapshot?.kind === 'rfid.cycle_count') {
@@ -407,6 +410,7 @@ export class OperationalSyncProjector {
         ? 'users.create'
         : 'users.update';
     requireAnyPermission(ctx, [required, 'admin.users']);
+    await lockAccessPolicy(this.client, ctx);
     const actor = text(payload, 'actorUserId') ?? ctx.userId;
     if (actor !== ctx.userId)
       throw new ValidationFailedError('Admin actor does not match session.');
@@ -414,14 +418,16 @@ export class OperationalSyncProjector {
       const roleId = event.aggregateId;
       const name = text(payload, 'name');
       if (!name) throw new ValidationFailedError('Role name is missing.');
-      await this.client.query(
+      const created = await this.client.query(
         `INSERT INTO roles (id, organization_id, name, description, system_role, is_system)
          VALUES ($1, $2, $3, $4, false, false)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, updated_at = now()`,
+         ON CONFLICT (id) DO NOTHING RETURNING id`,
         [roleId, ctx.organizationId, name, text(payload, 'description') ?? null]
       );
+      if (!created.rowCount) throw new ValidationFailedError('Role identity already exists.');
       const copyFrom = text(payload, 'copyFromRoleId');
       if (copyFrom) {
+        await grantableRole(this.client, ctx, copyFrom);
         await this.client.query(
           `INSERT INTO role_permissions (role_id, permission_id)
            SELECT $1, permission_id FROM role_permissions WHERE role_id = $2
@@ -437,6 +443,7 @@ export class OperationalSyncProjector {
     }
     if (kind === 'role.update') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      await grantableRole(this.client, ctx, roleId, true);
       await this.client.query(
         `UPDATE roles SET name = COALESCE($3, name), description = COALESCE($4, description),
          updated_at = now(), version = version + 1
@@ -456,6 +463,7 @@ export class OperationalSyncProjector {
     }
     if (kind === 'role.delete') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      await grantableRole(this.client, ctx, roleId, true);
       const role = await this.client.query<{ code: string | null }>(
         `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [roleId, ctx.organizationId]
@@ -475,6 +483,7 @@ export class OperationalSyncProjector {
     }
     if (kind === 'role.permissions.update') {
       const roleId = text(payload, 'roleId') ?? event.aggregateId;
+      await grantableRole(this.client, ctx, roleId, true);
       const role = await this.client.query<{ code: string | null }>(
         `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [roleId, ctx.organizationId]
@@ -490,6 +499,7 @@ export class OperationalSyncProjector {
         for (const action of actions) {
           if (typeof action !== 'string' || !module) continue;
           const permission = module === 'counts' ? `rfid_counts.${action}` : `${module}.${action}`;
+          assertGrantablePermissions(ctx, [permission]);
           await this.client.query(
             `INSERT INTO role_permissions (role_id, permission_id) SELECT $1, id FROM permissions WHERE id = $2 ON CONFLICT DO NOTHING`,
             [roleId, permission]
@@ -509,16 +519,18 @@ export class OperationalSyncProjector {
       const displayName = text(payload, 'displayName');
       const password = text(payload, 'password');
       if (!email || !displayName) throw new ValidationFailedError('User identity is missing.');
-      if (!password || password.length < 8) throw new ValidationFailedError('User password is missing or too short.');
-      const passwordHash = await hash(password, { type: argon2id });
-      await this.client.query(
+      const transportedHash = text(payload, 'passwordHash');
+      if (!transportedHash && (!password || password.length < 8 || password.length > 1024)) throw new ValidationFailedError('User password is missing or invalid.');
+      if (transportedHash && !/^\$argon2id\$v=19\$m=65536,t=3,p=1\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{43}$/.test(transportedHash)) throw new ValidationFailedError('Invalid password hash parameters.');
+      const passwordHash = transportedHash ?? await hash(password!, { type: argon2id });
+      const created = await this.client.query(
         `INSERT INTO users (id, organization_id, email, display_name, password_hash, active)
          VALUES ($1, $2, $3, $4, $5, true)
-         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, display_name = EXCLUDED.display_name,
-           password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash), active = true, updated_at = now()`,
+         ON CONFLICT (id) DO NOTHING RETURNING id`,
         [userId, ctx.organizationId, email, displayName, passwordHash]
       );
-      await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
+      if (!created.rowCount) throw new ValidationFailedError('User identity already exists.');
+      await this.replaceAssignments(ctx, userId, payload);
       return {
         kind: 'access',
         operation: kind,
@@ -526,6 +538,7 @@ export class OperationalSyncProjector {
       };
     }
     const userId = text(payload, 'userId') ?? event.aggregateId;
+    await manageableUser(this.client, ctx, userId);
     if (kind === 'user.action') {
       const action = text(payload, 'action');
       if (action === 'activate' || action === 'deactivate') {
@@ -540,6 +553,7 @@ export class OperationalSyncProjector {
           [ctx.organizationId, userId]
         );
       }
+      if (action === 'deactivate') await requireActiveOwner(this.client, ctx);
       return {
         kind: 'access',
         operation: kind,
@@ -547,7 +561,8 @@ export class OperationalSyncProjector {
         action
       };
     }
-    await this.replaceAssignments(ctx.organizationId, userId, payload, ctx.isOwner === true);
+    await this.replaceAssignments(ctx, userId, payload);
+    await requireActiveOwner(this.client, ctx);
     await this.bumpAccessPolicy(ctx.organizationId);
     return {
       kind: 'access',
@@ -560,13 +575,13 @@ export class OperationalSyncProjector {
     organizationId: string,
     roleId: string
   ): Promise<Record<string, unknown>> {
-    const role = await this.client.query(
+    const role = await this.client.query<Record<string, unknown>>(
       `SELECT id, organization_id AS "organizationId", code, name, description,
               is_system AS "isSystem", deleted_at AS "deletedAt"
        FROM roles WHERE organization_id = $1 AND id = $2`,
       [organizationId, roleId]
     );
-    const permissions = await this.client.query(
+    const permissions = await this.client.query<Record<string, unknown>>(
       `SELECT p.id, p.code, p.module, p.action, p.description
        FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id
        WHERE rp.role_id = $1 AND p.deleted_at IS NULL`,
@@ -579,12 +594,12 @@ export class OperationalSyncProjector {
     organizationId: string,
     userId: string
   ): Promise<Record<string, unknown>> {
-    const user = await this.client.query(
+    const user = await this.client.query<Record<string, unknown>>(
       `SELECT id, email, display_name AS "displayName", active
        FROM users WHERE organization_id = $1 AND id = $2`,
       [organizationId, userId]
     );
-    const assignments = await this.client.query(
+    const assignments = await this.client.query<Record<string, unknown>>(
       `SELECT id, role_id AS "roleId", scope, location_id AS "locationId", is_primary AS primary
        FROM user_role_assignments
        WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL
@@ -595,11 +610,11 @@ export class OperationalSyncProjector {
   }
 
   private async replaceAssignments(
-    organizationId: string,
+    ctx: RequestContext,
     userId: string,
-    payload: Record<string, unknown>,
-    actorIsOwner: boolean
+    payload: Record<string, unknown>
   ): Promise<void> {
+    const organizationId = ctx.organizationId;
     await this.client.query(
       `UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [organizationId, userId]
@@ -610,14 +625,20 @@ export class OperationalSyncProjector {
       const roleId = text(assignment ?? {}, 'roleId');
       const scope = text(assignment ?? {}, 'scope');
       if (!roleId || (scope !== 'location' && scope !== 'all_locations')) continue;
+      await grantableRole(this.client, ctx, roleId);
       const role = await this.client.query<{ code: string | null }>(
         `SELECT code FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [roleId, organizationId]
       );
-      if (role.rows[0]?.code === 'owner' && !actorIsOwner) {
+      if (role.rows[0]?.code === 'owner' && !ctx.isOwner) {
         throw new ValidationFailedError('Only the owner can assign the owner role.');
       }
       const locationId = text(assignment ?? {}, 'locationId');
+      if (scope === 'all_locations' && !ctx.isOwner) throw new ValidationFailedError('Only the owner can assign all locations.');
+      if (scope === 'location') {
+        if (!locationId) throw new ValidationFailedError('Location is required.');
+        await assignableLocation(this.client, ctx, locationId);
+      }
       await this.client.query(
         `INSERT INTO user_role_assignments (organization_id, user_id, role_id, scope, location_id, is_primary)
          VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,

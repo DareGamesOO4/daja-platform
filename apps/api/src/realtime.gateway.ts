@@ -57,6 +57,7 @@ const allowedEvents: RealtimeEvent[] = [
   allowRequest: (request, callback) => callback(null, allowedRealtimeOrigin(request.headers.origin))
 })
 export class RealtimeGateway {
+  private readonly authTimers = new Map<string, ReturnType<typeof setInterval>>();
   constructor(
     @Inject(AuthService) private readonly authService: AuthService,
     @Inject(CustomerAuthService) private readonly customerAuth: CustomerAuthService,
@@ -108,6 +109,12 @@ export class RealtimeGateway {
         socket.data.permissions = ctx.permissions;
         socket.data.locationId = ctx.locationId;
         socket.data.deviceId = ctx.deviceId;
+        this.monitorSession(socket, token, async () => {
+          const current = await this.authService.authenticateAccessToken(token, {
+            ...(ctx.locationId ? { locationId: ctx.locationId } : {})
+          });
+          return current.policyVersion === ctx.policyVersion;
+        });
         // Contributors only need their own reader scan room. Do not put them
         // in the organization-wide room, which contains unrelated staff
         // events such as orders and inventory updates.
@@ -122,6 +129,10 @@ export class RealtimeGateway {
           socket.data.organizationId = customer.organizationId;
           socket.data.customerId = customer.customerId;
           socket.data.customer = true;
+          this.monitorSession(socket, token, async () => {
+            await this.customerAuth.authenticateAccessToken(token);
+            return true;
+          });
           void socket.join(customerRoom(customer.organizationId, customer.customerId));
           return;
         } catch {
@@ -140,7 +151,7 @@ export class RealtimeGateway {
       return;
     }
 
-    if (process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
+    if (!['development', 'test'].includes(this.config.NODE_ENV) || process.env.TRUSTED_IDENTITY_HEADERS !== 'true') {
       deny(socket);
       return;
     }
@@ -170,6 +181,33 @@ export class RealtimeGateway {
     if (locationId) {
       void socket.join(locationRoom(organizationId, locationId));
     }
+  }
+
+  handleDisconnect(socket: Socket): void {
+    const timer = this.authTimers.get(socket.id);
+    if (timer) clearInterval(timer);
+    this.authTimers.delete(socket.id);
+  }
+
+  private monitorSession(socket: Socket, token: string, validate: () => Promise<boolean>): void {
+    // Token signature has already been verified by the auth service. Enforce
+    // its lifetime on a persistent connection and check revocation each minute.
+    const payload = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { exp: number };
+    // A transport close lets clients reconnect with renewed credentials.
+    // Explicit auth rejection below still permanently disconnects the socket.
+    const expiry = setTimeout(() => socket.conn.close(), Math.max(0, payload.exp * 1000 - Date.now()));
+    expiry.unref();
+    socket.once('disconnect', () => clearTimeout(expiry));
+    let pending = false;
+    const timer = setInterval(() => {
+      if (pending) return;
+      pending = true;
+      void validate().then(valid => { if (!valid) socket.disconnect(true); })
+        .catch(() => socket.disconnect(true)).finally(() => { pending = false; });
+    }, 60_000);
+    timer.unref();
+    this.authTimers.set(socket.id, timer);
+    if (!socket.connected) this.handleDisconnect(socket);
   }
 
   @SubscribeMessage('subscribe')

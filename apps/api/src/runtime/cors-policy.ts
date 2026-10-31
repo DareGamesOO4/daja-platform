@@ -5,7 +5,7 @@ export function allowedCorsOrigins(origins: string[], environment: string): stri
     (origin) =>
       origin !== '*' &&
       origin !== 'null' &&
-      (environment !== 'production' || !/^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(origin))
+      (!['production', 'staging'].includes(environment) || !/^https?:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(origin))
   );
 }
 

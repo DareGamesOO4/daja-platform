@@ -8,6 +8,7 @@ import {
   ResourceConflictError,
   ResourceNotFoundError,
   ValidationFailedError,
+  PermissionDeniedError,
   requirePermission
 } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
@@ -132,7 +133,7 @@ export class DevicePluginsService {
   }
 
   async listReleases(ctx: RequestContext): Promise<DevicePluginAdminRelease[]> {
-    this.requirePublisher(ctx);
+    await this.requirePublisher(ctx);
     const result = await this.database.pool.query<PluginReleaseRow>(
       `SELECT ${releaseColumns}
        FROM device_plugin_releases
@@ -145,7 +146,7 @@ export class DevicePluginsService {
     ctx: RequestContext,
     input: CreateDevicePluginRelease
   ): Promise<DevicePluginReleaseUpload> {
-    this.requirePublisher(ctx);
+    await this.requirePublisher(ctx);
     const release = createDevicePluginReleaseSchema.parse(input);
     const id = randomUUID();
     const storageKey = `platform/device-plugins/${release.id}/${release.version}/${id}.zip`;
@@ -209,7 +210,7 @@ export class DevicePluginsService {
     versionInput: string,
     source: Readable
   ): Promise<DevicePluginAdminRelease> {
-    this.requirePublisher(ctx);
+    await this.requirePublisher(ctx);
     const pluginId = pluginIdSchema.parse(pluginIdInput);
     const version = pluginVersionSchema.parse(versionInput);
     const release = await this.requireRelease(pluginId, version);
@@ -257,7 +258,7 @@ export class DevicePluginsService {
     pluginIdInput: string,
     versionInput: string
   ): Promise<DevicePluginManifest> {
-    this.requirePublisher(ctx);
+    await this.requirePublisher(ctx);
     const pluginId = pluginIdSchema.parse(pluginIdInput);
     const version = pluginVersionSchema.parse(versionInput);
     const release = await this.requireRelease(pluginId, version);
@@ -293,7 +294,7 @@ export class DevicePluginsService {
     pluginIdInput: string,
     versionInput: string
   ): Promise<void> {
-    this.requirePublisher(ctx);
+    await this.requirePublisher(ctx);
     const pluginId = pluginIdSchema.parse(pluginIdInput);
     const version = pluginVersionSchema.parse(versionInput);
     const result = await this.database.pool.query(
@@ -334,9 +335,15 @@ export class DevicePluginsService {
     return release;
   }
 
-  private requirePublisher(ctx: RequestContext): void {
+  private async requirePublisher(ctx: RequestContext): Promise<void> {
     requirePermission(ctx, 'catalog.write');
     requirePermission(ctx, 'admin.users');
+    // Native plugin code is shared by all tenants. Tenant administration
+    // alone must never grant the ability to publish code to other tenants.
+    if (ctx.organizationId !== this.config.PUBLIC_ORGANIZATION_ID) throw new PermissionDeniedError('plugins.publish');
+    const publishers = this.config.STOREFRONT_ADMIN_EMAILS.split(',').map(email => email.trim().toLowerCase()).filter(Boolean);
+    const user = await this.database.pool.query(`SELECT 1 FROM users WHERE organization_id=$1 AND id=$2 AND active AND normalized_email=ANY($3::text[])`, [ctx.organizationId, ctx.userId, publishers]);
+    if (!user.rowCount) throw new PermissionDeniedError('plugins.publish');
   }
 
   private storage(): R2MediaStorageAdapter {

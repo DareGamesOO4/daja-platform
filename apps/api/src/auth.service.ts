@@ -241,7 +241,7 @@ export class AuthService {
       const repo = new AuthRepository(client);
       const familyId = randomUUID();
       const refreshJti = randomUUID();
-      const refreshExpiresAt = expiresAt(this.config.REFRESH_TOKEN_TTL_SECONDS);
+      const refreshExpiresAt = expiresAt(Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900));
       await repo.ensureLoginDevice({
         organizationId: user.organizationId,
         userId: user.id,
@@ -286,7 +286,7 @@ export class AuthService {
         correlationId: input.correlationId ?? input.requestId ?? createRequestId(),
         payload: { customerId: input.customer.customerId }
       });
-      return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
+      return { principal, tokens: this.issueTokenPair(principal, refreshToken, input.customer) };
     });
   }
 
@@ -334,6 +334,13 @@ export class AuthService {
         sessionId: replacement.id
       });
       return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
+    }).catch(async (error: unknown) => {
+      // The failed refresh transaction rolls back. Persist family revocation
+      // separately, otherwise replay detection silently rolls back with it.
+      if (error instanceof InvalidTokenError) {
+        await new AuthRepository(this.database.pool).revokeSessionFamily(payload.org, familyId, 'refresh_reuse_detected');
+      }
+      throw error;
     });
   }
 
@@ -354,6 +361,13 @@ export class AuthService {
     }
     if (input.deviceId && input.deviceId !== payload.dev) {
       throw new PermissionDeniedError('device.match');
+    }
+    if (payload.parentCustomerId !== undefined || payload.parentCustomerFamilyId !== undefined) {
+      if (typeof payload.parentCustomerId !== 'string' || typeof payload.parentCustomerFamilyId !== 'string') throw new InvalidTokenError();
+      const parent = await this.database.pool.query(`SELECT 1 FROM customer_sessions
+        WHERE organization_id=$1 AND customer_id=$2 AND family_id=$3 AND revoked_at IS NULL AND expires_at>now() LIMIT 1`,
+      [payload.org, payload.parentCustomerId, payload.parentCustomerFamilyId]);
+      if (!parent.rowCount) throw new InvalidTokenError('Parent customer session is no longer active');
     }
     const repo = new AuthRepository(this.database.pool);
     if (typeof payload.sid === 'string') {
@@ -400,7 +414,7 @@ export class AuthService {
     return hash(password, { type: argon2id });
   }
 
-  private issueTokenPair(principal: StaffPrincipal, refreshToken: string): TokenPair {
+  private issueTokenPair(principal: StaffPrincipal, refreshToken: string, parent?: CustomerPrincipal): TokenPair {
     const accessToken = signJwt(
       {
         typ: 'access',
@@ -409,16 +423,17 @@ export class AuthService {
         fam: principal.sessionFamilyId,
         jti: randomUUID(),
         dev: principal.deviceId,
-        sid: principal.sessionId
+        sid: principal.sessionId,
+        ...(parent ? { parentCustomerId: parent.customerId, parentCustomerFamilyId: parent.sessionFamilyId } : {})
       },
       this.config.JWT_ACCESS_SECRET,
-      this.config.ACCESS_TOKEN_TTL_SECONDS
+      Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)
     );
     return {
       accessToken,
       refreshToken,
       tokenType: 'Bearer',
-      expiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS,
+      expiresIn: Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900),
       refreshExpiresIn: this.config.REFRESH_TOKEN_TTL_SECONDS
     };
   }

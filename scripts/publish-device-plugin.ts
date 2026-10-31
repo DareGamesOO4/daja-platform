@@ -9,6 +9,7 @@ import {
   S3Client
 } from '@aws-sdk/client-s3';
 import { Client } from 'pg';
+import { databaseConnectionOptions } from '../packages/database/src/pool.js';
 
 interface ReleaseRow {
   name: string;
@@ -83,8 +84,7 @@ async function main(): Promise<void> {
   const checksum = await sha256(options.archivePath);
 
   const database = new Client({
-    connectionString: requiredEnvironment('DATABASE_URL'),
-    ssl: { rejectUnauthorized: false }
+    ...databaseConnectionOptions(requiredEnvironment('DATABASE_URL'))
   });
   const storage = new S3Client({
     region: 'auto',

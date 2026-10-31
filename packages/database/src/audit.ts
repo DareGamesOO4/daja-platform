@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { RequestContext } from '@daja/shared';
+import { redactCredentials } from '@daja/security';
 
 export class AuditRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
@@ -28,8 +29,8 @@ export class AuditRepository {
         input.aggregateType,
         input.aggregateId,
         input.operation,
-        input.beforePayload === undefined ? null : JSON.stringify(input.beforePayload),
-        input.afterPayload === undefined ? null : JSON.stringify(input.afterPayload),
+        input.beforePayload === undefined ? null : JSON.stringify(redactCredentials(input.beforePayload)),
+        input.afterPayload === undefined ? null : JSON.stringify(redactCredentials(input.afterPayload)),
         input.reason ?? null,
         input.ctx.correlationId,
         input.ctx.requestId

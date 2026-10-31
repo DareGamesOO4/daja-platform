@@ -9,6 +9,7 @@ import { canManageSupplierChecks } from './supplier-access.js';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import type { Logger } from '@daja/observability';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { assertGrantablePermissions, assignableLocation, grantableRole, lockAccessPolicy, manageableUser, requireActiveOwner } from './access-policy.js';
 
 const assignmentSchema = z.object({
   roleId: z.string().uuid(),
@@ -105,6 +106,9 @@ export class AccessControlController {
     requireAnyPermission(ctx, ['users.create', 'admin.users']);
     const input = parse(createUserSchema, body);
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await lockAccessPolicy(client, ctx);
+      await grantableRole(client, ctx, input.roleId);
+      if (!ctx.isOwner) throw new ValidationFailedError('Only the owner can create an all-locations assignment.');
       const role = await client.query<{ id: string }>(
         `SELECT id FROM roles WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [input.roleId, ctx.organizationId]
@@ -114,7 +118,7 @@ export class AccessControlController {
         `INSERT INTO users (organization_id, email, display_name, active)
          VALUES ($1, lower($2), $3, true)
          ON CONFLICT (organization_id, normalized_email)
-         DO UPDATE SET display_name = EXCLUDED.display_name, active = true, updated_at = now()
+         DO NOTHING
          RETURNING id, email, display_name AS "displayName"`,
         [ctx.organizationId, input.email, input.displayName]
       );
@@ -146,6 +150,7 @@ export class AccessControlController {
 
   @Put('roles/:roleId/permissions')
   async updateRolePermissions(@Req() request: Request, @Param('roleId') roleId: string, @Body() body: unknown) {
+    roleId = parse(z.string().uuid(), roleId);
     const ctx = resolveRequestContext(request);
     requireAnyPermission(ctx, ['roles.manage_permissions', 'admin.users']);
     const input = parse(permissionSchema, body);
@@ -160,6 +165,9 @@ export class AccessControlController {
       if (target.rowCount !== 1) throw new Error('Administrator scope is insufficient.');
     }
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await lockAccessPolicy(client, ctx);
+      await grantableRole(client, ctx, roleId, true);
+      assertGrantablePermissions(ctx, input.permissions);
       await client.query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId]);
       await client.query(
         `INSERT INTO role_permissions (role_id, permission_id)
@@ -178,6 +186,7 @@ export class AccessControlController {
 
   @Put('users/:userId/assignments')
   async updateAssignments(@Req() request: Request, @Param('userId') userId: string, @Body() body: unknown) {
+    userId = parse(z.string().uuid(), userId);
     const ctx = resolveRequestContext(request);
     requireAnyPermission(ctx, ['users.update', 'admin.users']);
     const input = parse(assignmentsSchema, body);
@@ -189,6 +198,12 @@ export class AccessControlController {
       throw new Error('Only the owner can assign all locations.');
     }
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await lockAccessPolicy(client, ctx);
+      await manageableUser(client, ctx, userId);
+      for (const assignment of input.assignments) {
+        await grantableRole(client, ctx, assignment.roleId);
+        if (assignment.locationId) await assignableLocation(client, ctx, assignment.locationId);
+      }
       const user = await client.query(`SELECT 1 FROM users WHERE id = $1 AND organization_id = $2`, [userId, ctx.organizationId]);
       if (user.rowCount !== 1) throw new Error('User not found.');
       await client.query(`UPDATE user_role_assignments SET deleted_at = now(), updated_at = now(), version = version + 1 WHERE organization_id = $1 AND user_id = $2 AND deleted_at IS NULL`, [ctx.organizationId, userId]);
@@ -200,6 +215,7 @@ export class AccessControlController {
           [ctx.organizationId, userId, assignment.roleId, assignment.scope, assignment.locationId ?? null, assignment.primary ?? false]
         );
       }
+      await requireActiveOwner(client, ctx);
       await client.query(`UPDATE organization_access_policies SET policy_version = policy_version + 1, updated_at = now() WHERE organization_id = $1`, [ctx.organizationId]);
       return { updated: true, userId, assignments: input.assignments };
     });

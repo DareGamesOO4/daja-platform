@@ -20,6 +20,7 @@ import { requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { requireScopedPermission } from './access-policy.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 
@@ -271,6 +272,7 @@ export class SyncController {
   async conflicts(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.conflicts');
+    requireScopedPermission(ctx, ['sync.conflicts']);
     return new SyncRepository(this.database.pool).listConflicts(ctx, {
       status: query.status,
       limit: parseWithSchema(syncLimitSchema, query.limit)
@@ -282,6 +284,7 @@ export class SyncController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.conflicts');
     const conflictId = parseWithSchema(uuidSchema, id);
+    requireScopedPermission(ctx, ['sync.conflicts']);
     const input = parseWithSchema(conflictResolveSchema, body);
     const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const sync = new SyncRepository(client);

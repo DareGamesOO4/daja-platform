@@ -269,7 +269,9 @@ export class CustomerAuthController {
       correlationId: request.headers['x-correlation-id'] as string | undefined
     });
     return {
-      ...result.tokens,
+      accessToken: result.tokens.accessToken,
+      tokenType: result.tokens.tokenType,
+      expiresIn: result.tokens.expiresIn,
       user: {
         userId: result.principal.userId,
         email: result.principal.email,

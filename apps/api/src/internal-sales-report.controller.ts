@@ -4,6 +4,8 @@ import type { Database } from '@daja/database';
 import { requirePermission } from '@daja/security';
 import { DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { requireScopedPermission } from './access-policy.js';
+import { parseWithSchema, uuidSchema } from '@daja/validation';
 
 function reportDate(value: string | undefined, fallback: string): string {
   if (!value) return fallback;
@@ -19,6 +21,8 @@ export class InternalSalesReportController {
   async report(@Req() request: Request, @Query('from') fromValue?: string, @Query('to') toValue?: string, @Query('locationId') locationId?: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.read');
+    if (locationId) locationId = parseWithSchema(uuidSchema, locationId);
+    requireScopedPermission(ctx, ['reports.view', 'sales.view'], locationId);
     const today = new Date().toISOString().slice(0, 10);
     const from = reportDate(fromValue, today);
     const to = reportDate(toValue, today);

@@ -99,3 +99,4 @@ export function requirePermission(ctx: { permissions: string[] }, permission: st
 }
 
 export * from './jwt.js';
+export * from './redact-credentials.js';

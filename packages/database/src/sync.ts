@@ -3,6 +3,7 @@ import type pg from 'pg';
 import type { QueryResultRow } from 'pg';
 import {
   ResourceConflictError,
+  redactCredentials,
   ResourceNotFoundError,
   TenantAccessDeniedError,
   ValidationFailedError
@@ -51,6 +52,11 @@ export interface SyncEventRecord {
   baselineRevision: number | null;
   correlationId: string | null;
   businessCommandId: string | null;
+}
+
+function syncLocations(ctx: Pick<RequestContext, 'scopedGrants' | 'isOwner'>): string[] | null {
+  if (ctx.isOwner || ctx.scopedGrants?.some(grant => grant.permission === 'sync.read' && grant.scope === 'all_locations')) return null;
+  return [...new Set((ctx.scopedGrants ?? []).filter(grant => grant.permission === 'sync.read' && grant.scope === 'location' && grant.locationId).map(grant => grant.locationId!))];
 }
 
 export class SyncRepository {
@@ -136,7 +142,7 @@ export class SyncRepository {
         input.aggregateType,
         input.aggregateId,
         input.operation,
-        JSON.stringify(input.payload),
+        JSON.stringify(redactCredentials(input.payload)),
         input.payloadVersion ?? 1,
         input.baseVersion ?? null,
         input.clientTimestamp ?? null,
@@ -145,7 +151,7 @@ export class SyncRepository {
         input.correlationId ?? ctx.correlationId,
         input.locationId ?? null,
         input.deviceSequence ?? 0,
-        input.basePayload === undefined ? null : JSON.stringify(input.basePayload),
+        input.basePayload === undefined ? null : JSON.stringify(redactCredentials(input.basePayload)),
         input.offlinePackageId ?? null,
         input.baselineRevision ?? null,
         input.businessCommandId ?? null
@@ -228,7 +234,7 @@ export class SyncRepository {
   }
 
   async pull(
-    ctx: Pick<RequestContext, 'organizationId' | 'locationId'>,
+    ctx: Pick<RequestContext, 'organizationId' | 'locationId' | 'scopedGrants' | 'isOwner'>,
     input: { afterRevision: number; limit: number }
   ): Promise<{
     events: SyncEventRecord[];
@@ -246,21 +252,38 @@ export class SyncRepository {
        FROM server_sync_events
        WHERE organization_id = $1 AND revision > $2
          AND ($3::uuid IS NULL OR location_id IS NULL OR location_id = $3)
+         AND (location_id IS NULL OR $5::uuid[] IS NULL OR location_id = ANY($5::uuid[]))
+         AND (aggregate_type NOT IN ('user','role') OR $6)
        ORDER BY revision ASC
        LIMIT $4`,
-      [ctx.organizationId, input.afterRevision, ctx.locationId ?? null, input.limit + 1]
+      [ctx.organizationId, input.afterRevision, ctx.locationId ?? null, input.limit + 1, syncLocations(ctx), ctx.isOwner || ctx.scopedGrants?.some(grant => ['admin.users','users.view','roles.view'].includes(grant.permission) && grant.scope === 'all_locations') || false]
     );
-    const rows = result.rows.slice(0, input.limit).map(mapSyncEvent);
+    const scanned = result.rows.slice(0, input.limit).map(mapSyncEvent);
+    const locations = syncLocations(ctx);
+    const rows = locations === null ? scanned : scanned.filter(event => {
+      const allowed = new Set(locations);
+      const visible = (value: unknown): boolean => {
+        if (Array.isArray(value)) return value.every(visible);
+        if (value === null || typeof value !== 'object') return true;
+        return Object.entries(value).every(([key, item]) => {
+          if (/location_?id$/i.test(key)) {
+            return typeof item !== 'string' || allowed.has(item);
+          }
+          return visible(item);
+        });
+      };
+      return visible(event.payload) && visible(event.basePayload);
+    });
     return {
       events: rows,
-      nextRevision: rows.at(-1)?.revision ?? input.afterRevision,
+      nextRevision: scanned.at(-1)?.revision ?? input.afterRevision,
       hasMore: result.rows.length > input.limit,
       serverTime: new Date().toISOString()
     };
   }
 
   async bootstrapSnapshot(
-    ctx: Pick<RequestContext, 'organizationId'>,
+    ctx: Pick<RequestContext, 'organizationId' | 'scopedGrants' | 'isOwner'>,
     input: { limit: number; cursor?: string | undefined }
   ) {
     await this.ensureRevisionRow(ctx.organizationId);
@@ -303,6 +326,7 @@ export class SyncRepository {
                 (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
+           AND ($4::uuid[] IS NULL OR ib.location_id = ANY($4::uuid[]))
        ) inventory ON true
        LEFT JOIN LATERAL (
          SELECT amount_minor, valid_from, valid_until FROM variant_prices
@@ -321,12 +345,13 @@ export class SyncRepository {
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
            AND (t.variant_id = v.id OR ii.variant_id = v.id)
+           AND ($4::uuid[] IS NULL OR ii.current_location_id = ANY($4::uuid[]))
          ORDER BY t.updated_at DESC LIMIT 1
        ) tag ON true
        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
        ORDER BY p.id
        LIMIT $3`,
-      [ctx.organizationId, cursor, input.limit + 1]
+      [ctx.organizationId, cursor, input.limit + 1, syncLocations(ctx)]
     );
     const rows = result.rows.slice(0, input.limit);
     const [departments, brands, categories, specificationKeys, locations, warehouses, zones, bins, salesConfiguration] = await Promise.all([
@@ -349,33 +374,33 @@ export class SyncRepository {
       this.client.query(
         `SELECT id, code, name, type, active, version
          FROM locations
-         WHERE organization_id = $1 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND deleted_at IS NULL AND ($2::uuid[] IS NULL OR id = ANY($2::uuid[]))
          ORDER BY code, name`,
-        [ctx.organizationId]
+        [ctx.organizationId, syncLocations(ctx)]
       ),
       this.client.query(
         `SELECT id, location_id AS "locationId", code, name, active, version
          FROM warehouses
-         WHERE organization_id = $1 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND deleted_at IS NULL AND ($2::uuid[] IS NULL OR location_id = ANY($2::uuid[]))
          ORDER BY code, name`,
-        [ctx.organizationId]
+        [ctx.organizationId, syncLocations(ctx)]
       ),
       this.client.query(
         `SELECT id, warehouse_id AS "warehouseId", code, name,
                 display_order AS "displayOrder", active, version
          FROM warehouse_zones
-         WHERE organization_id = $1 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND deleted_at IS NULL AND ($2::uuid[] IS NULL OR warehouse_id IN (SELECT id FROM warehouses WHERE organization_id=$1 AND location_id=ANY($2::uuid[])))
          ORDER BY warehouse_id, display_order, code, name`,
-        [ctx.organizationId]
+        [ctx.organizationId, syncLocations(ctx)]
       ),
       this.client.query(
         `SELECT id, zone_id AS "zoneId", code, name, capacity,
                 low_stock_threshold AS "lowStockThreshold", display_order AS "displayOrder",
                 active, status, version
          FROM warehouse_bins
-         WHERE organization_id = $1 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND deleted_at IS NULL AND ($2::uuid[] IS NULL OR zone_id IN (SELECT z.id FROM warehouse_zones z JOIN warehouses w ON w.id=z.warehouse_id AND w.organization_id=z.organization_id WHERE z.organization_id=$1 AND w.location_id=ANY($2::uuid[])))
          ORDER BY zone_id, display_order, code, name`,
-        [ctx.organizationId]
+        [ctx.organizationId, syncLocations(ctx)]
       ),
       this.client.query(
         `SELECT services, staff, shifts, shift_overrides AS "shiftOverrides" FROM organization_sales_configuration WHERE organization_id = $1`,
@@ -419,7 +444,7 @@ export class SyncRepository {
        LIMIT $3`,
       [ctx.organizationId, status, input.limit]
     );
-    return result.rows;
+    return result.rows.map(row => redactCredentials(row));
   }
 
   async resolveConflict(
@@ -436,7 +461,7 @@ export class SyncRepository {
         ctx.organizationId,
         conflictId,
         input.status,
-        JSON.stringify(input.resolution),
+        JSON.stringify(redactCredentials(input.resolution)),
         input.reason,
         ctx.userId
       ]
@@ -509,8 +534,8 @@ export class SyncRepository {
         event.operation,
         event.baseVersion ?? null,
         conflict.serverVersion,
-        JSON.stringify(event.payload),
-        JSON.stringify(conflict.serverPayload),
+        JSON.stringify(redactCredentials(event.payload)),
+        JSON.stringify(redactCredentials(conflict.serverPayload)),
         'Base version does not match server version'
       ]
     );
@@ -632,14 +657,14 @@ function mapSyncEvent(row: SyncEventRow): SyncEventRecord {
     aggregateType: row.aggregate_type,
     aggregateId: row.aggregate_id,
     operation: row.operation,
-    payload: row.payload,
+    payload: redactCredentials(row.payload),
     payloadVersion: row.payload_version,
     baseVersion: row.base_version === null ? null : Number(row.base_version),
     clientTimestamp: row.client_timestamp,
     serverTimestamp: row.server_timestamp,
     idempotencyKey: row.idempotency_key,
     deviceSequence: row.device_sequence,
-    basePayload: row.base_payload,
+    basePayload: redactCredentials(row.base_payload),
     offlinePackageId: row.offline_package_id,
     baselineRevision: row.baseline_revision === null ? null : Number(row.baseline_revision),
     correlationId: row.correlation_id,

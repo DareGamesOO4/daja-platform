@@ -493,6 +493,13 @@ export class CustomerAuthService {
         user: serializeCustomerPrincipal(principal),
         ...this.issueTokenPair(principal, refreshToken)
       };
+    }).catch(async (error: unknown) => {
+      // The failed refresh transaction rolls back. Persist family revocation
+      // separately, otherwise replay detection silently rolls back with it.
+      if (error instanceof InvalidTokenError) {
+        await new StorefrontRepository(this.database.pool).revokeSessionFamily(payload.org, payload.sub, String(payload.fam), 'refresh_reuse_detected');
+      }
+      throw error;
     });
   }
 
@@ -578,13 +585,13 @@ export class CustomerAuthService {
         kind: 'customer'
       },
       this.config.JWT_ACCESS_SECRET,
-      this.config.ACCESS_TOKEN_TTL_SECONDS
+      Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)
     );
     return {
       accessToken,
       refreshToken,
       tokenType: 'Bearer',
-      expiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS,
+      expiresIn: Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900),
       refreshExpiresIn: this.config.REFRESH_TOKEN_TTL_SECONDS
     };
   }
