@@ -8,6 +8,7 @@ import {
   WebSocketServer
 } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createRequestId } from '@daja/shared';
 import { createLogger } from '@daja/observability';
 import type { AppConfig } from '@daja/config';
@@ -19,6 +20,8 @@ import { allowedRealtimeOrigin } from './runtime/cors-policy.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 import { invalidateCatalogPages } from './catalog-page.js';
 import { AdmissionBudget } from './runtime/abuse-protection.js';
+import { allowEdgeUpgrade, browserRequest } from './runtime/edge-ingress.js';
+import { BROWSER_COOKIES, browserStaffToken, cookieValue } from './runtime/browser-session.js';
 
 const transportBudget = new AdmissionBudget(1);
 
@@ -60,7 +63,7 @@ const allowedEvents: RealtimeEvent[] = [
   cors: { origin: (origin, callback) => callback(null, allowedRealtimeOrigin(origin)), credentials: true },
   // CORS alone does not reject raw WebSocket handshakes.
   allowRequest: (request, callback) => callback(null,
-    allowedRealtimeOrigin(request.headers.origin) && transportBudget.take('global', 600, 60_000))
+    allowEdgeUpgrade(request) && allowedRealtimeOrigin(request.headers.origin) && transportBudget.take('global', 600, 60_000))
 })
 export class RealtimeGateway {
   private readonly authTimers = new Map<string, ReturnType<typeof setInterval>>();
@@ -80,6 +83,11 @@ export class RealtimeGateway {
   afterInit(namespace: Namespace): void {
     const logger = createLogger(this.config, 'realtime');
     const engine = namespace.server.engine;
+    // Engine.IO handles polling outside Express, including requests with an
+    // existing sid. Check the gateway proof on every transport request.
+    engine.use((request: IncomingMessage, _response: ServerResponse, next: (error?: Error) => void) => {
+      next(allowEdgeUpgrade(request) ? undefined : new Error('Protected endpoint required'));
+    });
     // Log protocol diagnostics without request headers, query tokens or auth.
     engine.on('connection_error', (error: { code: number; message: string; req: { method?: string; _query?: Record<string, string> } }) => {
       logger.warn({
@@ -122,7 +130,11 @@ export class RealtimeGateway {
   }
 
   private async authenticateConnection(socket: Socket): Promise<void> {
-    const token = bearerToken(socket);
+    const token = browserRequest(socket.request)
+      ? socket.handshake.auth.sessionKind === 'staff'
+        ? browserStaffToken(socket.request.headers.cookie, this.config)
+        : cookieValue(socket.request.headers.cookie, BROWSER_COOKIES.customer)
+      : bearerToken(socket);
     if (token) {
       try {
         const ctx = await this.authService.authenticateAccessToken(token, {

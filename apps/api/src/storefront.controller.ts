@@ -18,7 +18,9 @@ import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import { StorefrontRepository, TransactionManager, type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission, ValidationFailedError } from '@daja/security';
+import { requirePermission, ValidationFailedError, verifyJwt } from '@daja/security';
+import { browserRequest } from './runtime/edge-ingress.js';
+import { beginBrowserOAuth, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { EngravingService } from './engraving.service.js';
@@ -172,7 +174,12 @@ export class CustomerAuthController {
 
   @Get('security-capabilities')
   securityCapabilities() {
-    return { googleOAuthBrowserState: true };
+    return { googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true };
+  }
+
+  @Get('browser-session')
+  browserSession(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    return browserSessionStatus(request, response, this.config);
   }
 
   @Post('register')
@@ -325,29 +332,31 @@ export class CustomerAuthController {
 
   @Post('oauth/google/link/start')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async googleOauthLinkStart(@Req() request: Request, @Body() body: unknown) {
+  async googleOauthLinkStart(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     const input = parseWithSchema(z.object({
       browserState: z.string().regex(/^[a-f0-9]{64}$/),
       returnTo: z.string().url().max(4096).optional()
     }), body);
-    return { url: this.auth.startGoogleLinkOAuth(customer, input.browserState, input.returnTo) };
+    return { url: this.auth.startGoogleLinkOAuth(customer, input.browserState, input.returnTo, beginBrowserOAuth(request, response)) };
   }
 
   @Get('oauth/google/start')
   googleOauthStart(
+    @Req() request: Request,
     @Query('returnTo') returnTo: string | undefined,
     @Query('browserState') browserState: unknown,
     @Res() response: Response
   ) {
     const organizationId = publicOrganizationId(this.config);
     const url = this.auth.startGoogleOAuth(organizationId,
-      parseWithSchema(z.string().regex(/^[a-f0-9]{64}$/), browserState), returnTo);
+      parseWithSchema(z.string().regex(/^[a-f0-9]{64}$/), browserState), returnTo, beginBrowserOAuth(request, response));
     response.redirect(url);
   }
 
   @Get('oauth/google/callback')
   async googleOauthCallback(
+    @Req() request: Request,
     @Res() response: Response,
     @Query('code') code: string | undefined,
     @Query('state') state: string | undefined,
@@ -368,12 +377,26 @@ export class CustomerAuthController {
       return;
     }
     try {
+      const statePayload = verifyJwt(state, this.config.JWT_ACCESS_SECRET, 'access');
+      const cookieSession = typeof statePayload.webCookieNonce === 'string';
+      if (cookieSession && !browserRequest(request)) {
+        // Preserve Google's registered redirect URI while moving the browser
+        // back onto the host that owns the HttpOnly nonce/session cookies.
+        const callback = new URL('/api/v1/customer-auth/oauth/google/callback', this.config.STOREFRONT_PUBLIC_BASE_URL);
+        callback.search = new URLSearchParams({ code, state }).toString();
+        response.setHeader('Cache-Control', 'no-store');
+        response.setHeader('Referrer-Policy', 'no-referrer');
+        response.redirect(303, callback.toString());
+        return;
+      }
+      if (cookieSession) validateBrowserOAuth(request, response, statePayload.webCookieNonce);
       const tokens = await this.auth.loginWithGoogle({
         organizationId: publicOrganizationId(this.config),
         code,
         state
       });
-      response.redirect(this.auth.oauthSuccessRedirect(tokens, state));
+      if (cookieSession) storeBrowserTokens(response, this.config, { ...tokens });
+      response.redirect(this.auth.oauthSuccessRedirect(tokens, state, cookieSession));
     } catch {
       response.redirect(this.auth.oauthErrorRedirect(state));
     }

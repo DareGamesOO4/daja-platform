@@ -6,6 +6,9 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'staging', 'production']),
   PORT: z.coerce.number().int().positive().max(65535),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
+  EDGE_SHARED_SECRET: z.string().default(''),
+  EDGE_ENFORCEMENT: z.enum(['off', 'observe', 'enforce']).default('off'),
+  BROWSER_SESSIONS_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   DATABASE_URL: z.string().url(),
   MIGRATION_DATABASE_URL: optionalPreparedSecret,
   REDIS_URL: z.string().url(),
@@ -85,5 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`Invalid environment configuration: ${details.join('; ')}`);
   }
 
+  if ((parsed.data.EDGE_ENFORCEMENT === 'enforce' || parsed.data.BROWSER_SESSIONS_ENABLED)
+    && parsed.data.EDGE_SHARED_SECRET.length < 32) throw new Error('EDGE_SHARED_SECRET must be configured before enabling edge enforcement or browser sessions');
   return parsed.data;
 }

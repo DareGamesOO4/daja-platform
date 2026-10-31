@@ -12,6 +12,8 @@ import { ApiExceptionFilter } from './api-exception.filter.js';
 import { EnvelopeInterceptor } from './envelope.interceptor.js';
 import { allowedCorsOrigins } from './cors-policy.js';
 import { admissionMiddleware } from './abuse-protection.js';
+import { edgeIngress } from './edge-ingress.js';
+import { BrowserSessionInterceptor, browserSessionMiddleware } from './browser-session.js';
 
 export function configureApiApp(app: INestApplication, config: AppConfig, logger: Logger): void {
   // Trust only the configured number of proxies, not an arbitrary forwarded
@@ -19,6 +21,7 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   const adapter = app.getHttpAdapter() as AbstractHttpAdapter;
   adapter.getInstance<{ set(name: string, value: number): void }>().set('trust proxy', config.TRUST_PROXY_HOPS);
   app.use(helmet());
+  app.use(edgeIngress(config));
   // Capacitor Android serves the mobile UI from these local origins. Keep
   // them enabled in code so a Render environment update cannot strand the
   // Reader Station with a browser-level "Failed to fetch" error.
@@ -32,6 +35,7 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   app.use(admissionMiddleware());
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: false, limit: '1mb' }));
+  app.use(browserSessionMiddleware(config));
   app.use((req: Request & { id?: string }, res: Response, next: NextFunction) => {
     // APIs may return customer data, staff records or signed download URLs.
     // Public handlers can explicitly opt into caching when appropriate.
@@ -73,7 +77,7 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
     })
   );
   app.useGlobalFilters(new ApiExceptionFilter());
-  app.useGlobalInterceptors(new EnvelopeInterceptor());
+  app.useGlobalInterceptors(new EnvelopeInterceptor(), app.get(BrowserSessionInterceptor));
 
   if (config.NODE_ENV !== 'production') {
     const document = SwaggerModule.createDocument(

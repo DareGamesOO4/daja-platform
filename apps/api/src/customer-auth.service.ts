@@ -289,7 +289,7 @@ export class CustomerAuthService {
     });
   }
 
-  startGoogleOAuth(organizationId: string, browserState: string, returnTo?: string): string {
+  startGoogleOAuth(organizationId: string, browserState: string, returnTo?: string, webCookieNonce?: string): string {
     this.assertGoogleOAuthConfigured();
     if (!/^[a-f0-9]{64}$/.test(browserState)) throw new InvalidTokenError();
     const state = signJwt(
@@ -300,6 +300,7 @@ export class CustomerAuthService {
         jti: randomUUID(),
         provider: 'google',
         browserState,
+        webCookieNonce,
         returnTo: this.resolveOAuthReturnUrl(returnTo)
       },
       this.config.JWT_ACCESS_SECRET,
@@ -308,7 +309,7 @@ export class CustomerAuthService {
     return this.googleAuthorizationUrl(state);
   }
 
-  startGoogleLinkOAuth(customer: CustomerPrincipal, browserState: string, returnTo?: string): string {
+  startGoogleLinkOAuth(customer: CustomerPrincipal, browserState: string, returnTo?: string, webCookieNonce?: string): string {
     this.assertGoogleOAuthConfigured();
     if (!customer.email || !customer.sessionId || !/^[a-f0-9]{64}$/.test(browserState)) {
       throw new InvalidTokenError();
@@ -324,6 +325,7 @@ export class CustomerAuthService {
         linkCustomerId: customer.customerId,
         linkSessionId: customer.sessionId,
         linkFamilyId: customer.sessionFamilyId,
+        webCookieNonce,
         browserState,
         returnTo: this.resolveOAuthReturnUrl(returnTo)
       },
@@ -552,15 +554,14 @@ export class CustomerAuthService {
     };
   }
 
-  oauthSuccessRedirect(tokens: CustomerTokenPair, state?: string): string {
+  oauthSuccessRedirect(tokens: CustomerTokenPair, state?: string, cookieSession = false): string {
     const url = new URL(this.oauthReturnUrlFromState(state));
     const browserState = state ? verifyJwt(state, this.config.JWT_ACCESS_SECRET, 'access').browserState : undefined;
     if (typeof browserState !== 'string' || !/^[a-f0-9]{64}$/.test(browserState)) throw new InvalidTokenError();
     url.hash = new URLSearchParams({
       oauth: 'success',
       browserState,
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken
+      ...(cookieSession ? { session: 'cookie' } : { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken })
     }).toString();
     return url.toString();
   }

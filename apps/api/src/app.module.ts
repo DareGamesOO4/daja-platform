@@ -1,6 +1,7 @@
 import { MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { clientNetwork } from './runtime/abuse-protection.js';
+import { BrowserSessionInterceptor } from './runtime/browser-session.js';
 import { APP_GUARD } from '@nestjs/core';
 import type { RequestWithAuthContext } from './auth.controller.js';
 import { loadConfig } from '@daja/config';
@@ -105,6 +106,7 @@ const logger = createLogger(config, 'api');
     ,ReaderStationController
   ],
   providers: [
+    BrowserSessionInterceptor,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     EngravingService,
     { provide: CONFIG, useValue: config },
