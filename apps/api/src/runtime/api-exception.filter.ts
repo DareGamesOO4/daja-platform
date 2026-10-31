@@ -1,17 +1,25 @@
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import { Catch, HttpException, HttpStatus } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { AppError, ERROR_CODES } from '@daja/security';
+import { browserRequest } from './edge-ingress.js';
+import { clearBrowserSession } from './browser-session.js';
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
-    const request = ctx.getRequest<{ id?: string }>();
+    const request = ctx.getRequest<Request & { id?: string }>();
     const requestId = request.id ?? response.getHeader('x-request-id')?.toString() ?? 'unknown';
 
     if (exception instanceof AppError) {
+      if (exception.statusCode === 401 && request.path === '/api/v1/customer-auth/refresh' && browserRequest(request)) {
+        // JavaScript cannot clear HttpOnly cookies. A revoked refresh family
+        // must be removed by the server, or a later session probe could keep
+        // rediscovering its still-signed cookie and retrying indefinitely.
+        clearBrowserSession(response);
+      }
       if (exception.statusCode === 429 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '900');
       if (exception.statusCode === 503 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '5');
       response.status(exception.statusCode).json({
