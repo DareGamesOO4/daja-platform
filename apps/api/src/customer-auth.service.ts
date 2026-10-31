@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import type pg from 'pg';
 import { Inject, Injectable } from '@nestjs/common';
 import { argon2id, hash, verify } from './password-work.js';
 import type { AppConfig } from '@daja/config';
@@ -110,6 +111,8 @@ export class CustomerAuthService {
       const repo = new StorefrontRepository(client);
       const reset = await repo.consumeCustomerPasswordReset(sha256Hex(input.token));
       await repo.lockCustomerForAuthentication(reset.organizationId, reset.customerId);
+      await client.query('DELETE FROM webauthn_credentials WHERE organization_id=$1 AND customer_id=$2',
+        [reset.organizationId, reset.customerId]);
       await client.query(`UPDATE customer_identities SET active=false, updated_at=now()
         WHERE organization_id=$1 AND customer_id=$2 AND provider='password'`,
       [reset.organizationId, reset.customerId]);
@@ -596,7 +599,8 @@ export class CustomerAuthService {
           fam: current.familyId,
           jti: replacementJti,
           kind: 'customer',
-          authMethod: payload.authMethod
+          authMethod: payload.authMethod,
+          authTime: payload.authTime
         },
         this.config.JWT_REFRESH_SECRET,
         this.config.REFRESH_TOKEN_TTL_SECONDS
@@ -647,7 +651,8 @@ export class CustomerAuthService {
     });
     const authMethod = customerAuthMethod(payload.authMethod);
     this.assertSafeLinkedAccount(principal, authMethod);
-    return { ...principal, ...(authMethod ? { authMethod } : {}) };
+    return { ...principal, ...(authMethod ? { authMethod } : {}),
+      ...(typeof payload.authTime === 'number' ? { authenticatedAt: payload.authTime } : {}) };
   }
 
   async logout(token: string | undefined): Promise<void> {
@@ -671,11 +676,19 @@ export class CustomerAuthService {
     return this.authenticateAccessToken(token);
   }
 
+  async completePasskeyLogin(client: pg.PoolClient, organizationId: string, customerId: string) {
+    const repo = new StorefrontRepository(client);
+    const session = await this.createSession(repo, organizationId, customerId, 'passkey');
+    const principal = await repo.buildCustomerPrincipal({ organizationId, customerId,
+      sessionFamilyId: session.familyId, sessionId: session.id });
+    return { user: serializeCustomerPrincipal(principal), ...this.issueTokenPair(principal, session.refreshToken) };
+  }
+
   private async createSession(
     repo: StorefrontRepository,
     organizationId: string,
     customerId: string,
-    authMethod: 'google' | 'password' | 'phone' = 'password'
+    authMethod: 'google' | 'password' | 'phone' | 'passkey' = 'password'
   ): Promise<{ id: string; familyId: string; refreshToken: string }> {
     const familyId = randomUUID();
     const refreshJti = randomUUID();
@@ -687,7 +700,8 @@ export class CustomerAuthService {
         fam: familyId,
         jti: refreshJti,
         kind: 'customer',
-        authMethod
+        authMethod,
+        authTime: Math.floor(Date.now() / 1000)
       },
       this.config.JWT_REFRESH_SECRET,
       this.config.REFRESH_TOKEN_TTL_SECONDS
@@ -716,7 +730,8 @@ export class CustomerAuthService {
         jti: randomUUID(),
         sid: principal.sessionId,
         kind: 'customer',
-        authMethod
+        authMethod,
+        authTime: refresh.authTime
       },
       this.config.JWT_ACCESS_SECRET,
       Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)
@@ -821,7 +836,7 @@ function googleDisplayName(profile: GoogleProfile): string {
 }
 
 function customerAuthMethod(value: unknown): CustomerPrincipal['authMethod'] {
-  return value === 'google' || value === 'password' || value === 'phone' ? value : undefined;
+  return value === 'google' || value === 'password' || value === 'phone' || value === 'passkey' ? value : undefined;
 }
 
 export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
@@ -836,6 +851,7 @@ export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
     active: principal.active,
     hasPassword: principal.hasPassword,
     googleLinked: principal.googleLinked,
+    passkeyCount: principal.passkeyCount ?? 0,
     organizationId: principal.organizationId
   };
 }

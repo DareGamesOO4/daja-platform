@@ -20,7 +20,9 @@ export interface CustomerPrincipal {
   hasPassword: boolean;
   googleLinked: boolean;
   /** Provenance of this authenticated session, never inferred from linked identities. */
-  authMethod?: 'google' | 'password' | 'phone';
+  authMethod?: 'google' | 'password' | 'phone' | 'passkey';
+  authenticatedAt?: number;
+  passkeyCount?: number;
   sessionFamilyId: string;
   sessionId?: string;
 }
@@ -638,7 +640,9 @@ export class StorefrontRepository {
              AND ci.customer_id = c.id
              AND ci.provider = 'google'
              AND ci.active
-         ) AS google_linked
+         ) AS google_linked,
+         (SELECT count(*) FROM webauthn_credentials wc
+           WHERE wc.organization_id=c.organization_id AND wc.customer_id=c.id AND wc.rp_id IS NOT NULL) AS passkey_count
        FROM customers c
        WHERE c.organization_id = $1 AND c.id = $2 AND c.deleted_at IS NULL`,
       [input.organizationId, input.customerId]
@@ -1777,6 +1781,7 @@ interface CustomerRow {
   updated_at: Date;
   has_password?: boolean;
   google_linked?: boolean;
+  passkey_count?: string;
 }
 
 interface CustomerLoginRow extends CustomerRow {
@@ -1913,6 +1918,7 @@ function mapCustomerPrincipal(
     active: row.active,
     hasPassword: Boolean(row.has_password),
     googleLinked: Boolean(row.google_linked),
+    passkeyCount: Number(row.passkey_count ?? 0),
     sessionFamilyId,
     ...(sessionId ? { sessionId } : {})
   };

@@ -9,7 +9,7 @@ import { browserRequest, equalSecret } from './edge-ingress.js';
 
 export const BROWSER_COOKIES = {
   customer: '__Host-daja_customer', refresh: '__Host-daja_refresh',
-  staff: '__Host-daja_staff', csrf: '__Host-daja_csrf', oauth: '__Host-daja_oauth'
+  staff: '__Host-daja_staff', csrf: '__Host-daja_csrf', oauth: '__Host-daja_oauth', passkey: '__Host-daja_passkey'
 } as const;
 
 export function cookieValue(header: string | undefined, name: string): string | undefined {
@@ -117,7 +117,11 @@ export function storeBrowserTokens(response: Response, config: AppConfig, data: 
       verifyJwt(data.refreshToken, config.JWT_REFRESH_SECRET, 'refresh');
       setCookie(response, BROWSER_COOKIES.refresh, data.refreshToken, config.REFRESH_TOKEN_TTL_SECONDS);
       // A new customer login must not inherit a different customer's staff role.
-      if (data.newLogin !== false) setCookie(response, BROWSER_COOKIES.staff, '', 0);
+      if (data.newLogin !== false) {
+        setCookie(response, BROWSER_COOKIES.staff, '', 0);
+        setCookie(response, BROWSER_COOKIES.oauth, '', 0);
+        setCookie(response, BROWSER_COOKIES.passkey, '', 0);
+      }
     }
   }
   for (const field of ['accessToken', 'refreshToken', 'access_token', 'refresh_token', 'tokenType', 'newLogin']) delete result[field];
@@ -128,6 +132,21 @@ export function beginBrowserOAuth(request: Request, response: Response): string 
   if (!browserRequest(request)) return undefined;
   const nonce = randomBytes(32).toString('hex');
   setCookie(response, BROWSER_COOKIES.oauth, nonce, 600);
+  return nonce;
+}
+
+export function beginBrowserPasskey(request: Request, response: Response): string {
+  if (!browserRequest(request)) throw new InvalidTokenError();
+  const nonce = randomBytes(32).toString('hex');
+  setCookie(response, BROWSER_COOKIES.passkey, nonce, 300);
+  return nonce;
+}
+
+export function consumeBrowserPasskey(request: Request, response: Response): string {
+  if (!browserRequest(request)) throw new InvalidTokenError();
+  const nonce = cookieValue(request.headers.cookie, BROWSER_COOKIES.passkey);
+  setCookie(response, BROWSER_COOKIES.passkey, '', 0);
+  if (!nonce || !/^[a-f0-9]{64}$/.test(nonce)) throw new InvalidTokenError();
   return nonce;
 }
 

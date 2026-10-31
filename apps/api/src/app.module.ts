@@ -34,6 +34,7 @@ import { OfflineInventoryController } from './offline-inventory.controller.js';
 import { DevicePluginsController } from './device-plugins.controller.js';
 import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
+import { CustomerPasskeysService } from './customer-passkeys.service.js';
 import { PhoneOtpService } from './phone-otp.service.js';
 import { SmsDeliveryService } from './sms-delivery.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
@@ -116,6 +117,7 @@ const logger = createLogger(config, 'api');
     AuthMiddleware,
     AuthService,
     CustomerAuthService,
+    CustomerPasskeysService,
     PhoneOtpService,
     SmsDeliveryService,
     DesktopGoogleOAuthService,

@@ -30,7 +30,7 @@ export async function proxyApi(request, env, browser = false) {
   if (browser) {
     headers.delete('Authorization');
     const cookies = (headers.get('Cookie') || '').split(';').map(part => part.trim())
-      .filter(part => /^__Host-daja_(?:customer|refresh|staff|csrf|oauth)=/.test(part));
+      .filter(part => /^__Host-daja_(?:customer|refresh|staff|csrf|oauth|passkey)=/.test(part));
     if (cookies.length) headers.set('Cookie', cookies.join('; ')); else headers.delete('Cookie');
   } else {
     headers.delete('Cookie');

@@ -31,6 +31,14 @@ Potvrđeni su gateway HTTP 200 i javni WebSocket preko oba nova ulaza, i odbijan
 odgovarajućih direktnih Render zahteva. Rad fizičkog RFID uređaja i uspešan
 Google/admin login nisu potvrđeni. Pre/posle merenja su laboratorijska, sa jednog računara.
 
+## Dopuna izvornog koda: passkey i uklanjanje prethodnog provajdera, 31.10.2026.
+
+- Web customer passkey rute sada imaju SimpleWebAuthn verifikaciju, Redis jednokratne izazove i PostgreSQL javne ključeve. Migracija 091 dodaje RP/binding metapodatke i uklanja penzionisani OAuth provajder i njegove veze, bez brisanja kupaca ili porudžbina.
+- Passkey se dodaje iz nedavno prijavljenog naloga sa potvrđenim emailom. Prijava zahteva user verification i koristi postojeće HttpOnly browser sesije. Browser prolaz sada prosleđuje i __Host-daja_passkey nonce cookie.
+- Passkey prijava je za storefront kupce; razmena za administrativnu/staff sesiju i dalje zahteva Google. Native RFID Google/bearer tok nije promenjen.
+- Cloudflare Pages dajashopweb: uklonjen je VITE_FACEBOOK_APP_ID iz production konfiguracije; ostale promenljive su provereno očuvane. Preview nije imao takve promenljive.
+- Lokalno su provereni virtuelni autentikator, PostgreSQL mehanizam i kompajlirani handler-i. Produkcijsko izvršavanje migracije, fizički autentikator i završetak deploy-a nisu proveravani. Detalji su u docs/AUTH_PASSKEYS.md u web/backend projektima.
+
 ## Istorijski snimak infrastrukture, 28.10.2026.
 
 Pregled: 28.10.2026, Europe/Belgrade. Izvori: uspešni read-only pozivi Render, Cloudflare i AWS konektora, PostgreSQL SELECT nad šemom i zbirnim email stanjem, lokalni izvorni kod i odabrana javna podešavanja. Ovo je snimak stanja, ne potvrda rada svih funkcija.

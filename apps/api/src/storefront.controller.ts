@@ -23,6 +23,9 @@ import { browserRequest } from './runtime/edge-ingress.js';
 import { beginBrowserOAuth, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
+import { CustomerPasskeysService } from './customer-passkeys.service.js';
+import { beginBrowserPasskey, consumeBrowserPasskey, clearBrowserSession } from './runtime/browser-session.js';
+import type { RegistrationResponseJSON, AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { EngravingService } from './engraving.service.js';
 import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
@@ -166,6 +169,7 @@ export class CustomerAuthController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
+    @Inject(CustomerPasskeysService) private readonly passkeys: CustomerPasskeysService,
     @Inject(AuthService) private readonly staffAuth: AuthService,
     @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService,
     @Inject(PhoneOtpService) private readonly phoneOtp: PhoneOtpService,
@@ -174,7 +178,7 @@ export class CustomerAuthController {
 
   @Get('security-capabilities')
   securityCapabilities() {
-    return { googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true };
+    return { googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true, passkeys: true };
   }
 
   @Get('browser-session')
@@ -403,23 +407,47 @@ export class CustomerAuthController {
   }
 
   @Post('passkeys/register-challenge')
-  passkeyRegisterChallenge() {
-    return { supported: false, reason: 'Passkey attestation is not configured yet' };
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async passkeyRegisterChallenge(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(z.object({ name: z.string().trim().min(1).max(80).default('Moj passkey') }), body);
+    this.passkeys.context(request.headers.origin);
+    return this.passkeys.registerStart(customer, input.name, beginBrowserPasskey(request, response), request.headers.origin);
   }
 
   @Post('passkeys/register-verify')
-  passkeyRegisterVerify() {
-    return { supported: false, reason: 'Passkey attestation is not configured yet' };
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async passkeyRegisterVerify(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = passkeyResponse(body);
+    return this.passkeys.registerFinish(customer, input as RegistrationResponseJSON, consumeBrowserPasskey(request, response), request.headers.origin);
   }
 
   @Post('passkeys/login-challenge')
-  passkeyLoginChallenge() {
-    return { supported: false, reason: 'Passkey assertion is not configured yet' };
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  passkeyLoginChallenge(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    this.passkeys.context(request.headers.origin);
+    return this.passkeys.loginStart(publicOrganizationId(this.config), beginBrowserPasskey(request, response), request.headers.origin);
   }
 
   @Post('passkeys/login-verify')
-  passkeyLoginVerify() {
-    return { supported: false, reason: 'Passkey assertion is not configured yet' };
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  passkeyLoginVerify(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    return this.passkeys.loginFinish(publicOrganizationId(this.config), passkeyResponse(body) as AuthenticationResponseJSON,
+      consumeBrowserPasskey(request, response), request.headers.origin);
+  }
+
+  @Get('passkeys')
+  async passkeyList(@Req() request: Request) {
+    return this.passkeys.list(await this.auth.requireCustomer(bearerToken(request)));
+  }
+
+  @Delete('passkeys/:id')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async passkeyRemove(@Req() request: Request, @Param('id') id: string, @Res({ passthrough: true }) response: Response) {
+    const result = await this.passkeys.remove(await this.auth.requireCustomer(bearerToken(request)), parseWithSchema(uuidSchema, id));
+    if (browserRequest(request)) clearBrowserSession(response);
+    return result;
   }
 }
 
@@ -984,6 +1012,29 @@ export class StorefrontMediaController {
       ]
     };
   }
+}
+
+const webauthnBase64 = (maximum: number) => z.string().min(1).max(maximum).regex(/^[A-Za-z0-9_-]+$/);
+
+function passkeyResponse(body: unknown) {
+  const input = parseWithSchema(z.object({ credential: z.object({
+    id: webauthnBase64(1400), rawId: webauthnBase64(1400), type: z.literal('public-key'),
+    authenticatorAttachment: z.enum(['platform', 'cross-platform']).nullable().optional(),
+    clientExtensionResults: z.object({ credProps: z.object({ rk: z.boolean().optional() }).optional() }).default({}),
+    response: z.object({
+      clientDataJSON: webauthnBase64(16_384), attestationObject: webauthnBase64(32_768).optional(),
+      authenticatorData: webauthnBase64(8192).optional(), signature: webauthnBase64(8192).optional(),
+      userHandle: webauthnBase64(128).nullable().optional(),
+      transports: z.array(z.enum(['ble','cable','hybrid','internal','nfc','smart-card','usb'])).max(10).optional(),
+      publicKey: webauthnBase64(8192).optional(), publicKeyAlgorithm: z.number().int().optional()
+    })
+  }) }), body).credential;
+  if (input.id !== input.rawId) throw new ValidationFailedError('Neispravan passkey odgovor.');
+  try {
+    const client = JSON.parse(Buffer.from(input.response.clientDataJSON, 'base64url').toString('utf8')) as Record<string, unknown>;
+    if (!client || typeof client !== 'object' || client.crossOrigin === true || client.topOrigin !== undefined) throw new Error();
+  } catch { throw new ValidationFailedError('Neispravan passkey odgovor.'); }
+  return input;
 }
 
 function publicOrganizationId(config: AppConfig): string {
