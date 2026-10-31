@@ -14,7 +14,7 @@ privatne kopije i bezbedan povratak opisani su u `docs/EDGE_SESSION_ROLLOUT.md`.
   `workers.dev` i preview pristup za gateway su isključeni.
 - Render origin ostaje `https://daja-platform-api.onrender.com`. U režimu
   `EDGE_ENFORCEMENT=enforce` poslovni HTTP i Engine.IO zahtevi bez serverskog
-  dokaza se odbijaju. Health probe imaju zasebna ograničenja i ostaju dostupne.
+  dokaza se odbijaju. Health probe ostaju dostupne i ne dele potrošivu kvotu sa javnim zahtevima; readiness grupiše provere na 2 s.
 - `EDGE_SHARED_SECRET` je serverska tajna na Render API-ju, Pages-u i API Worker-u.
   Vrednost nije deo dokumentacije, frontend build promenljivih ili Git-a.
   Render `BROWSER_SESSIONS_ENABLED=true`; ove promenljive se upravljaju kroz
