@@ -46,14 +46,13 @@ export function admissionMiddleware(): RequestHandler {
   let total = 0;
   return (request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
-    const network = clientNetwork(request.ip ?? request.socket.remoteAddress ?? 'unknown');
     if (request.path === '/health/live' || request.path === '/health/ready') {
-      // Separate budget keeps probes independent of normal API saturation.
-      if (budget.take('health-global', 300, 60_000) && budget.take(`health:${network}`, 60, 60_000)) return next();
-      response.setHeader('Retry-After', '60');
-      response.status(429).json({ error: { code: 'RATE_LIMITED', message: 'Too many requests', details: {} } });
-      return;
+      // A public caller must not exhaust a shared quota and make Render's
+      // own health probes fail. Readiness coalesces/caches dependency work
+      // with a deadline in HealthController; liveness performs no I/O.
+      return next();
     }
+    const network = clientNetwork(request.ip ?? request.socket.remoteAddress ?? 'unknown');
     if (!budget.take('global', 6000, 60_000) || !budget.take(network, 1200, 60_000)) {
       response.setHeader('Retry-After', '60');
       response.status(429).json({ error: { code: 'RATE_LIMITED', message: 'Too many requests', details: {} } });

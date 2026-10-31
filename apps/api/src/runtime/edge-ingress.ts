@@ -43,4 +43,3 @@ export function edgeIngress(config: AppConfig): RequestHandler {
 export function allowEdgeUpgrade(request: IncomingMessage): boolean {
   return process.env.EDGE_ENFORCEMENT !== 'enforce' || trustedEdge(request);
 }
-

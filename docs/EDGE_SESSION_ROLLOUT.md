@@ -31,6 +31,9 @@ odvojeno. Zatečene korisničke izmene `.env.example` i `.idea` nisu uključene 
 - Izuzeci su samo ograničeni health endpointi. Proveren Google callback je
   `https://dajashop.rs/api/v1/customer-auth/oauth/google/callback` i prolazi kroz
   Pages. Signed OAuth state i browser nonce ostaju obavezni.
+- Health ne deli potrošivu HTTP kvotu sa javnim korisnicima: oni ne smeju
+  iscrpeti kvotu i izazvati pad Render probe. Liveness ne radi I/O, a readiness
+  grupiše/cache-ira provere na 2 s i ima vremensku granicu odgovora.
 - Cloudflare ograničava saobraćaj pre aplikacije, ali serverski dokaz nije mrežna
   izolacija Rendera. Javni origin i dalje prima mrežni saobraćaj i odbija poslovne zahteve.
 
