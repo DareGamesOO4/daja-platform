@@ -91,6 +91,12 @@ interface CanonicalCartLine {
   productId: string;
   variantId: string;
   legacyProductId: string | null;
+  name: string;
+  slug: string;
+  brand: string;
+  sku: string;
+  image: string;
+  thumb: string;
   categoryId: string | null;
   brandId: string | null;
   departmentId: string | null;
@@ -155,7 +161,7 @@ export class PromotionsService {
   }
 
   async audience(organizationId: string, limit = 500) {
-    const result = await this.database.pool.query(
+    const result = await this.database.pool.query<Record<string, unknown>>(
       `SELECT c.id,
               c.display_name AS "displayName",
               c.email,
@@ -336,20 +342,27 @@ export class PromotionsService {
     const products = new Map(lines.filter((line) => line.legacyProductId).map((line) => [line.legacyProductId, line]));
     const pricedItems = items.map((item) => {
       const variantId = typeof item.variantId === 'string' ? item.variantId.toLowerCase() : null;
-      const productId = String(item.productId ?? item.id ?? '').toLowerCase();
+      const rawProductId = item.productId ?? item.id;
+      const productId = typeof rawProductId === 'string' ? rawProductId.toLowerCase() : '';
       const line = variantId ? variants.get(variantId) : products.get(productId);
       if (!line || (productId && productId !== line.productId)) {
         throw new ValidationFailedError('Proizvod i varijanta iz korpe se ne podudaraju.');
       }
       const quantity = Number(item.qty ?? item.quantity ?? 1);
       return {
-        ...item,
         id: line.productId,
         productId: line.productId,
         variantId: line.variantId,
+        name: line.name,
+        slug: line.slug,
+        brand: line.brand,
+        sku: line.sku,
+        image: line.image,
+        thumb: line.thumb,
         price: line.priceMinor / 100,
         qty: quantity,
-        quantity
+        quantity,
+        ...(item.engraving ? { engraving: item.engraving } : {})
       };
     });
     const subtotalMinor = lines.reduce((sum, line) => sum + line.priceMinor * line.quantity, 0);
@@ -830,6 +843,12 @@ async function canonicalCartLines(
     product_id: string;
     variant_id: string;
     legacy_product_id: string | null;
+    name: string;
+    slug: string;
+    brand: string | null;
+    sku: string | null;
+    image: string | null;
+    thumb: string | null;
     category_id: string | null;
     brand_id: string | null;
     department_id: string | null;
@@ -865,6 +884,12 @@ async function canonicalCartLines(
      SELECT p.id AS product_id,
             v.id AS variant_id,
             selected_variants.legacy_product_id,
+            p.name,
+            p.slug,
+            brand.name AS brand,
+            v.sku,
+            primary_asset.public_url AS image,
+            thumb.public_url AS thumb,
             p.primary_category_id AS category_id,
             p.brand_id AS brand_id,
             p.department_id AS department_id,
@@ -876,6 +901,26 @@ async function canonicalCartLines(
        ON v.id = selected_variants.variant_id AND v.organization_id = $1
      JOIN products p
        ON p.id = v.product_id AND p.organization_id = v.organization_id
+     LEFT JOIN brands brand
+       ON brand.id = p.brand_id AND brand.organization_id = p.organization_id
+     LEFT JOIN LATERAL (
+       SELECT ma.id, ma.public_url
+       FROM product_media pm
+       JOIN media_assets ma
+         ON ma.id = pm.media_asset_id AND ma.organization_id = pm.organization_id
+        AND ma.status = 'ready' AND ma.deleted_at IS NULL
+       WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
+         AND (pm.variant_id IS NULL OR pm.variant_id = v.id)
+       ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
+       LIMIT 1
+     ) primary_asset ON true
+     LEFT JOIN LATERAL (
+       SELECT md.public_url
+       FROM media_derivatives md
+       WHERE md.media_asset_id = primary_asset.id AND md.organization_id = p.organization_id
+       ORDER BY md.width ASC, md.id
+       LIMIT 1
+     ) thumb ON true
      LEFT JOIN LATERAL (
        SELECT amount_minor FROM variant_prices
        WHERE organization_id = v.organization_id
@@ -911,6 +956,12 @@ async function canonicalCartLines(
       productId: row.product_id,
       variantId: row.variant_id,
       legacyProductId: row.legacy_product_id,
+      name: row.name,
+      slug: row.slug,
+      brand: row.brand ?? '',
+      sku: row.sku ?? '',
+      image: row.image ?? '',
+      thumb: row.thumb ?? '',
       categoryId: row.category_id,
       brandId: row.brand_id,
       departmentId: row.department_id,
@@ -963,6 +1014,7 @@ function specificationMatches(
     (rule.specKeySlug ? line.attributes[rule.specKeySlug] : undefined) ??
     (rule.specKeyName ? line.attributes[rule.specKeyName] : undefined);
   if (raw === undefined || raw === null) return false;
+  if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') return false;
   const actual = String(raw).trim().toLocaleLowerCase('sr-RS');
   const expected = rule.value.trim().toLocaleLowerCase('sr-RS');
   return rule.operator === 'contains' ? actual.includes(expected) : actual === expected;
@@ -1005,8 +1057,8 @@ function normalizeScope(scope: Partial<PromotionScope> | undefined): PromotionSc
 function parseProductRules(value: unknown) {
   const raw = asObject(value);
   return normalizeProductRules({
-    include: asObject(raw.include) as Partial<PromotionScope>,
-    exclude: asObject(raw.exclude) as Partial<PromotionScope>
+    include: asObject(raw.include),
+    exclude: asObject(raw.exclude)
   });
 }
 

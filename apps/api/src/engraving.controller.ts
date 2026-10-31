@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Inject, Param, Post, Put, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
@@ -26,6 +27,7 @@ export class EngravingController {
     return identity.customerId ? this.engraving.list(identity.organizationId, identity.customerId) : [];
   }
   @Post('drafts')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async create(@Req() request: Request, @Body() body: unknown) {
     const input = parseWithSchema(z.object({ productId: uuidSchema, variantId: uuidSchema, design: engravingDesignSchema }), body);
     const identity = await this.identity(request);
@@ -37,6 +39,7 @@ export class EngravingController {
     return this.engraving.open(identity.organizationId, parseWithSchema(uuidSchema, id), identity.customerId, input.guestToken);
   }
   @Put('drafts/:id')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
   async save(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const input = parseWithSchema(access.extend({ version: z.number().int().nonnegative(), design: engravingDesignSchema, preview: png.optional(), artwork: png.optional() }), body);
     const identity = await this.identity(request);
@@ -49,6 +52,7 @@ export class EngravingController {
     return this.engraving.claim(identity.organizationId, parseWithSchema(uuidSchema, id), identity.customerId, input.guestToken);
   }
   @Post('drafts/:id/assets')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async upload(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const input = parseWithSchema(access.extend({ dataUrl: png }), body); const identity = await this.identity(request);
     return this.engraving.upload(identity.organizationId, parseWithSchema(uuidSchema, id), identity.customerId, input.guestToken, input.dataUrl);

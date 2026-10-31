@@ -323,6 +323,17 @@ export class CustomerAuthController {
     return this.auth.loginWithVerifiedPhone({ organizationId, phone: input.phone });
   }
 
+  @Post('oauth/google/link/start')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async googleOauthLinkStart(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(z.object({
+      browserState: z.string().regex(/^[a-f0-9]{64}$/),
+      returnTo: z.string().url().max(4096).optional()
+    }), body);
+    return { url: this.auth.startGoogleLinkOAuth(customer, input.browserState, input.returnTo) };
+  }
+
   @Get('oauth/google/start')
   googleOauthStart(
     @Query('returnTo') returnTo: string | undefined,

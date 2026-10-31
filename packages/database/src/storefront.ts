@@ -19,6 +19,8 @@ export interface CustomerPrincipal {
   active: boolean;
   hasPassword: boolean;
   googleLinked: boolean;
+  /** Provenance of this authenticated session, never inferred from linked identities. */
+  authMethod?: 'google' | 'password' | 'phone';
   sessionFamilyId: string;
   sessionId?: string;
 }
@@ -189,7 +191,7 @@ export class StorefrontRepository {
          AND ci.provider = 'password'
          AND ci.provider_subject = $2
          AND ci.active
-       LIMIT 1`,
+       LIMIT 1 FOR UPDATE OF c, ci`,
       [input.organizationId, identity]
     );
     const row = result.rows[0];
@@ -223,6 +225,15 @@ export class StorefrontRepository {
     );
     const row = result.rows[0];
     return row?.password_hash ? { passwordHash: row.password_hash } : null;
+  }
+
+  /** Serialize credential use/changes and refresh against account recovery. */
+  async lockCustomerForAuthentication(organizationId: string, customerId: string): Promise<void> {
+    const result = await this.client.query(
+      'SELECT id FROM customers WHERE organization_id=$1 AND id=$2 AND active AND deleted_at IS NULL FOR UPDATE',
+      [organizationId, customerId]
+    );
+    if (!result.rowCount) throw new InvalidCredentialsError();
   }
 
   async savePasswordIdentity(input: {
@@ -389,7 +400,7 @@ export class StorefrontRepository {
          AND phone_verified = TRUE
          AND active
          AND deleted_at IS NULL
-       LIMIT 1`,
+       LIMIT 1 FOR UPDATE`,
       [input.organizationId, input.phone]
     );
     const row = result.rows[0];
@@ -443,6 +454,20 @@ export class StorefrontRepository {
        SET active = TRUE, updated_at = now()`,
       [input.organizationId, input.customerId, input.provider, input.providerSubject]
     );
+  }
+
+  /** Call only inside a transaction after proving control of the customer's email. */
+  async invalidateUnverifiedCustomerCredentials(organizationId: string, customerId: string): Promise<void> {
+    const customer = await this.client.query<{ email_verified: boolean }>(
+      'SELECT email_verified FROM customers WHERE organization_id=$1 AND id=$2 FOR UPDATE',
+      [organizationId, customerId]
+    );
+    if (!customer.rows[0] || customer.rows[0].email_verified) return;
+    await this.client.query(`UPDATE customer_identities SET active=false, updated_at=now()
+      WHERE organization_id=$1 AND customer_id=$2 AND provider='password'`, [organizationId, customerId]);
+    await this.client.query(`UPDATE customers SET phone=NULL, phone_verified=false, updated_at=now(), version=version+1
+      WHERE organization_id=$1 AND id=$2`, [organizationId, customerId]);
+    await this.revokeCustomerSessions(organizationId, customerId, 'unverified_account_recovery');
   }
 
   async createSession(input: {
@@ -1636,8 +1661,6 @@ export class StorefrontRepository {
        RETURNING id, email, active`,
       [input.organizationId, input.email, input.source ?? 'site']
     );
-    // The pg query overload is erased by the narrowed client type here.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const row: { id: string; email: string; active: boolean } | undefined = result.rows[0];
     if (!row) {
       throw new ResourceConflictError('Ova email adresa je već prijavljena na newsletter.');

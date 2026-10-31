@@ -126,7 +126,7 @@ export class AuthService {
     deviceType?: 'rfiddaja_desktop' | 'rfiddaja_mobile' | undefined;
     deviceName?: string | undefined;
   }): Promise<AuthenticatedStaff> {
-    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const result = await new TransactionManager(this.database.pool, this.logger).run<AuthenticatedStaff | null>(async (client) => {
       const cardResult = await client.query<{
         id: string; organization_id: string; user_id: string; pin_hash: string; locked_until: Date | null;
         failed_pin_attempts: number; active: boolean; user_active: boolean;
@@ -144,7 +144,8 @@ export class AuthService {
           `UPDATE staff_nfc_cards SET failed_pin_attempts = $2,
              locked_until = CASE WHEN $2 >= 5 THEN now() + interval '15 minutes' ELSE NULL END,
              updated_at = now() WHERE id = $1`, [card.id, attempts]);
-        throw new InvalidCredentialsError();
+        // Commit the failed-attempt counter before reporting invalid credentials.
+        return null;
       }
       await client.query(`UPDATE staff_nfc_cards SET failed_pin_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = $1`, [card.id]);
       const repo = new AuthRepository(client);
@@ -158,6 +159,8 @@ export class AuthService {
       await repo.auditAuthEvent({ organizationId: card.organization_id, userId: card.user_id, deviceId: input.deviceId, sessionId: session.id, operation: 'auth.nfc_card_login', requestId: createRequestId(), correlationId: createRequestId(), payload: { cardId: input.cardId } });
       return { principal, tokens: this.issueTokenPair(principal, refreshToken) };
     });
+    if (!result) throw new InvalidCredentialsError();
+    return result;
   }
 
   async identifyNfcCard(input: { cardId: string }): Promise<{ recognized: boolean; displayName?: string }> {
@@ -210,11 +213,14 @@ export class AuthService {
   }): Promise<AuthenticatedStaff> {
     const email = input.customer.email?.trim().toLowerCase();
     if (!email) throw new PermissionDeniedError('admin.access');
+    if (input.customer.authMethod !== 'google') {
+      throw new PermissionDeniedError('admin.google_session');
+    }
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const googleIdentity = await client.query(
         `SELECT 1 FROM customer_identities
-         WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google'
+         WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google' AND active
          LIMIT 1`,
         [input.customer.organizationId, input.customer.customerId]
       );
@@ -286,7 +292,9 @@ export class AuthService {
         correlationId: input.correlationId ?? input.requestId ?? createRequestId(),
         payload: { customerId: input.customer.customerId }
       });
-      return { principal, tokens: this.issueTokenPair(principal, refreshToken, input.customer) };
+      // Desktop grants have no storefront session. Web sessions remain bound to
+      // their actual customer family, including after customer token rotation.
+      return { principal, tokens: this.issueTokenPair(principal, refreshToken, input.customer.sessionId ? input.customer : undefined) };
     });
   }
 
@@ -364,6 +372,8 @@ export class AuthService {
     }
     if (payload.parentCustomerId !== undefined || payload.parentCustomerFamilyId !== undefined) {
       if (typeof payload.parentCustomerId !== 'string' || typeof payload.parentCustomerFamilyId !== 'string') throw new InvalidTokenError();
+      // Reject previously issued admin tokens that did not bind Google session provenance.
+      if (payload.parentCustomerAuthMethod !== 'google') throw new InvalidTokenError();
       const parent = await this.database.pool.query(`SELECT 1 FROM customer_sessions
         WHERE organization_id=$1 AND customer_id=$2 AND family_id=$3 AND revoked_at IS NULL AND expires_at>now() LIMIT 1`,
       [payload.org, payload.parentCustomerId, payload.parentCustomerFamilyId]);
@@ -424,7 +434,7 @@ export class AuthService {
         jti: randomUUID(),
         dev: principal.deviceId,
         sid: principal.sessionId,
-        ...(parent ? { parentCustomerId: parent.customerId, parentCustomerFamilyId: parent.sessionFamilyId } : {})
+        ...(parent ? { parentCustomerId: parent.customerId, parentCustomerFamilyId: parent.sessionFamilyId, parentCustomerAuthMethod: parent.authMethod } : {})
       },
       this.config.JWT_ACCESS_SECRET,
       Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)

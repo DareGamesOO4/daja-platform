@@ -195,7 +195,8 @@ export class DesktopGoogleOAuthService {
     const customer = await this.customer(transaction.organization_id, transaction.customer_id);
     if (!customer.active) throw new PermissionDeniedError('admin.access');
     const staff = await this.staffAuth.loginConfiguredStorefrontAdmin({
-      customer,
+      // Only this consumed, device-bound Google grant establishes this provenance.
+      customer: { ...customer, authMethod: 'google' },
       deviceId: input.deviceId,
       requestId: `desktop-google:${transaction.id}`,
       correlationId: transaction.id

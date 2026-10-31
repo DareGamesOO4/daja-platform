@@ -61,7 +61,24 @@ export class CustomerAuthService {
   }
 
   async confirmEmailVerification(token: string) {
-    return new StorefrontRepository(this.database.pool).confirmCustomerEmailVerification(sha256Hex(token));
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      const tokenHash = sha256Hex(token);
+      const pending = await client.query<{ organization_id: string; customer_id: string }>(
+        `SELECT t.organization_id, t.customer_id FROM customer_email_verification_tokens t
+         JOIN customers c ON c.id=t.customer_id AND c.organization_id=t.organization_id
+         WHERE t.token_hash=$1 AND (t.used_at IS NOT NULL OR t.expires_at>now())
+           AND NOT c.email_verified AND EXISTS (
+             SELECT 1 FROM customer_identities ci WHERE ci.organization_id=c.organization_id
+               AND ci.customer_id=c.id AND ci.provider='google' AND ci.active
+           ) FOR UPDATE OF c`, [tokenHash]
+      );
+      const customer = pending.rows[0];
+      if (customer) {
+        await repo.invalidateUnverifiedCustomerCredentials(customer.organization_id, customer.customer_id);
+      }
+      return repo.confirmCustomerEmailVerification(tokenHash);
+    });
   }
 
   async requestPasswordReset(input: { organizationId: string; email: string }) {
@@ -91,6 +108,10 @@ export class CustomerAuthService {
     await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
       const reset = await repo.consumeCustomerPasswordReset(sha256Hex(input.token));
+      await repo.lockCustomerForAuthentication(reset.organizationId, reset.customerId);
+      await client.query(`UPDATE customer_identities SET active=false, updated_at=now()
+        WHERE organization_id=$1 AND customer_id=$2 AND provider='password'`,
+      [reset.organizationId, reset.customerId]);
       await repo.savePasswordIdentity({
         organizationId: reset.organizationId,
         customerId: reset.customerId,
@@ -98,6 +119,19 @@ export class CustomerAuthService {
         phone: reset.phone,
         passwordHash
       });
+      // Consuming the single-use email reset token proves control of that email.
+      // Replace any phone left by an unverified, historically auto-linked account.
+      await client.query(
+        `UPDATE customers SET email_verified = true,
+           phone = CASE WHEN NOT email_verified AND EXISTS (
+             SELECT 1 FROM customer_identities ci WHERE ci.organization_id = customers.organization_id
+               AND ci.customer_id = customers.id AND ci.provider = 'google' AND ci.active
+           ) THEN NULL ELSE phone END,
+           phone_verified = CASE WHEN NOT email_verified THEN false ELSE phone_verified END,
+           updated_at = now(), version = version + 1
+         WHERE organization_id = $1 AND id = $2`,
+        [reset.organizationId, reset.customerId]
+      );
       await repo.revokeCustomerSessions(
         reset.organizationId,
         reset.customerId,
@@ -183,7 +217,7 @@ export class CustomerAuthService {
         // Do not reveal whether this number belongs to an account.
         throw new InvalidCredentialsError();
       }
-      const session = await this.createSession(repo, customer.organizationId, customer.id);
+      const session = await this.createSession(repo, customer.organizationId, customer.id, 'phone');
       const principal = await repo.buildCustomerPrincipal({
         organizationId: customer.organizationId,
         customerId: customer.id,
@@ -200,6 +234,7 @@ export class CustomerAuthService {
   async verifyPhoneForCustomer(input: { customer: CustomerPrincipal; phone: string }) {
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
+      await this.lockAuthenticatedCustomer(repo, input.customer);
       await repo.verifyCustomerPhone({
         organizationId: input.customer.organizationId,
         customerId: input.customer.customerId,
@@ -221,6 +256,7 @@ export class CustomerAuthService {
   }): Promise<CustomerPrincipal> {
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
+      await this.lockAuthenticatedCustomer(repo, input.customer);
       const passwordIdentity = await repo.findPasswordIdentity({
         organizationId: input.customer.organizationId,
         customerId: input.customer.customerId
@@ -269,6 +305,31 @@ export class CustomerAuthService {
     return this.googleAuthorizationUrl(state);
   }
 
+  startGoogleLinkOAuth(customer: CustomerPrincipal, browserState: string, returnTo?: string): string {
+    this.assertGoogleOAuthConfigured();
+    if (!customer.email || !customer.sessionId || !/^[a-f0-9]{64}$/.test(browserState)) {
+      throw new InvalidTokenError();
+    }
+    const state = signJwt(
+      {
+        typ: 'access',
+        sub: 'google-oauth-state',
+        org: customer.organizationId,
+        jti: randomUUID(),
+        provider: 'google',
+        purpose: 'link',
+        linkCustomerId: customer.customerId,
+        linkSessionId: customer.sessionId,
+        linkFamilyId: customer.sessionFamilyId,
+        browserState,
+        returnTo: this.resolveOAuthReturnUrl(returnTo)
+      },
+      this.config.JWT_ACCESS_SECRET,
+      600
+    );
+    return this.googleAuthorizationUrl(state);
+  }
+
   /** Reuses the configured Google client and its existing callback URI. */
   googleAuthorizationUrl(state: string): string {
     this.assertGoogleOAuthConfigured();
@@ -302,6 +363,70 @@ export class CustomerAuthService {
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
+      if (state.purpose === 'link') {
+        if (
+          typeof state.linkCustomerId !== 'string' ||
+          typeof state.linkSessionId !== 'string' ||
+          typeof state.linkFamilyId !== 'string'
+        ) throw new InvalidTokenError();
+        const target = await client.query<{ id: string; email: string | null; active: boolean }>(
+          `SELECT id, email, active FROM customers
+           WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`,
+          [input.organizationId, state.linkCustomerId]
+        );
+        const customer = target.rows[0];
+        if (!customer?.active || customer.email?.trim().toLowerCase() !== googleEmail) {
+          throw new InvalidCredentialsError();
+        }
+        const sourceSession = await client.query(
+          `SELECT id FROM customer_sessions
+           WHERE organization_id=$1 AND customer_id=$2 AND family_id=$3 AND id=$4
+             AND revoked_at IS NULL AND expires_at>now() FOR UPDATE`,
+          [input.organizationId, customer.id, state.linkFamilyId, state.linkSessionId]
+        );
+        if (sourceSession.rowCount !== 1) throw new InvalidTokenError();
+        // Check inactive identities too: an upsert must never reactivate a
+        // Google subject that is owned by a different customer.
+        const existingIdentity = await client.query<{ customer_id: string }>(
+          `SELECT customer_id FROM customer_identities
+           WHERE organization_id=$1 AND provider='google' AND provider_subject=$2 FOR UPDATE`,
+          [input.organizationId, googleSubject]
+        );
+        if (existingIdentity.rows[0] && existingIdentity.rows[0].customer_id !== customer.id) {
+          throw new InvalidCredentialsError();
+        }
+        // Replace pre-existing credentials even if the email was already
+        // verified: that alone does not prove who chose the old password/phone.
+        await client.query(
+          `UPDATE customer_identities SET active=false, updated_at=now()
+           WHERE organization_id=$1 AND customer_id=$2 AND provider='password'`,
+          [input.organizationId, customer.id]
+        );
+        await repo.revokeCustomerSessions(input.organizationId, customer.id, 'google_identity_linked');
+        await repo.linkOAuthIdentity({
+          organizationId: input.organizationId,
+          customerId: customer.id,
+          provider: 'google',
+          providerSubject: googleSubject
+        });
+        await client.query(
+          `UPDATE customers SET email_verified=true, phone=NULL, phone_verified=false,
+             updated_at=now(), version=version+1
+           WHERE organization_id=$1 AND id=$2`,
+          [input.organizationId, customer.id]
+        );
+        const session = await this.createSession(repo, input.organizationId, customer.id, 'google');
+        const principal = await repo.buildCustomerPrincipal({
+          organizationId: input.organizationId,
+          customerId: customer.id,
+          sessionFamilyId: session.familyId,
+          sessionId: session.id
+        });
+        return {
+          user: serializeCustomerPrincipal(principal),
+          ...this.issueTokenPair(principal, session.refreshToken)
+        };
+      }
       let customer = await repo.findOAuthCustomer({
         organizationId: input.organizationId,
         provider: 'google',
@@ -313,12 +438,9 @@ export class CustomerAuthService {
           email: googleEmail
         });
         if (customer) {
-          await repo.linkOAuthIdentity({
-            organizationId: input.organizationId,
-            customerId: customer.id,
-            provider: 'google',
-            providerSubject: googleSubject
-          });
+          // An email match alone cannot authorize linking an existing account:
+          // it may have been registered by someone who never owned the address.
+          throw new InvalidCredentialsError();
         } else {
           customer = await repo.createGoogleCustomer({
             organizationId: input.organizationId,
@@ -329,7 +451,7 @@ export class CustomerAuthService {
           });
         }
       }
-      const session = await this.createSession(repo, customer.organizationId, customer.id);
+      const session = await this.createSession(repo, customer.organizationId, customer.id, 'google');
       const principal = await repo.buildCustomerPrincipal({
         organizationId: customer.organizationId,
         customerId: customer.id,
@@ -365,12 +487,7 @@ export class CustomerAuthService {
           email: identity.email
         });
         if (customer) {
-          await repo.linkOAuthIdentity({
-            organizationId: input.organizationId,
-            customerId: customer.id,
-            provider: 'google',
-            providerSubject: identity.subject
-          });
+          throw new InvalidCredentialsError();
         } else {
           customer = await repo.createGoogleCustomer({
             organizationId: input.organizationId,
@@ -381,11 +498,12 @@ export class CustomerAuthService {
           });
         }
       }
-      return repo.buildCustomerPrincipal({
+      const principal = await repo.buildCustomerPrincipal({
         organizationId: customer.organizationId,
         customerId: customer.id,
         sessionFamilyId: randomUUID()
       });
+      return { ...principal, authMethod: 'google' as const };
     });
   }
 
@@ -457,6 +575,7 @@ export class CustomerAuthService {
     }
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const repo = new StorefrontRepository(client);
+      await repo.lockCustomerForAuthentication(payload.org, payload.sub);
       const current = await repo.findActiveRefreshSession({
         organizationId: payload.org,
         customerId: payload.sub,
@@ -472,7 +591,8 @@ export class CustomerAuthService {
           org: payload.org,
           fam: current.familyId,
           jti: replacementJti,
-          kind: 'customer'
+          kind: 'customer',
+          authMethod: payload.authMethod
         },
         this.config.JWT_REFRESH_SECRET,
         this.config.REFRESH_TOKEN_TTL_SECONDS
@@ -515,12 +635,15 @@ export class CustomerAuthService {
       familyId: String(payload.fam),
       sessionId: payload.sid
     });
-    return repo.buildCustomerPrincipal({
+    const principal = await repo.buildCustomerPrincipal({
       organizationId: payload.org,
       customerId: payload.sub,
       sessionFamilyId: String(payload.fam),
       sessionId: payload.sid
     });
+    const authMethod = customerAuthMethod(payload.authMethod);
+    this.assertSafeLinkedAccount(principal, authMethod);
+    return { ...principal, ...(authMethod ? { authMethod } : {}) };
   }
 
   async logout(token: string | undefined): Promise<void> {
@@ -529,10 +652,11 @@ export class CustomerAuthService {
     }
     const principal = await this.authenticateAccessToken(token);
     if (principal.sessionId) {
-      await new StorefrontRepository(this.database.pool).revokeSession(
-        principal.sessionId,
-        'logout'
-      );
+      await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+        const repo = new StorefrontRepository(client);
+        await repo.lockCustomerForAuthentication(principal.organizationId, principal.customerId);
+        await repo.revokeSessionFamily(principal.organizationId, principal.customerId, principal.sessionFamilyId, 'logout');
+      });
     }
   }
 
@@ -546,7 +670,8 @@ export class CustomerAuthService {
   private async createSession(
     repo: StorefrontRepository,
     organizationId: string,
-    customerId: string
+    customerId: string,
+    authMethod: 'google' | 'password' | 'phone' = 'password'
   ): Promise<{ id: string; familyId: string; refreshToken: string }> {
     const familyId = randomUUID();
     const refreshJti = randomUUID();
@@ -557,7 +682,8 @@ export class CustomerAuthService {
         org: organizationId,
         fam: familyId,
         jti: refreshJti,
-        kind: 'customer'
+        kind: 'customer',
+        authMethod
       },
       this.config.JWT_REFRESH_SECRET,
       this.config.REFRESH_TOKEN_TTL_SECONDS
@@ -574,6 +700,9 @@ export class CustomerAuthService {
   }
 
   private issueTokenPair(principal: CustomerPrincipal, refreshToken: string): CustomerTokenPair {
+    const refresh = verifyJwt(refreshToken, this.config.JWT_REFRESH_SECRET, 'refresh');
+    const authMethod = customerAuthMethod(refresh.authMethod);
+    this.assertSafeLinkedAccount(principal, authMethod);
     const accessToken = signJwt(
       {
         typ: 'access',
@@ -582,7 +711,8 @@ export class CustomerAuthService {
         fam: principal.sessionFamilyId,
         jti: randomUUID(),
         sid: principal.sessionId,
-        kind: 'customer'
+        kind: 'customer',
+        authMethod
       },
       this.config.JWT_ACCESS_SECRET,
       Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)
@@ -594,6 +724,23 @@ export class CustomerAuthService {
       expiresIn: Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900),
       refreshExpiresIn: this.config.REFRESH_TOKEN_TTL_SECONDS
     };
+  }
+
+  private assertSafeLinkedAccount(principal: CustomerPrincipal, authMethod: unknown): void {
+    // Historical email-only merges may still have attacker-chosen passwords or
+    // phones. Only Google can access them until the email owner resets the password.
+    if (principal.googleLinked && !principal.emailVerified && authMethod !== 'google') {
+      throw new InvalidTokenError();
+    }
+  }
+
+  private async lockAuthenticatedCustomer(repo: StorefrontRepository, principal: CustomerPrincipal): Promise<void> {
+    await repo.lockCustomerForAuthentication(principal.organizationId, principal.customerId);
+    if (!principal.sessionId) throw new InvalidTokenError();
+    await repo.assertAccessSession({
+      organizationId: principal.organizationId, customerId: principal.customerId,
+      familyId: principal.sessionFamilyId, sessionId: principal.sessionId
+    });
   }
 
   private assertGoogleOAuthConfigured(): void {
@@ -667,6 +814,10 @@ function googleDisplayName(profile: GoogleProfile): string {
     return profile.name.trim().slice(0, 240);
   }
   return (String(profile.email).split('@')[0] ?? 'Google user').slice(0, 240);
+}
+
+function customerAuthMethod(value: unknown): CustomerPrincipal['authMethod'] {
+  return value === 'google' || value === 'password' || value === 'phone' ? value : undefined;
 }
 
 export function serializeCustomerPrincipal(principal: CustomerPrincipal) {
