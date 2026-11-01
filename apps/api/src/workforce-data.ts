@@ -20,6 +20,14 @@ export const effectiveRateSql = (alias: string) => `COALESCE(
    ORDER BY (r.brand_id IS NOT NULL) DESC LIMIT 1),
  (SELECT s.default_rate_minor FROM catalog_contributor_settings s WHERE s.organization_id = ${alias}.organization_id), 0)`;
 
+export const incompleteWorkforceProductSql = `(COALESCE(btrim(p.name),'') = '' OR p.department_id IS NULL OR p.brand_id IS NULL OR p.primary_category_id IS NULL
+    OR COALESCE(btrim(p.description),'') = '' OR COALESCE(btrim(v.barcode),'') = '' OR COALESCE(v.current_price_amount,0) <= 0
+    OR COALESCE(btrim(v.gender),'') = '' OR ${meaningfulSpecsSql} < 5 OR jsonb_array_length(p.features) < 3
+    OR NOT EXISTS (SELECT 1 FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
+      AND ib.location_id IS NOT NULL AND ib.quantity > 0)
+    OR NOT EXISTS (SELECT 1 FROM product_media pm JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+      WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id))`;
+
 export async function workforceSummary(
   db: Pick<Database['pool'], 'query'>,
   organizationId: string,
@@ -92,8 +100,31 @@ export async function workforceSummary(
 
 // The workforce view needs one row per product, without supplier/RFID data.
 // Calculate the checklist in the same query, rather than one round trip per item.
-export async function workforceProducts(db: Pick<Database['pool'], 'query'>, organizationId: string, userId: string) {
-  const { rows } = await db.query(`SELECT p.id, p.name, p.slug, p.created_at AS "createdAt", p.updated_at AS "updatedAt",
+export async function workforceProducts(db: Pick<Database['pool'], 'query'>, organizationId: string, userId: string,
+  options: { limit?: number; offset?: number; search?: string; status?: string; overview?: boolean } = {}) {
+  const values: unknown[] = [organizationId, userId];
+  let selected = '';
+  if (options.limit) {
+    const filters = ['p.organization_id=$1', 'p.created_by_user_id=$2'];
+    if (options.search) {
+      values.push('%' + options.search.trim() + '%');
+      filters.push(`(p.name ILIKE $${values.length} OR v.sku ILIKE $${values.length}
+        OR EXISTS(SELECT 1 FROM brands b WHERE b.id=p.brand_id AND b.name ILIKE $${values.length}))`);
+    }
+    if (options.status === 'deleted') filters.push('p.deleted_at IS NOT NULL');
+    else if (options.status === 'incomplete') filters.push(`p.deleted_at IS NULL AND ${incompleteWorkforceProductSql}`);
+    else if (options.status && options.status !== 'all') {
+      values.push(options.status); filters.push(`p.deleted_at IS NULL AND p.quality_review_status=$${values.length}`);
+    }
+    values.push(options.limit, options.offset || 0);
+    selected = `WITH selected_products AS (SELECT p.*, count(*) OVER() AS matched_total FROM products p
+      LEFT JOIN LATERAL (SELECT * FROM product_variants WHERE organization_id=p.organization_id
+        AND product_id=p.id AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1) v ON true
+      WHERE ${filters.join(' AND ')}
+      ORDER BY (p.quality_review_status='changes_requested') DESC, p.created_at DESC, p.id
+      LIMIT $${values.length - 1} OFFSET $${values.length}) `;
+  }
+  const { rows } = await db.query(`${selected}SELECT ${options.limit ? 'p.matched_total AS "matchedTotal",' : ''} p.id, p.name, p.slug, p.created_at AS "createdAt", p.updated_at AS "updatedAt",
     p.deleted_at AS "deletedAt", p.quality_review_status AS "qualityReviewStatus", p.quality_review_note AS "qualityReviewNote",
     p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt",
     p.department_id, p.brand_id, p.primary_category_id, p.description,
@@ -103,11 +134,11 @@ export async function workforceProducts(db: Pick<Database['pool'], 'query'>, org
     inventory.location_id, inventory.quantity,
     (SELECT count(*)::int FROM product_media pm JOIN media_assets ma ON ma.id=pm.media_asset_id AND ma.status='ready'
       WHERE pm.organization_id=p.organization_id AND pm.product_id=p.id) AS media_count,
-    media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl",
+    ${options.overview ? 'NULL::text AS "primaryImageUrl", NULL::text AS "thumbnailUrl",' : 'media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl",'}
     (SELECT max(a.occurred_at) FROM audit_events a WHERE a.organization_id=p.organization_id
       AND a.aggregate_type='product' AND a.aggregate_id=p.id AND a.operation='quality_changes_requested') AS "lastReturnedAt",
-    ${effectiveRateSql('p')} AS "effectiveRateMinor"
-    FROM products p
+    ${options.overview ? '0' : effectiveRateSql('p')} AS "effectiveRateMinor"
+    FROM ${options.limit ? 'selected_products' : 'products'} p
     LEFT JOIN departments d ON d.organization_id=p.organization_id AND d.id=p.department_id
     LEFT JOIN brands b ON b.organization_id=p.organization_id AND b.id=p.brand_id
     LEFT JOIN categories c ON c.organization_id=p.organization_id AND c.id=p.primary_category_id
@@ -115,11 +146,11 @@ export async function workforceProducts(db: Pick<Database['pool'], 'query'>, org
       AND product_id=p.id AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1) v ON true
     LEFT JOIN LATERAL (SELECT location_id,quantity FROM inventory_balances WHERE organization_id=p.organization_id
       AND variant_id=v.id ORDER BY updated_at DESC LIMIT 1) inventory ON true
-    LEFT JOIN LATERAL (SELECT ma.public_url, md.public_url AS thumbnail_url FROM product_media pm
+    ${options.overview ? '' : `LEFT JOIN LATERAL (SELECT ma.public_url, md.public_url AS thumbnail_url FROM product_media pm
       JOIN media_assets ma ON ma.id=pm.media_asset_id AND ma.status='ready'
       LEFT JOIN LATERAL (SELECT public_url FROM media_derivatives WHERE media_asset_id=ma.id ORDER BY (mime_type = 'image/webp') DESC, width LIMIT 1) md ON true
-      WHERE pm.organization_id=p.organization_id AND pm.product_id=p.id ORDER BY pm.is_primary DESC,pm.position,pm.id LIMIT 1) media ON true
-    WHERE p.organization_id=$1 AND p.created_by_user_id=$2 ORDER BY p.created_at DESC,p.id`, [organizationId, userId]);
+      WHERE pm.organization_id=p.organization_id AND pm.product_id=p.id ORDER BY pm.is_primary DESC,pm.position,pm.id LIMIT 1) media ON true`}
+    WHERE p.organization_id=$1 AND p.created_by_user_id=$2 ORDER BY (p.quality_review_status='changes_requested') DESC,p.created_at DESC,p.id`, values);
   return rows.map(({ department_id, brand_id, primary_category_id, description, barcode, gender, current_price_amount,
     specs_count, features_count, location_id, quantity, media_count, ...product }) => {
     const checks = product.deletedAt ? [] : [
@@ -166,4 +197,34 @@ export async function workforceTimelineEntries(db: Pick<Database['pool'], 'query
     SELECT 'audit:' || id::text,operation,aggregate_type,product_id,product_name,occurred_at,deleted_at
     FROM actions WHERE event_rank=1 AND NOT (aggregate_type='product' AND operation IN ('create','created') AND COALESCE(created_by_user_id=$2,false))
     ORDER BY "occurredAt",id`, [organizationId,userId,date])).rows;
+}
+
+/** Aggregate full-catalog statistics without shipping every product or fetching every photo. */
+export async function workforceProductStats(db: Pick<Database['pool'], 'query'>, organizationId: string, userId: string,
+  date: string, startHour: number, hours: number) {
+  const products = await workforceProducts(db, organizationId, userId, { overview: true });
+  const quality = ['Odobreni','Na proveri','Na doradi','Obrisani'].map(label => ({ label, count: 0 }));
+  const waiting = ['Do 1 dana','1–3 dana','3–7 dana','Preko 7 dana'].map(label => ({ label, count: 0 }));
+  const missing = new Map<string, number>(), brands = new Map<string, number>(), departments = new Map<string, number>();
+  let unknownWaiting = 0;
+  const dayFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Belgrade', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const hourFormat = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Belgrade', hour: '2-digit', hourCycle: 'h23' });
+  for (const p of products) {
+    quality[p.deletedAt ? 3 : p.qualityReviewStatus === 'approved' ? 0 : p.qualityReviewStatus === 'changes_requested' ? 2 : 1]!.count++;
+    const created = new Date(p.createdAt), hour = Number(hourFormat.format(created));
+    if (dayFormat.format(created) === date && hour >= startHour && hour < startHour + hours) {
+      for (const [map,label] of [[brands,p.brand || 'Neraspoređeno'],[departments,p.department || 'Neraspoređeno']] as const) map.set(label,(map.get(label)||0)+1);
+    }
+    if (p.deletedAt) continue;
+    for (const check of p.qualityChecks.filter((check: { complete: boolean; label: string }) => !check.complete)) {
+      const label = check.label.replace(/\s*\(.*\)$/, ''); missing.set(label,(missing.get(label)||0)+1);
+    }
+    if (!['pending','changes_requested'].includes(p.qualityReviewStatus)) continue;
+    const since = p.qualityReviewStatus === 'changes_requested' ? p.lastReturnedAt : p.createdAt;
+    if (!since) { unknownWaiting++; continue; }
+    const days = Math.max(0,(Date.now()-new Date(since).getTime())/86400000);
+    waiting[days<1?0:days<3?1:days<7?2:3]!.count++;
+  }
+  const entries = (map: Map<string,number>) => [...map].map(([label,count]) => ({label,count})).sort((a,b)=>b.count-a.count);
+  return { quality, waiting, unknownWaiting, missing: entries(missing), brands: entries(brands), departments: entries(departments) };
 }

@@ -1,3 +1,4 @@
+import { workforceProductStats } from './workforce-data.js';
 import type { Database } from '@daja/database';
 import type { RequestContext } from '@daja/shared';
 import { TenantAccessDeniedError, ValidationFailedError } from '@daja/security';
@@ -11,8 +12,8 @@ interface SessionRow {
 interface ClientRow { sequence: string; active_seconds: number; updated_at: Date }
 interface LeaseRow { owner_id: string; expires_at: Date }
 export interface TimingRow {
-  id: string; productId: string | null; productName: string; kind: string; status: SessionStatus;
-  complete: boolean; startedAt: Date; finishedAt: Date | null; activeSeconds: number;
+  id: string; productId: string | null; productName: string; kind: string; status: SessionStatus | 'unmeasured';
+  complete: boolean; startedAt: Date | null; finishedAt: Date | null; activeSeconds: number | null;
   elapsedSeconds: string | null; editSessions: number;
 }
 export interface TeamRow {
@@ -21,7 +22,7 @@ export interface TeamRow {
 }
 
 export const workSessionSchema = z.object({
-  actorUserId: z.string().uuid(), organizationId: z.string().uuid(),
+  actorUserId: z.string().uuid().optional(), organizationId: z.string().uuid().optional(),
   ownerId: z.string().uuid(), sequence: z.number().int().positive(),
   startedAt: z.string().datetime(), finishedAt: z.string().datetime().optional(),
   productId: z.string().uuid().optional(), kind: z.enum(['create', 'edit', 'review']),
@@ -38,7 +39,7 @@ export const dashboardQuerySchema = z.object({
 }).refine(input => input.startHour + input.hours <= 24);
 
 export async function recordWorkSession(db: Database['pool'], ctx: RequestContext, id: string, input: z.infer<typeof workSessionSchema>) {
-  if (input.actorUserId !== ctx.userId || input.organizationId !== ctx.organizationId) throw new TenantAccessDeniedError();
+  if ((input.actorUserId && input.actorUserId !== ctx.userId) || (input.organizationId && input.organizationId !== ctx.organizationId)) throw new TenantAccessDeniedError();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -111,7 +112,7 @@ export async function workforceDashboard(db: Database['pool'], organizationId: s
     LEFT JOIN products p ON p.organization_id=$1 AND p.created_by_user_id=$2
       AND (p.created_at AT TIME ZONE 'Europe/Belgrade')::date=g.day::date
     GROUP BY g.day ORDER BY g.day`, values)).rows;
-  const timings = (await db.query<TimingRow>(`SELECT s.id,s.product_id AS "productId",COALESCE(p.name,'Nesačuvan unos') AS "productName",
+  const timings = (await db.query<TimingRow>(`SELECT * FROM (SELECT s.id::text,s.product_id AS "productId",COALESCE(p.name,'Nesačuvan unos') AS "productName",
       s.kind,s.status,s.complete,s.started_at AS "startedAt",s.finished_at AS "finishedAt",s.active_seconds AS "activeSeconds",
       extract(epoch FROM(COALESCE(s.finished_at,now())-s.started_at)) AS "elapsedSeconds",
       (SELECT count(*)::int FROM catalog_work_sessions e WHERE e.organization_id=$1 AND e.user_id=$2
@@ -119,7 +120,16 @@ export async function workforceDashboard(db: Database['pool'], organizationId: s
     FROM catalog_work_sessions s LEFT JOIN products p ON p.id=s.product_id AND p.organization_id=$1
     WHERE s.organization_id=$1 AND s.user_id=$2
       AND (COALESCE(s.finished_at,s.started_at) AT TIME ZONE 'Europe/Belgrade')::date=$3::date
-    ORDER BY COALESCE(s.finished_at,s.started_at),s.id`, values.slice(0,3))).rows;
+    UNION ALL
+    SELECT 'unmeasured:' || p.id::text, p.id, p.name, 'create', 'unmeasured', false,
+      NULL::timestamptz, p.created_at, NULL::integer, NULL::numeric,
+      (SELECT count(*)::int FROM catalog_work_sessions e WHERE e.organization_id=$1 AND e.user_id=$2
+        AND e.product_id=p.id AND e.kind='edit' AND e.status='completed')
+    FROM products p WHERE p.organization_id=$1 AND p.created_by_user_id=$2
+      AND (p.created_at AT TIME ZONE 'Europe/Belgrade')::date=$3::date
+      AND NOT EXISTS (SELECT 1 FROM catalog_work_sessions existing WHERE existing.organization_id=$1
+        AND existing.user_id=$2 AND existing.product_id=p.id AND existing.kind='create')
+    ) entries ORDER BY COALESCE("finishedAt","startedAt"),id`, values.slice(0,3))).rows;
   const team = (await db.query<TeamRow>(`WITH bounds AS (
       SELECT $2::uuid AS selected_user, ($3::date::timestamp + make_interval(hours=>$4::int)) AT TIME ZONE 'Europe/Belgrade' AS start,
         ($3::date::timestamp + make_interval(hours=>($4::int+$5::int))) AT TIME ZONE 'Europe/Belgrade' AS finish
@@ -139,5 +149,6 @@ export async function workforceDashboard(db: Database['pool'], organizationId: s
         AND s.kind='create' AND s.status='completed' AND s.complete AND s.finished_at>=b.start AND s.finished_at<b.finish) AS measured
     FROM users u WHERE u.organization_id=$1 AND EXISTS(SELECT 1 FROM products p WHERE p.organization_id=$1 AND p.created_by_user_id=u.id)
     ORDER BY count DESC,name`, values)).rows;
-  return { daily, timings, team };
+  const productStats = await workforceProductStats(db, organizationId, userId, input.date, input.startHour, input.hours);
+  return { daily, timings, team, productStats };
 }

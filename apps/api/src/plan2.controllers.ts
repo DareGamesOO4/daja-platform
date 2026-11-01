@@ -1392,11 +1392,11 @@ export class StaffCatalogController {
   }
 
   @Get('admin/workforce/:userId')
-  async workforceMember(@Req() request: Request, @Param('userId') userId: string) {
+  async workforceMember(@Req() request: Request, @Param('userId') userId: string, @Query('paged') paged?: string) {
     const ctx = resolveRequestContext(request);
     this.requireWorkforceManager(ctx);
     const id = parseWithSchema(uuidSchema, userId);
-    const products = await workforceProducts(this.database.pool, ctx.organizationId, id);
+    const products = paged === '1' ? [] : await workforceProducts(this.database.pool, ctx.organizationId, id);
     const activity = (await this.database.pool.query(
       `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
               audit.before_payload AS "beforePayload", audit.after_payload AS "afterPayload", audit.reason,
@@ -1410,6 +1410,26 @@ export class StaffCatalogController {
     const summaries = await workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString(), id);
     return { products, activity,
       summary: summaries.find(member => member.id === id) ?? null };
+  }
+
+  @Get('admin/workforce/:userId/products')
+  async workforceProductPage(@Req() request: Request, @Param('userId') userId: string,
+    @Query() query: Record<string,string | undefined>, @Res({ passthrough: true }) response: Response) {
+    const ctx = resolveRequestContext(request);
+    this.requireWorkforceManager(ctx);
+    const id = parseWithSchema(uuidSchema, userId);
+    const input = parseWithSchema(z.object({
+      limit: z.coerce.number().int().min(1).max(30).default(30),
+      offset: z.coerce.number().int().min(0).default(0),
+      search: z.string().trim().max(300).default(''),
+      status: z.enum(['all','pending','changes_requested','approved','incomplete','deleted']).default('all')
+    }), query);
+    response.setHeader('Cache-Control','private, no-store');
+    const rows = await workforceProducts(this.database.pool, ctx.organizationId, id,
+      { ...input, limit: input.limit + 1 });
+    const items = rows.slice(0,input.limit).map(({ matchedTotal: _total, ...product }) => product);
+    return { items, total: Number(rows[0]?.matchedTotal || 0),
+      nextOffset: rows.length > input.limit ? input.offset + input.limit : null };
   }
 
   @Get('admin/workforce/:userId/timeline')
