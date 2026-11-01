@@ -673,7 +673,51 @@ function cursorOffset(cursor: string | undefined, key: string): number {
     return decoded.offset!;
   } catch { throw new ValidationFailedError('Neispravan kursor pretrage.'); }
 }
+// Exact model suggestions must not wait for the full natural-language search index.
+async function exactModelSuggestions(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse | null> {
+  const query = input.q.trim();
+  if (input.mode !== 'suggestions' || input.sort !== 'relevance' ||
+      !/^[a-z0-9][a-z0-9._/-]*$/i.test(query) || !/[a-z]/i.test(query) || !/\d/.test(query)) return null;
+  const code = compact(query);
+  if (code.length < 4) return null;
+  const matches = await pool.query<{ id: string }>(`
+    WITH candidates AS (
+      SELECT product_id AS id FROM product_variants
+      WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
+        AND (regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') = $2
+          OR regexp_replace(lower(mpn), '[^a-z0-9]', '', 'g') = $2)
+      UNION
+      SELECT id FROM products
+      WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
+        AND regexp_replace(lower(name), '[^a-z0-9]', '', 'g') = $2
+    )
+    SELECT p.id FROM candidates candidate
+    JOIN products p ON p.id = candidate.id AND p.organization_id = $1
+    JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
+      AND d.deleted_at IS NULL
+    WHERE p.deleted_at IS NULL AND p.active AND p.published
+      AND d.slug = ANY($3::text[]) AND ($4::text IS NULL OR d.slug = $4)
+      AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id
+        AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.active AND v.published)
+    ORDER BY p.id LIMIT 7`, [organizationId, code, departments, input.department ?? null]);
+  // Broad/partial inputs continue through the complete search and its pagination.
+  if (!matches.rows.length || matches.rows.length > 6) return null;
+  const ids = matches.rows.map(row => row.id);
+  const { items } = await new CatalogRepository(pool).listPublicProducts({ organizationId }, { productIds: ids, limit: ids.length });
+  if (!items.length) return null;
+  items.sort((a, b) => Number(b.availability.inStock) - Number(a.availability.inStock)
+    || productNames.compare(a.name, b.name) || a.productId.localeCompare(b.productId));
+  return {
+    query: input.q, normalizedQuery: normalize(query), recognized: [], conditions: [], appliedCorrection: null,
+    completions: [], similar: [], intent: 'products', groups: { brands: [], collections: [], attributes: [] },
+    items, total: items.length, departments: departments.map(id => ({ id, count: items.filter(item => item.department === id).length })),
+    corrections: [], recommendations: [], message: null, nextCursor: null,
+  };
+}
+
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
+  const exact = await exactModelSuggestions(pool, organizationId, input);
+  if (exact) return exact;
   const data=await snapshot(pool,organizationId);
   let cached = searchResults.get(data);
   if (!cached) { cached = new Map(); searchResults.set(data, cached); }
