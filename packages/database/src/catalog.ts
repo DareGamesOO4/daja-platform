@@ -218,6 +218,7 @@ export class CatalogRepository {
                'mediaId', pm.media_asset_id,
                'url', ma.public_url,
                'thumb', thumb.public_url,
+               'sources', thumb.sources,
                'role', pm.role,
                'position', pm.position,
                'isPrimary', pm.is_primary,
@@ -230,11 +231,11 @@ export class CatalogRepository {
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          LEFT JOIN LATERAL (
-           SELECT md.public_url
+           SELECT (array_agg(md.public_url ORDER BY md.width ASC))[1] AS public_url,
+             jsonb_agg(jsonb_build_object('url', md.public_url, 'width', md.width) ORDER BY md.width)
+               FILTER (WHERE md.width <= 768) AS sources
            FROM media_derivatives md
            WHERE md.media_asset_id = pm.media_asset_id
-           ORDER BY md.width ASC
-           LIMIT 1
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
@@ -324,6 +325,7 @@ export class CatalogRepository {
                'mediaId', pm.media_asset_id,
                'url', ma.public_url,
                'thumb', thumb.public_url,
+               'sources', thumb.sources,
                'role', pm.role,
                'position', pm.position,
                'isPrimary', pm.is_primary,
@@ -336,11 +338,11 @@ export class CatalogRepository {
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          LEFT JOIN LATERAL (
-           SELECT md.public_url
+           SELECT (array_agg(md.public_url ORDER BY md.width ASC))[1] AS public_url,
+             jsonb_agg(jsonb_build_object('url', md.public_url, 'width', md.width) ORDER BY md.width)
+               FILTER (WHERE md.width <= 768) AS sources
            FROM media_derivatives md
            WHERE md.media_asset_id = pm.media_asset_id
-           ORDER BY md.width ASC
-           LIMIT 1
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
@@ -778,6 +780,7 @@ export interface PublicProductCard {
 }
 
 export interface PublicProductImage {
+  sources?: Array<{ url: string; width: number }>;
   url: string;
   thumb: string | null;
   role: string;

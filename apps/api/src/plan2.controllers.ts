@@ -287,8 +287,12 @@ export class PublicCatalogController {
   }
 
   @Get('page')
-  async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
-    return publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));
+  async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>,
+    @Res({ passthrough: true }) response: Response) {
+    const started = performance.now();
+    const result = await publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));
+    response.setHeader('Server-Timing', `catalog;dur=${(performance.now() - started).toFixed(1)}`);
+    return result;
   }
 
   @Post('prepare')

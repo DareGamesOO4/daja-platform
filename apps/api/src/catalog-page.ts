@@ -1,3 +1,4 @@
+import { publicListingParams } from './catalog-page-params.js';
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { CatalogRepository } from '@daja/database';
@@ -6,8 +7,8 @@ import { automaticFilterOptions } from './catalog-filter-options.js';
 import { initializeCatalogFilters } from './catalog-filters-defaults.js';
 import { departmentBrandNames } from './catalog-department-brands.js';
 
-export interface Option { id: string; label: string; visible: boolean; color: string; image: string; conditions: Array<{ source: string; values: string[] }> }
-export interface Node { id: string; title: string; visible: boolean; priority: number; mode: string; style: string; match: string; unit: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined }
+export interface Option { urlSlug?: string; id: string; label: string; visible: boolean; color: string; image: string; conditions: Array<{ source: string; values: string[] }> }
+export interface Node { urlSlug?: string; id: string; title: string; visible: boolean; priority: number; mode: string; style: string; match: string; unit: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined }
 export interface Configuration { schemaVersion: number; filters: Node[] }
 interface Product {
   id: string; name: string; slug: string; department: string; brand: string | null; category: string | null;
@@ -18,6 +19,7 @@ export const catalogPageSchema = z.object({
   department: z.enum(['satovi', 'daljinski', 'baterije', 'naocare']).default('satovi'),
   page: z.coerce.number().int().min(1).max(100000).default(1),
   params: z.string().max(16000).default(''),
+  pathname: z.string().max(200).regex(/^\/(?:catalog|muski-satovi|zenski-satovi|naocare|baterije|daljinski|brend\/[^/]+)\/?$/).optional(),
   fixedGender: z.enum(['Muški', 'Ženski']).optional(),
   configurationVersion: z.string().max(64).optional(),
   prepareOnly: z.enum(['0', '1']).optional()
@@ -66,7 +68,7 @@ function optionMatches(product: Product, option: Option) {
   cached.set(option, result);
   return result;
 }
-function activeFilters(params: URLSearchParams, nodes: Node[], fixedGender?: string) {
+function activeFilters(params: URLSearchParams, nodes: Node[], fixedGender?: string, matches = optionMatches) {
   return nodes.flatMap(node => {
     if (fixedGender && node.sources.includes('gender')) return [];
     if (node.style === 'range') {
@@ -81,7 +83,7 @@ function activeFilters(params: URLSearchParams, nodes: Node[], fixedGender?: str
     const ids = params.getAll(`cf_${node.id}`);
     const selected = node.options.filter(option => option.visible && ids.includes(option.id));
     return selected.length ? [{ id: node.id, test: (product: Product) => node.match === 'all'
-      ? selected.every(option => optionMatches(product, option)) : selected.some(option => optionMatches(product, option)) }] : [];
+      ? selected.every(option => matches(product, option)) : selected.some(option => matches(product, option)) }] : [];
   });
 }
 async function productsSnapshot(pool: Pool, organizationId: string, department?: string, includeHidden = false): Promise<Product[]> {
@@ -111,14 +113,42 @@ async function cards(pool: Pool, organizationId: string, ids: string[], includeH
   // serializing every specification and feature twice in the initial HTML.
   return result.items.sort((a,b) => order.get(a.productId)!-order.get(b.productId)!).map(card => {
     const { attributes: _attributes, features: _features, ...compact } = card;
-    return { ...compact, images: compact.images.map(image => ({ url: image.url, thumb: image.thumb })) };
+    return { ...compact, images: compact.images.map(image => ({ url: image.url, thumb: image.thumb, sources: image.sources })) };
   });
 }
 type Facet = { values: Array<{value: string; label: string; color: string; image: string; count: number}>; selected: string[]; numbers: number[] };
 interface Selection { products: Product[]; facets?: Record<string, Facet> }
 interface Snapshot { products: Product[]; configuration: Configuration; version: string; nodes: Node[]; selections: Map<string, Selection>; orders: Map<string, Product[]> }
+// Reuse source-value posting lists across all combinations of facets.
+const sourcePostings = new WeakMap<Snapshot, Map<string, Map<string, Set<Product>>>>();
+const optionPostings = new WeakMap<Snapshot, Map<Option, Set<Product>>>();
+function indexedOptionMatches(data: Snapshot, product: Product, option: Option): boolean {
+  let options = optionPostings.get(data);
+  if (!options) { options = new Map(); optionPostings.set(data, options); }
+  let members = options.get(option);
+  if (!members) {
+    members = new Set();
+    let sources = sourcePostings.get(data);
+    if (!sources) { sources = new Map(); sourcePostings.set(data, sources); }
+    for (const condition of option.conditions) {
+      let posting = sources.get(condition.source);
+      if (!posting) {
+        posting = new Map();
+        for (const entry of data.products) for (const value of values(entry, condition.source)) {
+          let products = posting.get(value);
+          if (!products) { products = new Set(); posting.set(value, products); }
+          products.add(entry);
+        }
+        sources.set(condition.source, posting);
+      }
+      for (const value of condition.values) for (const entry of posting.get(value) || []) members.add(entry);
+    }
+    options.set(option, members);
+  }
+  return members.has(product);
+}
 const snapshots = new Map<string, { pool: Pool; expires: number; promise: Promise<Snapshot> }>();
-const SNAPSHOT_TTL = 10_000;
+const SNAPSHOT_TTL = 60_000;
 export function invalidateCatalogPages(organizationId: string) {
   for (const key of snapshots.keys()) if (key.startsWith(`${organizationId}:`)) snapshots.delete(key);
 }
@@ -171,7 +201,8 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
   const cached = data.selections.get(key);
   if (cached && (!withFacets || cached.facets)) return cached;
   const { products, nodes } = data;
-  const tests = activeFilters(params, nodes, fixedGender);
+  const matches = (product: Product, option: Option) => indexedOptionMatches(data, product, option);
+  const tests = activeFilters(params, nodes, fixedGender, matches);
   const query = params.get('q')?.trim().toLowerCase();
   const failures = new Map<Product, string[]>();
   const eligible = products.filter(product => {
@@ -198,7 +229,7 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
     const choices = options.map(option => {
       const others = node.match === 'all' ? selectedOptions.filter(other => other.id !== option.id) : [];
       let count = 0;
-      for (const product of candidates) if (optionMatches(product,option) && others.every(other => optionMatches(product,other))) count++;
+      for (const product of candidates) if (matches(product,option) && others.every(other => matches(product,other))) count++;
       return {value:option.id,label:option.label,color:option.color,image:option.image,count};
     }).filter(value => value.count > 0 || selected.includes(value.value));
     const approved = options.flatMap(option => option.conditions.flatMap(condition => condition.values)).map(numeric).filter(value => value !== null);
@@ -213,7 +244,8 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
 }
 export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query, includeHidden = false) {
   const data = await snapshot(pool, organizationId, input.department, includeHidden);
-  const params = new URLSearchParams(input.params);
+  const rawParams = new URLSearchParams(input.params);
+  const params = input.pathname ? publicListingParams(rawParams, data.configuration, input.pathname) : rawParams;
   const selection = selectProducts(data, params, input.fixedGender, input.prepareOnly !== '1');
   const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key.startsWith('cf_')));
   orderParams.sort();
@@ -242,7 +274,7 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const productIds = filtered.slice((page-1)*32,page*32).map(product => product.id);
   // Planning resolves membership/order only. No card, gallery or stock query.
   const items = input.prepareOnly === '1' ? [] : await cards(pool,organizationId,productIds,includeHidden);
-  return {items,total,page,perPage:32,configurationVersion:data.version,
+  return {items,total,page,perPage:32,configurationVersion:data.version, ...(input.pathname ? { pathname: input.pathname } : {}),
     ...(input.configurationVersion === data.version ? {} : {configuration:data.configuration}),
     facets:selection.facets || {},...(input.prepareOnly === '1' ? {productIds} : {}),...(hiddenCount === undefined ? {} : {hiddenCount})};
 }

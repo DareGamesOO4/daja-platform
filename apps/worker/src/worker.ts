@@ -263,7 +263,7 @@ async function processMediaJob(
        LIMIT 1`,
       [organizationId, mediaId]
     );
-    const targetWidths = primary.rowCount ? [512] : [];
+    const targetWidths = primary.rowCount ? [256, 512, 768] : [];
     const derivatives: Array<{
       width: number;
       height: number;
@@ -279,6 +279,7 @@ async function processMediaJob(
         .resize({ width, withoutEnlargement: true })
         .webp({ quality: 82 })
         .toBuffer({ resolveWithObject: true });
+      if (derivatives.some(item => item.width === output.info.width)) continue;
       const key = productMediaThumbnailStorageKey({
         originalKey: asset.storage_key,
         organizationId,
