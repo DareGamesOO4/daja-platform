@@ -276,7 +276,9 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
       description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
     }));
     const boundary = priceBoundary.rows[0]?.at?.getTime() ?? Infinity;
-    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Math.min(Date.now() + 10_000, boundary) };
+    // Catalog, inventory, price and media events invalidate this snapshot.
+    // Keep the index between searches; scheduled sale boundaries still expire it.
+    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Math.min(Date.now() + 60_000, boundary) };
   })();
   // Bound the organization cache and deduplicate concurrent cold requests.
   if (snapshots.size >= 20 && !snapshots.has(organizationId)) snapshots.delete(snapshots.keys().next().value ?? '');
@@ -523,9 +525,11 @@ function vocabularyFor(entries: Entry[], facets: Facet[]) {
 }
 function wordCorrections(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]):WordFix[]{
   const text=prepareQuery(query,custom);
-  const vocabulary = vocabularyFor(entries, facets);
   const unresolved=new Set(parseQuery(text,facets).terms);
   const tokens=text.match(/[a-z0-9]+/g)||[];
+  // Model-only queries have no words to correct. Avoid building the vocabulary.
+  if (!tokens.some(token => unresolved.has(token) && !/\d/.test(token) && token.length >= 4)) return [];
+  const vocabulary = vocabularyFor(entries, facets);
   const fixes:WordFix[]=[];
   for(const token of [...new Set(tokens)]){
     // Model numbers and short brand abbreviations require explicit user confirmation.
@@ -770,7 +774,9 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
   return {
     query:input.q,normalizedQuery:canonical(effective),recognized:parsed.labels,
     conditions:parsed.conditions.map(({id,label,query})=>({id,label,query})),appliedCorrection,
-    completions:raw&&input.mode==='suggestions'?completionQueries(effective,scope,facets,[]):[],
+    // Model codes already identify products; facet completions would rerank
+    // the whole catalog up to 40 times before returning those products.
+    completions:raw&&!parsed.model&&input.mode==='suggestions'?completionQueries(effective,scope,facets,[]):[],
     similar:nearby.flatMap(a=>byId.has(a.id)?[{product:byId.get(a.id)!,reason:a.reason}]:[]),
     intent:parsed.model?'products':groups.brands.length?'brands':groups.collections.length?'collections':'products',
     groups,items:ordered(selected),total:ranked.length,departments:departments.map(d=>({id:d,count:ranked.filter(v=>v.entry.row.department===d).length})),
