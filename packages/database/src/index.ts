@@ -8,6 +8,7 @@ export * from './audit.js';
 export * from './outbox.js';
 export * from './catalog.js';
 export * from './media.js';
+export * from './media-images.js';
 export * from './rfid.js';
 export * from './inventory.js';
 export * from './imports.js';

@@ -13,6 +13,7 @@ import { Readable } from 'node:stream';
 import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
+import { prepareImageVariants } from './media-images.js';
 
 export interface MediaStorageAdapter {
   createPresignedGet(input: { key: string }): Promise<{ downloadUrl: string; expiresAt: Date }>;
@@ -203,6 +204,7 @@ export class MediaRepository {
     mediaId: string;
     storageKey: string;
     publicUrl: string | null;
+    thumbnailUrl?: string;
     uploadUrl: string;
     expiresAt: Date;
   }> {
@@ -242,10 +244,21 @@ export class MediaRepository {
         })
       ]
     );
+    if (input.mimeType.startsWith('image/')) {
+      const mainKey = uploadedImageStorageKey(storageKey);
+      const thumbnailKey = productMediaThumbnailStorageKey({
+        originalKey: mainKey, organizationId: ctx.organizationId, mediaId, width: 512
+      });
+      return {
+        mediaId, storageKey, ...presign,
+        publicUrl: requiredPublicUrl(storage, mainKey),
+        thumbnailUrl: requiredPublicUrl(storage, thumbnailKey)
+      };
+    }
     return { mediaId, storageKey, publicUrl, ...presign };
   }
 
-  async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter) {
+  async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter, createdKeys: Set<string>) {
     const asset = await this.getForUpdate(ctx, mediaId);
     if (asset.status !== 'pending_upload') {
       throw new ValidationFailedError('Media asset is not pending upload');
@@ -264,6 +277,9 @@ export class MediaRepository {
     if (asset.checksum_sha256 && sha256(bytes) !== asset.checksum_sha256.toLowerCase()) {
       throw new ValidationFailedError('Uploaded content checksum does not match');
     }
+    if (asset.mime_type.startsWith('image/')) {
+      return this.optimizeUploadedImage(ctx, mediaId, storage, createdKeys, { asset, bytes });
+    }
     await this.client.query(
       `UPDATE media_assets
        SET status = 'uploaded', mime_type = COALESCE($3, mime_type), size_bytes = $4,
@@ -277,7 +293,55 @@ export class MediaRepository {
         sha256(bytes)
       ]
     );
-    return { mediaId, status: 'uploaded' };
+    return { mediaId, status: 'uploaded', obsoleteStorageKeys: [] as string[] };
+  }
+
+  /** Caller owns the transaction and removes created objects on rollback, obsolete ones after commit. */
+  async optimizeUploadedImage(
+    ctx: Pick<RequestContext, 'organizationId'>,
+    mediaId: string,
+    storage: MediaStorageAdapter,
+    createdKeys: Set<string>,
+    source?: { asset: MediaAssetRow; bytes: Buffer }
+  ) {
+    const asset = source?.asset ?? await this.getForUpdate(ctx, mediaId);
+    if (!['pending_upload', 'uploaded', 'processing'].includes(asset.status)) {
+      throw new ValidationFailedError('Media asset is not awaiting image processing');
+    }
+    const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
+    const processed = await prepareImageVariants(bytes);
+    const mainKey = uploadedImageStorageKey(asset.storage_key);
+    const thumbnailKey = productMediaThumbnailStorageKey({
+      originalKey: mainKey, organizationId: ctx.organizationId, mediaId, width: 512
+    });
+    const publicUrl = requiredPublicUrl(storage, mainKey);
+    const thumbnailUrl = requiredPublicUrl(storage, thumbnailKey);
+    const previous = await this.client.query<{ storage_key: string }>(
+      'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
+      [ctx.organizationId, mediaId]
+    );
+    for (const [key, image] of [[mainKey, processed.original], [thumbnailKey, processed.thumbnail]] as const) {
+      createdKeys.add(key);
+      await storage.putObject({ key, body: image.data, contentType: processed.mimeType,
+        cacheControl: 'public, max-age=31536000, immutable' });
+    }
+    const ready = await this.markReady({
+      organizationId: ctx.organizationId, mediaId,
+      width: processed.original.width, height: processed.original.height,
+      original: { storageKey: mainKey, publicUrl, mimeType: processed.mimeType,
+        sizeBytes: processed.original.data.length, checksumSha256: sha256(processed.original.data) },
+      replaceDerivatives: true,
+      derivatives: [{ width: processed.thumbnail.width, height: processed.thumbnail.height,
+        mimeType: processed.mimeType, storageKey: thumbnailKey, publicUrl: thumbnailUrl,
+        sizeBytes: processed.thumbnail.data.length, checksumSha256: sha256(processed.thumbnail.data) }]
+    });
+    if (!ready) throw new ResourceNotFoundError('media asset');
+    return {
+      mediaId, status: 'ready', publicUrl, mainImageUrl: publicUrl, thumbnailUrl,
+      width: processed.original.width, height: processed.original.height,
+      obsoleteStorageKeys: [...new Set([asset.storage_key, ...previous.rows.map(row => row.storage_key)])]
+        .filter(key => key !== mainKey && key !== thumbnailKey)
+    };
   }
 
   async markProcessing(
@@ -287,7 +351,7 @@ export class MediaRepository {
     const result = await this.client.query<MediaAssetRow>(
       `UPDATE media_assets
        SET status = 'processing', version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2 AND status IN ('uploaded', 'processing')
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND status IN ('uploaded', 'processing', 'failed')
        RETURNING *`,
       [ctx.organizationId, mediaId]
     );
@@ -303,6 +367,10 @@ export class MediaRepository {
     mediaId: string;
     width: number;
     height: number;
+    original?: {
+      storageKey: string; publicUrl: string; mimeType: string; sizeBytes: number; checksumSha256: string;
+    };
+    replaceDerivatives?: boolean;
     derivatives: Array<{
       width: number;
       height: number;
@@ -315,14 +383,23 @@ export class MediaRepository {
   }): Promise<boolean> {
     const updated = await this.client.query<{ id: string }>(
       `UPDATE media_assets
-       SET status = 'ready', width = $3, height = $4, version = version + 1, updated_at = now()
+       SET status = 'ready', width = $3, height = $4,
+           storage_key = COALESCE($5, storage_key), public_url = COALESCE($6, public_url),
+           mime_type = COALESCE($7, mime_type), size_bytes = COALESCE($8, size_bytes),
+           checksum_sha256 = COALESCE($9, checksum_sha256), version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
        RETURNING id`,
-      [input.organizationId, input.mediaId, input.width, input.height]
+      [input.organizationId, input.mediaId, input.width, input.height,
+        input.original?.storageKey ?? null, input.original?.publicUrl ?? null,
+        input.original?.mimeType ?? null, input.original?.sizeBytes ?? null, input.original?.checksumSha256 ?? null]
     );
     // A user may remove an image while the worker is generating thumbnails.
     // Do not recreate derivative metadata for an asset already discarded.
     if (updated.rowCount !== 1) return false;
+    if (input.replaceDerivatives) {
+      await this.client.query('DELETE FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
+        [input.organizationId, input.mediaId]);
+    }
     for (const derivative of input.derivatives) {
       await this.client.query(
         `INSERT INTO media_derivatives (organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes, checksum_sha256)
@@ -350,7 +427,7 @@ export class MediaRepository {
     await this.client.query(
       `UPDATE media_assets
        SET status = 'failed', metadata = metadata || $3::jsonb, version = version + 1, updated_at = now()
-       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
+       WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND status <> 'ready'`,
       [organizationId, mediaId, JSON.stringify({ failureReason: reason })]
     );
   }
@@ -613,6 +690,11 @@ export function productMediaStorageKey(input: {
     return `${input.productSlug}/${input.productSlug}-${input.imageIndex}-${input.mediaId}${input.extension}`;
   }
   return `org/${input.organizationId}/media/${input.mediaId}/original${input.extension}`;
+}
+
+function uploadedImageStorageKey(sourceKey: string): string {
+  // A fresh URL avoids caching the unprocessed upload as the optimized image.
+  return sourceKey.replace(/\.[^/.]+$/, '') + '-main.webp';
 }
 
 export function productMediaThumbnailStorageKey(input: {

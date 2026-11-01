@@ -2993,33 +2993,45 @@ export class MediaController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'media.upload');
     const id = parseWithSchema(uuidSchema, mediaId);
+    const storage = new R2MediaStorageAdapter(this.config);
+    const createdKeys = new Set<string>();
     const result = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
         const result = await new MediaRepository(client).completeUpload(
           ctx,
           id,
-          new R2MediaStorageAdapter(this.config)
+          storage,
+          createdKeys
         );
         await new OutboxRepository(client).append({
           ctx,
-          eventType: 'MediaUploaded',
+          eventType: result.status === 'ready' ? 'MediaReady' : 'MediaUploaded',
           aggregateType: 'media_asset',
           aggregateId: id,
-          payload: { mediaId: id }
+          payload: { mediaId: id, ...('thumbnailUrl' in result ? {
+            publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl
+          } : {}) }
         });
         return result;
       }
-    );
-    const queue = new Queue('media-processing', { connection: this.redis.client });
-    try {
-      await queue.add('process-media', {
-        organizationId: ctx.organizationId,
-        mediaId: id
-      });
-    } finally {
-      await queue.close();
+    ).catch(async error => {
+      await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+      throw error;
+    });
+    for (const key of result.obsoleteStorageKeys) {
+      await storage.deleteObject(key).catch(error =>
+        this.logger.warn({ error, mediaId: id, key }, 'Could not remove source upload after image optimization'));
     }
-    return result;
+    if (result.status !== 'ready') {
+      const queue = new Queue('media-processing', { connection: this.redis.client });
+      try {
+        await queue.add('process-media', { organizationId: ctx.organizationId, mediaId: id });
+      } finally {
+        await queue.close();
+      }
+    }
+    const { obsoleteStorageKeys: _obsoleteStorageKeys, ...response } = result;
+    return response;
   }
 
   /** Deletes a completed or pending upload that was never attached to a product. */

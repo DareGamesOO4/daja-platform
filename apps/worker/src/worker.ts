@@ -1,17 +1,13 @@
-import { Readable } from 'node:stream';
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { QueueEvents, Worker, type Job, type JobsOptions } from 'bullmq';
 import type { Redis } from 'ioredis';
-import sharp from 'sharp';
 import type { AppConfig } from '@daja/config';
 import { brandedEmail, emailEscape } from '@daja/shared';
 import {
   MediaRepository,
   enqueueEmail,
   OutboxRepository,
-  productMediaThumbnailStorageKey,
+  R2MediaStorageAdapter,
   TransactionManager,
-  sha256,
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
@@ -214,15 +210,8 @@ async function processMediaJob(
   ) {
     throw new Error('R2 credentials are required for media processing');
   }
-  const client = new S3Client({
-    region: 'auto',
-    endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    forcePathStyle: Boolean(config.R2_ENDPOINT),
-    credentials: {
-      accessKeyId: config.R2_ACCESS_KEY_ID,
-      secretAccessKey: config.R2_SECRET_ACCESS_KEY
-    }
-  });
+  const storage = new R2MediaStorageAdapter(config);
+  const createdKeys = new Set<string>();
   const tx = new TransactionManager(database.pool, logger);
   const asset = await tx.run(async (pgClient) =>
     new MediaRepository(pgClient).markProcessing({ organizationId }, mediaId)
@@ -240,100 +229,23 @@ async function processMediaJob(
       );
       return;
     }
-    const original = await client.send(
-      new GetObjectCommand({ Bucket: config.R2_BUCKET, Key: asset.storage_key })
-    );
-    const originalBuffer = await streamToBuffer(original.Body);
-    const metadata = await sharp(originalBuffer, { limitInputPixels: 80_000_000 }).metadata();
-    if (
-      !metadata.width ||
-      !metadata.height ||
-      metadata.width > 12_000 ||
-      metadata.height > 12_000
-    ) {
-      throw new Error('Image dimensions are unsupported');
-    }
-    const sourceWidth = metadata.width;
-    const sourceHeight = metadata.height;
-    // Thumbnails are only useful for the active hero image. Gallery items keep
-    // their original asset and avoid needless R2 objects and image processing.
-    const primary = await database.pool.query(
-      `SELECT 1 FROM product_media
-       WHERE organization_id = $1 AND media_asset_id = $2 AND is_primary
-       LIMIT 1`,
-      [organizationId, mediaId]
-    );
-    const targetWidths = primary.rowCount ? [256, 512, 768] : [];
-    const derivatives: Array<{
-      width: number;
-      height: number;
-      mimeType: string;
-      storageKey: string;
-      publicUrl: string;
-      sizeBytes: number;
-      checksumSha256: string;
-    }> = [];
-    for (const width of targetWidths) {
-      const output = await sharp(originalBuffer, { limitInputPixels: 80_000_000 })
-        .rotate()
-        .resize({ width, withoutEnlargement: true })
-        .webp({ quality: 82 })
-        .toBuffer({ resolveWithObject: true });
-      if (derivatives.some(item => item.width === output.info.width)) continue;
-      const key = productMediaThumbnailStorageKey({
-        originalKey: asset.storage_key,
-        organizationId,
-        mediaId,
-        width
-      });
-      await client.send(
-        new PutObjectCommand({
-          Bucket: config.R2_BUCKET,
-          Key: key,
-          Body: output.data,
-          ContentType: 'image/webp',
-          CacheControl: 'public, max-age=31536000, immutable'
-        })
+    const result = await tx.run(async pgClient => {
+      const result = await new MediaRepository(pgClient).optimizeUploadedImage(
+        { organizationId }, mediaId, storage, createdKeys
       );
-      derivatives.push({
-        width: output.info.width,
-        height: output.info.height,
-        mimeType: 'image/webp',
-        storageKey: key,
-        publicUrl: `${config.MEDIA_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`,
-        sizeBytes: output.data.length,
-        checksumSha256: sha256(output.data)
-      });
-    }
-    const markedReady = await tx.run(async (pgClient) => {
-      const ready = await new MediaRepository(pgClient).markReady({
-        organizationId,
-        mediaId,
-        width: sourceWidth,
-        height: sourceHeight,
-        derivatives
-      });
-      if (!ready) return false;
       await new OutboxRepository(pgClient).append({
-        ctx: { organizationId },
-        eventType: 'MediaReady',
-        aggregateType: 'media_asset',
-        aggregateId: mediaId,
-        payload: {
-          mediaId,
-          derivatives: derivatives.map((item) => ({ width: item.width, publicUrl: item.publicUrl }))
-        }
+        ctx: { organizationId }, eventType: 'MediaReady', aggregateType: 'media_asset', aggregateId: mediaId,
+        payload: { mediaId, publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl }
       });
-      return true;
+      return result;
     });
-    if (!markedReady) {
-      await Promise.all(
-        derivatives.map((derivative) =>
-          client.send(new DeleteObjectCommand({ Bucket: config.R2_BUCKET, Key: derivative.storageKey }))
-        )
-      );
+    createdKeys.clear();
+    for (const key of result.obsoleteStorageKeys) {
+      await storage.deleteObject(key).catch(error =>
+        logger.warn({ error, mediaId, key }, 'Could not remove source upload after image optimization'));
     }
   } catch (error) {
+    await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
     await tx.run((pgClient) =>
       new MediaRepository(pgClient).markFailed(
         organizationId,
@@ -343,24 +255,4 @@ async function processMediaJob(
     );
     throw error;
   }
-}
-
-async function streamToBuffer(body: unknown): Promise<Buffer> {
-  if (body instanceof Uint8Array) {
-    return Buffer.from(body);
-  }
-  if (body instanceof Readable) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of body) {
-      if (Buffer.isBuffer(chunk)) {
-        chunks.push(chunk);
-      } else if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
-        chunks.push(Buffer.from(chunk));
-      } else {
-        throw new Error('Unsupported S3 stream chunk');
-      }
-    }
-    return Buffer.concat(chunks);
-  }
-  throw new Error('Unsupported S3 body stream');
 }
