@@ -59,7 +59,13 @@ const INTERNAL_CATALOG_ATTRIBUTE_KEYS = [
   'additionalbarcodes',
   'rfid_piece_placements',
   '_rfidPiecePlacements',
-  'rfidpieceplacements'
+  'rfidpieceplacements',
+  '_catalog_import',
+  'supplier_sku',
+  'sourceUrl',
+  'source_url',
+  'supplierUrl',
+  'supplier_url'
 ];
 
 export class CatalogRepository {
@@ -254,7 +260,10 @@ export class CatalogRepository {
 
   async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
     const result = await this.client.query(
-      `SELECT p.*, p.item_condition AS "itemCondition", d.slug AS department, b.name AS brand_name, c.name AS category_name,
+      `SELECT p.id, p.name, p.slug, p.description, p.brand_id, p.primary_category_id,
+              p.active, p.published, p.version, p.created_at, p.updated_at,
+              p.department_id, p.seo, p.features, p.model_3d_url, p.marketing_flags,
+              p.item_condition, p.item_condition AS "itemCondition", d.slug AS department, b.name AS brand_name, c.name AS category_name,
               v.id AS "variantId", v.sku, v.barcode, v.mpn, v.currency,
               v.current_price_amount AS "regularPrice",
               COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,

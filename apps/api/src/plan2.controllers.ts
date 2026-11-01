@@ -505,7 +505,7 @@ export class PublicCatalogController {
   ) {
     const ctx = this.publicContext(request);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
-    const cacheKey = `catalog:slug:${ctx.organizationId}:${normalizedSlug}`;
+    const cacheKey = `catalog:slug:public-v2:${ctx.organizationId}:${normalizedSlug}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as unknown;
@@ -2853,7 +2853,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v4:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
-      ...validSlugs.map((slug) => `catalog:slug:${organizationId}:${slug}`)
+      ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`])
     ];
     await this.redis.client.del(...keys);
     if (!validSlugs.length) return;
