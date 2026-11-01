@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
 import {
   Body,
@@ -269,8 +270,13 @@ export class PublicCatalogController {
 
   @Get('search')
   @Throttle({ default: { limit: 300, ttl: 60_000 } })
-  async search(@Req() request: Request, @Query() query: Record<string, string | undefined>): Promise<CatalogSearchResponse> {
-    return searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
+  async search(@Req() request: Request, @Query() query: Record<string, string | undefined>,
+    @Res({ passthrough: true }) response: Response): Promise<CatalogSearchResponse> {
+    const started = performance.now();
+    const result = await searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
+    response.setHeader('Server-Timing', `search;dur=${(performance.now() - started).toFixed(1)}`);
+    response.setHeader('Cache-Control', 'private, no-store');
+    return result;
   }
 
   @Get('exchange-rates')

@@ -451,6 +451,39 @@ function rank(entry: Entry, parsed: Parsed, query: string): number | null {
   return score + parsed.tests.length * 500;
 }
 interface RankedEntry { entry: Entry; score: number }
+// A posting list maps each searchable trigram to its products. The rarest
+// trigram narrows keyword queries before the existing ranking and conditions.
+// Index every field used by rank(), so description/specification matches remain valid.
+const textIndexes = new WeakMap<Entry[], Map<string, Entry[]>>();
+function keywordCandidates(entries: Entry[], parsed: Parsed): Entry[] {
+  const terms = parsed.terms.filter(term => term.length >= 3);
+  if (!terms.length) return entries;
+  let index = textIndexes.get(entries);
+  if (!index) {
+    index = new Map();
+    for (const entry of entries) {
+      const text = [...entry.codes, entry.name, entry.brand, entry.category, entry.specs, entry.features, entry.description].join(' ');
+      const grams = new Set<string>();
+      for (let i = 0; i + 2 < text.length; i++) {
+        const gram = text.slice(i, i + 3);
+        if (!gram.includes(' ')) grams.add(gram);
+      }
+      for (const gram of grams) {
+        let posting = index.get(gram);
+        if (!posting) { posting = []; index.set(gram, posting); }
+        posting.push(entry);
+      }
+    }
+    textIndexes.set(entries, index);
+  }
+  let candidates = entries;
+  for (const term of terms) for (let i = 0; i + 2 < term.length; i++) {
+    const posting = index.get(term.slice(i, i + 3));
+    if (!posting) return [];
+    if (posting.length < candidates.length) candidates = posting;
+  }
+  return candidates;
+}
 const rankedQueries = new WeakMap<Entry[], Map<Parsed, { query: string; rows: RankedEntry[] }>>();
 const productNames = new Intl.Collator('sr-Latn', { numeric: true });
 function rankEntries(entries: Entry[], parsed: Parsed, query: string): readonly RankedEntry[] {
@@ -459,7 +492,7 @@ function rankEntries(entries: Entry[], parsed: Parsed, query: string): readonly 
   const known = cached.get(parsed);
   if (known?.query === query) return known.rows;
   const rows: RankedEntry[] = [];
-  for (const entry of entries) {
+  for (const entry of keywordCandidates(entries, parsed)) {
     const score = rank(entry, parsed, query);
     if (score !== null) rows.push({ entry, score });
   }
@@ -646,7 +679,7 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
   const baseParsed=parseQuery(base,facets,custom);
   const matching=rankEntries(entries,baseParsed,base).map(result=>result.entry);
   if(!matching.length)return result;
-  const candidates=facets.map(facet=>({facet,count:matching.reduce((count,entry)=>count+Number(optionMatches(entry.row,facet)),0)})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,40);
+  const candidates=facets.map(facet=>({facet,count:matching.reduce((count,entry)=>count+Number(optionMatches(entry.row,facet)),0)})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,12);
   for(const {facet} of candidates){
     const value=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
     if(facet.aliases.some(a=>` ${canonical(base)} `.includes(` ${a} `)))continue;
@@ -661,6 +694,7 @@ function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:Se
     else if(token==='datum')label=`${displaySearchQuery(base,facets,facet.department)} sa datumom`;
     else if(!part&&!colorForms[token]&&!adjectiveForms[token])label=`${displaySearchQuery(base,facets,facet.department)} · ${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':displayValue(value)}`;
     if(count&&!result.some(r=>canonical(r.query)===canonical(next)||r.label===label))result.push({label,query:next,count});
+    if (result.length >= 5) break;
   }
   return result.sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label,'sr')).slice(0,5);
 }
@@ -673,55 +707,64 @@ function cursorOffset(cursor: string | undefined, key: string): number {
     return decoded.offset!;
   } catch { throw new ValidationFailedError('Neispravan kursor pretrage.'); }
 }
-// Exact model suggestions must not wait for the full natural-language search index.
-async function exactModelSuggestions(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse | null> {
+// Resolve model fragments against database indexes without preparing the full catalog.
+async function indexedModelSuggestions(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse | null> {
   const query = input.q.trim();
   if (input.mode !== 'suggestions' || input.sort !== 'relevance' ||
       !/^[a-z0-9][a-z0-9._/-]*$/i.test(query) || !/[a-z]/i.test(query) || !/\d/.test(query)) return null;
   const code = compact(query);
-  if (code.length < 4) return null;
-  const matches = await pool.query<{ id: string }>(`
+  if (code.length < 3) return null;
+  const matches = await pool.query<{ id: string; department: string; priority: number }>(`
     WITH candidates AS (
-      SELECT product_id AS id FROM product_variants
-      WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
-        AND (regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') = $2
-          OR regexp_replace(lower(mpn), '[^a-z0-9]', '', 'g') = $2)
-      UNION
-      SELECT id FROM products
-      WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
-        AND regexp_replace(lower(name), '[^a-z0-9]', '', 'g') = $2
+      SELECT product_id AS id, CASE WHEN regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') = $2 THEN 3
+        WHEN regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') LIKE $2 || '%' THEN 2 ELSE 1 END AS priority
+      FROM product_variants WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
+        AND regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') LIKE '%' || $2 || '%'
+      UNION ALL
+      SELECT product_id AS id, CASE WHEN regexp_replace(lower(mpn), '[^a-z0-9]', '', 'g') = $2 THEN 3
+        WHEN regexp_replace(lower(mpn), '[^a-z0-9]', '', 'g') LIKE $2 || '%' THEN 2 ELSE 1 END AS priority
+      FROM product_variants WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
+        AND regexp_replace(lower(mpn), '[^a-z0-9]', '', 'g') LIKE '%' || $2 || '%'
+      UNION ALL
+      SELECT id, CASE WHEN regexp_replace(lower(name), '[^a-z0-9]', '', 'g') = $2 THEN 3
+        WHEN regexp_replace(lower(name), '[^a-z0-9]', '', 'g') LIKE $2 || '%' THEN 2 ELSE 1 END AS priority
+      FROM products WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
+        AND regexp_replace(lower(name), '[^a-z0-9]', '', 'g') LIKE '%' || $2 || '%'
     )
-    SELECT p.id FROM candidates candidate
+    SELECT p.id, d.slug AS department, max(candidate.priority) AS priority FROM candidates candidate
     JOIN products p ON p.id = candidate.id AND p.organization_id = $1
-    JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id
-      AND d.deleted_at IS NULL
+    JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
     WHERE p.deleted_at IS NULL AND p.active AND p.published
       AND d.slug = ANY($3::text[]) AND ($4::text IS NULL OR d.slug = $4)
       AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id
         AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.active AND v.published)
-    ORDER BY p.id LIMIT 7`, [organizationId, code, departments, input.department ?? null]);
-  // Broad/partial inputs continue through the complete search and its pagination.
-  if (!matches.rows.length || matches.rows.length > 6) return null;
-  const ids = matches.rows.map(row => row.id);
+    GROUP BY p.id, d.slug ORDER BY priority DESC, p.name, p.id`, [organizationId, code, departments, input.department ?? null]);
+  // Unknown codes still receive the existing spelling corrections and fallback search.
+  if (!matches.rows.length) return null;
+  const selected = matches.rows.slice(0, 6);
+  const ids = selected.map(row => row.id);
   const { items } = await new CatalogRepository(pool).listPublicProducts({ organizationId }, { productIds: ids, limit: ids.length });
   if (!items.length) return null;
-  items.sort((a, b) => Number(b.availability.inStock) - Number(a.availability.inStock)
+  const priority = new Map(selected.map(row => [row.id, row.priority]));
+  items.sort((a, b) => (priority.get(b.productId) || 0) - (priority.get(a.productId) || 0)
+    || Number(b.availability.inStock) - Number(a.availability.inStock)
     || productNames.compare(a.name, b.name) || a.productId.localeCompare(b.productId));
   return {
     query: input.q, normalizedQuery: normalize(query), recognized: [], conditions: [], appliedCorrection: null,
     completions: [], similar: [], intent: 'products', groups: { brands: [], collections: [], attributes: [] },
-    items, total: items.length, departments: departments.map(id => ({ id, count: items.filter(item => item.department === id).length })),
+    items, total: matches.rows.length, departments: departments.map(id => ({ id, count: matches.rows.filter(item => item.department === id).length })),
     corrections: [], recommendations: [], message: null, nextCursor: null,
   };
 }
 
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
-  const exact = await exactModelSuggestions(pool, organizationId, input);
+  const exact = await indexedModelSuggestions(pool, organizationId, input);
   if (exact) return exact;
   const data=await snapshot(pool,organizationId);
   let cached = searchResults.get(data);
   if (!cached) { cached = new Map(); searchResults.set(data, cached); }
-  const key = JSON.stringify(input);
+  const { seed: _seed, ...searchInput } = input;
+  const key = JSON.stringify(searchInput);
   const known = cached.get(key);
   if (known && known.expires > Date.now()) return known.promise;
   const entry = { expires: data.expires, promise: searchSnapshot(pool, organizationId, input, data) };
@@ -819,7 +862,7 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
     query:input.q,normalizedQuery:canonical(effective),recognized:parsed.labels,
     conditions:parsed.conditions.map(({id,label,query})=>({id,label,query})),appliedCorrection,
     // Model codes already identify products; facet completions would rerank
-    // the whole catalog up to 40 times before returning those products.
+    // the catalog repeatedly before returning those products.
     completions:raw&&!parsed.model&&input.mode==='suggestions'?completionQueries(effective,scope,facets,[]):[],
     similar:nearby.flatMap(a=>byId.has(a.id)?[{product:byId.get(a.id)!,reason:a.reason}]:[]),
     intent:parsed.model?'products':groups.brands.length?'brands':groups.collections.length?'collections':'products',
