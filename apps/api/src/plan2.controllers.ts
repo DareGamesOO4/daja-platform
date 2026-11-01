@@ -1396,8 +1396,9 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     this.requireWorkforceManager(ctx);
     const id = parseWithSchema(uuidSchema, userId);
-    const products = paged === '1' ? [] : await workforceProducts(this.database.pool, ctx.organizationId, id);
-    const activity = (await this.database.pool.query(
+    const [products, activityResult, summaries] = await Promise.all([
+      paged === '1' ? Promise.resolve([]) : workforceProducts(this.database.pool, ctx.organizationId, id),
+      this.database.pool.query(
       `SELECT audit.id, audit.operation, audit.occurred_at AS "occurredAt", audit.aggregate_type AS "aggregateType", audit.aggregate_id AS "aggregateId",
               audit.before_payload AS "beforePayload", audit.after_payload AS "afterPayload", audit.reason,
               COALESCE(audit.after_payload ->> 'name', audit.before_payload ->> 'name', 'Artikal') AS "productName"
@@ -1406,9 +1407,10 @@ export class StaffCatalogController {
          AND (audit.actor_user_id = $2 OR (audit.aggregate_type='product' AND EXISTS (
            SELECT 1 FROM products p WHERE p.organization_id=$1 AND p.id=audit.aggregate_id AND p.created_by_user_id=$2)))
        ORDER BY audit.occurred_at DESC LIMIT 250`, [ctx.organizationId, id]
-    )).rows;
-    const summaries = await workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString(), id);
-    return { products, activity,
+    ),
+      workforceSummary(this.database.pool, ctx.organizationId, new Date(Date.now()-30*86_400_000).toISOString(), new Date().toISOString(), id),
+    ]);
+    return { products, activity: activityResult.rows,
       summary: summaries.find(member => member.id === id) ?? null };
   }
 
@@ -2763,7 +2765,26 @@ export class StaffCatalogController {
     const cursorColumns = sortColumns.map(column => column.replace(/\bp\./g, 'page_cursor.'));
     const rows = (
       await this.database.pool.query(
-        `SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
+        `WITH selected_products AS MATERIALIZED (
+         SELECT p.* FROM products p
+         LEFT JOIN products page_cursor ON page_cursor.organization_id=p.organization_id AND page_cursor.id=$5::uuid
+         LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
+         LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id
+         LEFT JOIN categories c ON c.id=p.primary_category_id AND c.organization_id=p.organization_id
+         LEFT JOIN LATERAL (
+           SELECT pv.sku, pv.current_price_amount FROM product_variants pv
+           WHERE pv.organization_id=p.organization_id AND pv.product_id=p.id AND pv.deleted_at IS NULL
+           ORDER BY pv.created_at, pv.id LIMIT 1
+         ) v ON $7::text IS NOT NULL
+       WHERE p.organization_id = $1
+         AND ($2::uuid IS NULL OR p.id = $2)
+         AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
+         AND ($4::boolean OR p.deleted_at IS NULL)
+         AND ($5::uuid IS NULL OR (${sortColumns.join(', ')}) < (${cursorColumns.join(', ')}))
+         AND ($7::text IS NULL OR (${searchPredicate}))
+         ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6
+       )
+       SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", p.created_by_user_id AS "createdByUserId",
               supplier.url AS "supplierUrl", supplier.external_reference AS "supplierReference",
@@ -2798,8 +2819,7 @@ export class StaffCatalogController {
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
               tag.id AS "rfidTagId", tag.epc, tag.tid, tag.status AS "rfidTagStatus",
               media.public_url AS "primaryImageUrl", media.thumbnail_url AS "thumbnailUrl"
-       FROM products p
-       LEFT JOIN products page_cursor ON page_cursor.organization_id = p.organization_id AND page_cursor.id = $5::uuid
+       FROM selected_products p
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_provider_checks provider ON provider.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
@@ -2817,7 +2837,7 @@ export class StaffCatalogController {
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id
        LEFT JOIN LATERAL (
          SELECT * FROM product_variants WHERE product_id = p.id AND organization_id = p.organization_id AND deleted_at IS NULL
-         ORDER BY created_at LIMIT 1
+         ORDER BY created_at, id LIMIT 1
        ) v ON true
        LEFT JOIN LATERAL (
          SELECT quantity, location_id, zone_id, bin_id
@@ -2849,12 +2869,7 @@ export class StaffCatalogController {
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
        ) media ON true
-       WHERE p.organization_id = $1
-         AND ($2::uuid IS NULL OR p.id = $2)
-         AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
-         AND ($4::boolean OR p.deleted_at IS NULL)
-         AND ($5::uuid IS NULL OR (${sortColumns.join(', ')}) < (${cursorColumns.join(', ')}))
-         AND ($7::text IS NULL OR (${searchPredicate}))
+
        ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6`,
         [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null, page?.search || null]
       )
