@@ -17,3 +17,4 @@ export * from './auth.js';
 export * from './storefront.js';
 export * from './email.js';
 export * from './product-alert-dispatcher.js';
+export * from './catalog-public.js';

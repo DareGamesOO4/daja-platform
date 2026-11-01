@@ -7,6 +7,8 @@ import sharp from 'sharp';
 import type { AppConfig } from '@daja/config';
 import {
   R2MediaStorageAdapter,
+  MediaRepository,
+  type MediaAssetRow,
   productMediaStorageKey,
   productMediaThumbnailStorageKey,
   sha256,
@@ -65,108 +67,42 @@ export async function importRemoteImage(input: {
   productSlug?: string;
   imageIndex?: number;
 }): Promise<RemoteMediaImportResult> {
-  const processed = await prepareRemoteImage(input.sourceUrl);
+  const downloaded = await downloadRemoteImage(input.sourceUrl);
   const mediaId = randomUUID();
   const storage = new R2MediaStorageAdapter(input.config);
-  const originalKey = productMediaStorageKey({
-    organizationId: input.organizationId,
-    mediaId,
-    productSlug: input.productSlug,
-    imageIndex: input.imageIndex,
-    extension: '.webp'
+  const sourceKey = productMediaStorageKey({
+    organizationId: input.organizationId, mediaId,
+    productSlug: input.productSlug, imageIndex: input.imageIndex, extension: '.source'
   });
-  const originalUrl = requiredPublicUrl(storage, originalKey);
-  const thumbnailKey = productMediaThumbnailStorageKey({
-    originalKey,
-    organizationId: input.organizationId,
-    mediaId,
-    width: processed.thumbnail.width
-  });
-  const thumbnailUrl = requiredPublicUrl(storage, thumbnailKey);
-  const storedKeys = [originalKey, thumbnailKey];
+  const createdKeys = new Set<string>();
+  const client = await input.database.pool.connect();
   try {
-    await storage.putObject({
-      key: originalKey,
-      body: processed.original.data,
-      contentType: 'image/webp',
-      cacheControl: CACHE_CONTROL
-    });
-    await storage.putObject({
-      key: thumbnailKey,
-      body: processed.thumbnail.data,
-      contentType: 'image/webp',
-      cacheControl: CACHE_CONTROL
-    });
-
-    const client = await input.database.pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO media_assets (
-           id, organization_id, storage_provider, storage_bucket, storage_key,
-           public_url, mime_type, width, height, size_bytes, checksum_sha256,
-           status, metadata
-         )
-         VALUES ($1, $2, 'r2', $3, $4, $5, 'image/webp', $6, $7, $8, $9, 'ready', $10::jsonb)`,
-        [
-          mediaId,
-          input.organizationId,
-          storage.bucket(),
-          originalKey,
-          originalUrl,
-          processed.original.width,
-          processed.original.height,
-          processed.original.data.length,
-          sha256(processed.original.data),
-          JSON.stringify({
-            sourceUrl: input.sourceUrl,
-            sourceMimeType: processed.sourceContentType,
-            sourceSizeBytes: processed.sourceSizeBytes,
-            productSlug: input.productSlug ?? null,
-            imageIndex: input.imageIndex ?? null,
-            importedAt: new Date().toISOString()
-          })
-        ]
-      );
-      await client.query(
-        `INSERT INTO media_derivatives (
-           organization_id, media_asset_id, width, height, mime_type,
-           storage_key, public_url, size_bytes, checksum_sha256
-         )
-         VALUES ($1, $2, $3, $4, 'image/webp', $5, $6, $7, $8)`,
-        [
-          input.organizationId,
-          mediaId,
-          processed.thumbnail.width,
-          processed.thumbnail.height,
-          thumbnailKey,
-          thumbnailUrl,
-          processed.thumbnail.data.length,
-          sha256(processed.thumbnail.data)
-        ]
-      );
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    await client.query('BEGIN');
+    const inserted = await client.query<MediaAssetRow>(
+      `INSERT INTO media_assets (id, organization_id, storage_provider, storage_bucket, storage_key,
+        public_url, mime_type, size_bytes, checksum_sha256, status, metadata)
+       VALUES ($1,$2,'r2',$3,$4,$5,$6,$7,$8,'uploaded',$9::jsonb) RETURNING *`,
+      [mediaId, input.organizationId, storage.bucket(), sourceKey, requiredPublicUrl(storage, sourceKey),
+        downloaded.contentType || 'image/jpeg', downloaded.buffer.length, sha256(downloaded.buffer),
+        JSON.stringify({ sourceUrl: input.sourceUrl, sourceMimeType: downloaded.contentType,
+          sourceSizeBytes: downloaded.buffer.length, productSlug: input.productSlug ?? null,
+          imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString() })]
+    );
+    const asset = inserted.rows[0]!;
+    const result = await new MediaRepository(client).optimizeUploadedImage(
+      { organizationId: input.organizationId }, mediaId, storage, createdKeys,
+      { asset, bytes: downloaded.buffer }
+    );
+    await client.query('COMMIT');
+    return { id: mediaId, mediaId, publicUrl: result.publicUrl, mainImageUrl: result.mainImageUrl,
+      thumbnailUrl: result.thumbnailUrl, storageKey: result.storageKey, width: result.width, height: result.height };
   } catch (error) {
-    await Promise.all(storedKeys.map((key) => storage.deleteObject(key).catch(() => undefined)));
+    await client.query('ROLLBACK').catch(() => undefined);
+    await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
     throw error;
+  } finally {
+    client.release();
   }
-
-  return {
-    id: mediaId,
-    mediaId,
-    publicUrl: originalUrl,
-    mainImageUrl: originalUrl,
-    thumbnailUrl,
-    storageKey: originalKey,
-    width: processed.original.width,
-    height: processed.original.height
-  };
 }
 
 export async function ensurePrimaryMediaThumbnail(input: {
@@ -178,7 +114,7 @@ export async function ensurePrimaryMediaThumbnail(input: {
   const existing = await input.database.pool.query<{ public_url: string }>(
     `SELECT public_url FROM media_derivatives
      WHERE organization_id = $1 AND media_asset_id = $2
-     ORDER BY width ASC
+     ORDER BY (mime_type = 'image/webp') DESC, width ASC
      LIMIT 1`,
     [input.organizationId, input.mediaId]
   );
@@ -203,7 +139,7 @@ export async function ensurePrimaryMediaThumbnail(input: {
   const original = await storage.getObject(row.storage_key);
   const output = await sharp(original, { limitInputPixels: MAX_INPUT_PIXELS })
     .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 80, effort: 4, smartSubsample: true })
+    .webp({ quality: 75, effort: 4, smartSubsample: true })
     .toBuffer({ resolveWithObject: true });
   if (!output.info.width || !output.info.height) {
     throw new ValidationFailedError('Thumbnail dimensions could not be determined');
@@ -228,8 +164,8 @@ export async function ensurePrimaryMediaThumbnail(input: {
          storage_key, public_url, size_bytes, checksum_sha256
        )
        VALUES ($1, $2, $3, $4, 'image/webp', $5, $6, $7, $8)
-       ON CONFLICT (media_asset_id, width) DO UPDATE
-       SET height = EXCLUDED.height, mime_type = EXCLUDED.mime_type,
+       ON CONFLICT (media_asset_id, storage_key) DO UPDATE
+       SET width = EXCLUDED.width, height = EXCLUDED.height, mime_type = EXCLUDED.mime_type,
            storage_key = EXCLUDED.storage_key, public_url = EXCLUDED.public_url,
            size_bytes = EXCLUDED.size_bytes, checksum_sha256 = EXCLUDED.checksum_sha256`,
       [

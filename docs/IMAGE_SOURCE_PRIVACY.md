@@ -34,3 +34,16 @@ Google Lens i druge vizuelne pretrage mogu pronaći druge sajtove sa istom ili s
 ## Obim i validacija
 
 Provera je read-only nad produkcijom i statički pregled odgovarajućeg koda. TypeScript provera je prošla; testovi nisu pokretani. Ceo javni katalog i feed su obuhvaćeni, detalji, HTML i binarni fajlovi su uzorak navedenog obima. Ne predstavlja dokaz da je proverena svaka stara kopija fajla, privatno skladište ili Google-ov raniji indeks.
+
+## Dopuna: četiri formata i interni prikaz izvora
+
+Za javne odgovore uvedeno je rekurzivno čišćenje privatnih atributa i tekstova,
+uključujući prevode i merchant feed. Tri ranije navedena opisa sada se čiste pri
+javnom prikazu; original je očuvan u bazi. Nova verzija ključeva keša zaobilazi
+stare odgovore. URL sourceUrl i originalFilename ostaju samo u internoj bazi; po naknadnoj
+korisnikovoj instrukciji nije dodat novi admin prikaz ni endpoint polje za izvor.
+
+Proširena read-only provera obuhvatila je svih 6.054 URL-a slika iz javnog
+kataloga: svi HTTP 200, bez EXIF/IPTC/XMP blokova ili prepoznatih dobavljačkih
+URL-ova u HTTP zaglavljima. Ovo ne tvrdi da je pregledan svaki napušteni R2
+objekat ili ranije preuzeta/indeksirana kopija. Deploy nije proveravan.

@@ -117,7 +117,7 @@ export async function workforceProducts(db: Pick<Database['pool'], 'query'>, org
       AND variant_id=v.id ORDER BY updated_at DESC LIMIT 1) inventory ON true
     LEFT JOIN LATERAL (SELECT ma.public_url, md.public_url AS thumbnail_url FROM product_media pm
       JOIN media_assets ma ON ma.id=pm.media_asset_id AND ma.status='ready'
-      LEFT JOIN LATERAL (SELECT public_url FROM media_derivatives WHERE media_asset_id=ma.id ORDER BY width LIMIT 1) md ON true
+      LEFT JOIN LATERAL (SELECT public_url FROM media_derivatives WHERE media_asset_id=ma.id ORDER BY (mime_type = 'image/webp') DESC, width LIMIT 1) md ON true
       WHERE pm.organization_id=p.organization_id AND pm.product_id=p.id ORDER BY pm.is_primary DESC,pm.position,pm.id LIMIT 1) media ON true
     WHERE p.organization_id=$1 AND p.created_by_user_id=$2 ORDER BY p.created_at DESC,p.id`, [organizationId, userId]);
   return rows.map(({ department_id, brand_id, primary_category_id, description, barcode, gender, current_price_amount,

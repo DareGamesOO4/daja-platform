@@ -1,3 +1,4 @@
+import { downloadRemoteImage } from '../apps/api/src/remote-media.service.js';
 /** Import the reviewed offline 1072-remote AVIF60 Linkel package through the staff catalogue API.
  * Defaults to a read-only preview. Pass --apply to upload media and save stock.
  * Credentials come from explicit, ignored env files and CATALOG_IMPORT_TOKEN.
@@ -198,23 +199,23 @@ try {
         await saveReport(); return;
       }
       for (const a of assets) {
-        const { media, mediaId, key, thumbnailKey } = a;
-        const known = (await pool.query('SELECT checksum_sha256,status FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [organizationId, mediaId])).rows[0];
-        if (known && known.checksum_sha256 !== media.image.sha256) throw new Error('Media identifier collision');
+        const { media, mediaId, key } = a;
+        const known = (await pool.query('SELECT checksum_sha256,status,metadata FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [organizationId, mediaId])).rows[0];
+        if (known && (known.metadata?.sourceChecksumSha256 ?? known.checksum_sha256) !== media.image.sha256) throw new Error('Media identifier collision');
         if (!known || known.status !== 'ready') {
-          for (const [index, asset] of [media.image, media.thumbnail].entries()) {
-            await storage.putObject({ key: index === 0 ? key : thumbnailKey, body: await readFile(resolve(root, asset.path)), contentType: 'image/avif', cacheControl: 'public, max-age=31536000, immutable', sizeBytes: asset.sizeBytes, metadata: { sha256: asset.sha256, source: 'linkel', 'source-id': product.source.source_id, quality: '60' } });
-          }
+          const sourceBytes = (await downloadRemoteImage(media.sourceUrl)).buffer;
+          const createdKeys = new Set<string>();
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
             await client.query(`INSERT INTO media_assets (id,organization_id,storage_provider,storage_bucket,storage_key,public_url,mime_type,size_bytes,checksum_sha256,status,metadata)
               VALUES ($1,$2,'r2',$3,$4,$5,'image/avif',$6,$7,'uploaded',$8::jsonb) ON CONFLICT (id) DO NOTHING`,
-              [mediaId, organizationId, storage.bucket(), key, storage.publicUrl(key), media.image.sizeBytes, media.image.sha256, JSON.stringify({ source: 'linkel', sourceId: product.source.source_id, sourceUrl: media.sourceUrl, packageHash, format: 'avif', quality: 60 })]);
-            const ready = await new MediaRepository(client).markReady({ organizationId, mediaId, width: media.image.width, height: media.image.height, derivatives: [{ width: media.thumbnail.width, height: media.thumbnail.height, mimeType: 'image/avif', storageKey: thumbnailKey, publicUrl: storage.publicUrl(thumbnailKey)!, sizeBytes: media.thumbnail.sizeBytes, checksumSha256: media.thumbnail.sha256 }] });
-            if (!ready) throw new Error('Could not register prepared image');
+              [mediaId, organizationId, storage.bucket(), key, storage.publicUrl(key), media.image.sizeBytes, media.image.sha256, JSON.stringify({ sourceChecksumSha256: media.image.sha256, source: 'linkel', sourceId: product.source.source_id, sourceUrl: media.sourceUrl, packageHash, format: 'avif+webp', quality: 65, fallbackQuality: 75 })]);
+            const asset = (await client.query('SELECT * FROM media_assets WHERE organization_id=$1 AND id=$2 FOR UPDATE', [organizationId, mediaId])).rows[0];
+            await new MediaRepository(client).optimizeUploadedImage({ organizationId }, mediaId, storage, createdKeys,
+              { asset, bytes: sourceBytes });
             await client.query('COMMIT');
-          } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+          } catch (e) { await client.query('ROLLBACK'); await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key))); throw e; } finally { client.release(); }
         }
       }
       const description = product.normalizedRow.description || productName;

@@ -58,11 +58,12 @@ export async function prepareImageVariants(source: Buffer, options: ImageOutputO
     throw new ValidationFailedError('Image dimensions are unsupported');
   }
 
-  const thumbnailPipeline = sharp(originalData, { limitInputPixels: MAX_INPUT_PIXELS })
-    .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true });
+  const thumbnailPipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
+    .rotate()
+    .resize({ width: Math.min(THUMBNAIL_WIDTH, width), fit: 'inside', withoutEnlargement: true });
   const thumbnail = await (format === 'avif'
     ? thumbnailPipeline.avif({ quality, effort: 4 })
-    : thumbnailPipeline.webp({ quality: 80, effort: 4, smartSubsample: true }))
+    : thumbnailPipeline.webp({ quality, effort: 4, smartSubsample: true }))
     .toBuffer({ resolveWithObject: true });
   if (!thumbnail.info.width || !thumbnail.info.height) {
     throw new ValidationFailedError('Thumbnail dimensions could not be determined');
@@ -81,3 +82,11 @@ export async function prepareImageVariants(source: Buffer, options: ImageOutputO
   };
 }
 
+/** Four independent encodes from the source, never AVIF converted back to WebP. */
+export async function prepareProductImageVariants(source: Buffer) {
+  const [avif, webp] = await Promise.all([
+    prepareImageVariants(source, { format: 'avif', quality: 65 }),
+    prepareImageVariants(source, { format: 'webp', quality: 75 })
+  ]);
+  return { avif, webp };
+}

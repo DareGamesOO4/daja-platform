@@ -1,3 +1,4 @@
+import { downloadRemoteImage } from '../apps/api/src/remote-media.service.js';
 /** Import the reviewed offline Linkel package through the staff catalogue API.
  * Defaults to a read-only preview. Pass --apply to upload media and save stock.
  * Credentials come from explicit, ignored env files and CATALOG_IMPORT_TOKEN.
@@ -144,7 +145,7 @@ try {
       categoryIds[categorySlug] = category.id;
     }
     for (const item of prepared) {
-      const { product, media, buffers, productName, productSlug } = item;
+      const { product, media, productName, productSlug } = item;
       const old = existing.find(x => x.external_id === product.externalId);
       if (old?.attributes?._catalog_import?.packageHash === packageHash) {
         report.products.push({ externalId: product.externalId, sku: product.supplierSku, productId: old.id, variantId: old.variant_id, slug: old.slug, status: 'already_imported' });
@@ -152,29 +153,24 @@ try {
       }
       const mediaId = stableId(`${organizationId}:${product.externalId}:${media.image.sha256}`);
       const key = productMediaStorageKey({ organizationId, mediaId, productSlug, imageIndex: 1, extension: '.avif' });
-      const thumbnailKey = key.replace(/\.avif$/, '-thumb.avif');
       // Immutable keys make a retry safe even if a prior HTTP response was lost.
-      const known = (await pool.query('SELECT checksum_sha256,status FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [organizationId, mediaId])).rows[0];
-      if (known && known.checksum_sha256 !== media.image.sha256) throw new Error('Media identifier collision.');
+      const known = (await pool.query('SELECT checksum_sha256,status,metadata FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL', [organizationId, mediaId])).rows[0];
+      if (known && (known.metadata?.sourceChecksumSha256 ?? known.checksum_sha256) !== media.image.sha256) throw new Error('Media identifier collision.');
       if (!known || known.status !== 'ready') {
-        for (const [index, asset] of [media.image, media.thumbnail].entries()) {
-          await storage.putObject({ key: index === 0 ? key : thumbnailKey, body: buffers[index]!, contentType: 'image/avif',
-            cacheControl: 'public, max-age=31536000, immutable', sizeBytes: asset.sizeBytes,
-            metadata: { sha256: asset.sha256, source: 'linkel', 'source-id': product.source.id, quality: '65' } });
-        }
+        const sourceBytes = (await downloadRemoteImage(media.sourceUrl || product.source.imageUrl)).buffer;
+        const createdKeys = new Set<string>();
         const client = await pool.connect();
         try {
           await client.query('BEGIN');
           await client.query(`INSERT INTO media_assets (id,organization_id,storage_provider,storage_bucket,storage_key,public_url,mime_type,size_bytes,checksum_sha256,status,metadata)
             VALUES ($1,$2,'r2',$3,$4,$5,'image/avif',$6,$7,'uploaded',$8::jsonb)
             ON CONFLICT (id) DO NOTHING`, [mediaId, organizationId, storage.bucket(), key, storage.publicUrl(key), media.image.sizeBytes, media.image.sha256,
-            JSON.stringify({ source: 'linkel', sourceId: product.source.id, sourceUrl: product.source.imageUrl, packageHash, format: 'avif', quality: 65 })]);
-          const ready = await new MediaRepository(client).markReady({ organizationId, mediaId, width: media.image.width, height: media.image.height,
-            derivatives: [{ width: media.thumbnail.width, height: media.thumbnail.height, mimeType: 'image/avif', storageKey: thumbnailKey,
-              publicUrl: storage.publicUrl(thumbnailKey)!, sizeBytes: media.thumbnail.sizeBytes, checksumSha256: media.thumbnail.sha256 }] });
-          if (!ready) throw new Error('Could not register the prepared image.');
-          await client.query('COMMIT');
-        } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+            JSON.stringify({ sourceChecksumSha256: media.image.sha256, source: 'linkel', sourceId: product.source.id, sourceUrl: product.source.imageUrl, packageHash, format: 'avif+webp', quality: 65, fallbackQuality: 75 })]);
+          const asset = (await client.query('SELECT * FROM media_assets WHERE organization_id=$1 AND id=$2 FOR UPDATE', [organizationId, mediaId])).rows[0];
+            await new MediaRepository(client).optimizeUploadedImage({ organizationId }, mediaId, storage, createdKeys,
+              { asset, bytes: sourceBytes });
+            await client.query('COMMIT');
+        } catch (error) { await client.query('ROLLBACK'); await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key))); throw error; } finally { client.release(); }
       }
       const description = product.normalizedRow.description || productName;
       const english = { ...product.translations.en, description: product.translations.en.description || product.translations.en.name };
@@ -215,10 +211,14 @@ try {
           payload: { productId: saved.productId, variantId: saved.variantId, slug: productSlug, published: true } });
         await client.query('COMMIT');
       } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+      const canonicalImage = (await pool.query(`SELECT ma.public_url,
+        (SELECT d.public_url FROM media_derivatives d WHERE d.media_asset_id=ma.id
+          ORDER BY (d.mime_type='image/webp') DESC, d.width LIMIT 1) AS thumbnail_url
+        FROM media_assets ma WHERE ma.organization_id=$1 AND ma.id=$2`, [organizationId, mediaId])).rows[0];
       report.products.push({ externalId: product.externalId, sku: product.supplierSku, name: productName, category: categories[product.source.categorySlug],
         productId: saved.productId, variantId: saved.variantId, slug: saved.product?.slug || productSlug,
         priceMinor: product.normalizedRow.priceMinor, currency: 'RSD', quantity: 1, published: true,
-        imageUrl: storage.publicUrl(key), thumbnailUrl: storage.publicUrl(thumbnailKey), status: 'imported' });
+        imageUrl: canonicalImage.public_url, thumbnailUrl: canonicalImage.thumbnail_url, status: 'imported' });
       await saveReport();
       console.log(`Imported ${report.products.length}/${prepared.length}: ${product.supplierSku}`);
     }

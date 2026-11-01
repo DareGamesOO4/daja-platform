@@ -20,7 +20,8 @@ export interface NormalizedImportRow {
 }
 
 export class ImportRepository {
-  constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
+  constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>,
+    private readonly importImage?: (url: string, productId: string, index: number) => Promise<string>) {}
 
   async createXlsxJob(
     ctx: RequestContext,
@@ -270,6 +271,13 @@ export class ImportRepository {
       [ctx.organizationId, productId]
     );
     for (const [index, url] of originals.entries()) {
+      if (this.importImage) {
+        const mediaId = await this.importImage(url, productId, index);
+        await this.client.query(
+          `INSERT INTO product_media (organization_id, product_id, media_asset_id, role, position, is_primary)
+           VALUES ($1,$2,$3,'gallery',$4,$5)`, [ctx.organizationId, productId, mediaId, index, index === 0]);
+        continue;
+      }
       const storageKey = storageKeyFromPublicUrl(url);
       const mediaId = await this.upsertImportedMediaAsset(ctx, {
         storageKey,
@@ -328,9 +336,9 @@ export class ImportRepository {
          organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes
        )
        VALUES ($1, $2, 512, 512, $3, $4, $5, 0)
-       ON CONFLICT (media_asset_id, width)
+       ON CONFLICT (media_asset_id, storage_key)
        DO UPDATE SET
-         height = EXCLUDED.height,
+         width = EXCLUDED.width, height = EXCLUDED.height,
          mime_type = EXCLUDED.mime_type,
          storage_key = EXCLUDED.storage_key,
          public_url = EXCLUDED.public_url,

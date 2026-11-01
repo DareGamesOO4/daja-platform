@@ -1,3 +1,4 @@
+import { publicCatalogValue } from './catalog-public.js';
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 import type pg from 'pg';
 import type { QueryResultRow } from 'pg';
@@ -241,7 +242,7 @@ export class CatalogRepository {
              jsonb_agg(jsonb_build_object('url', md.public_url, 'width', md.width) ORDER BY md.width)
                FILTER (WHERE md.width <= 768) AS sources
            FROM media_derivatives md
-           WHERE md.media_asset_id = pm.media_asset_id
+           WHERE md.media_asset_id = pm.media_asset_id AND md.mime_type = ma.mime_type
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
@@ -253,7 +254,7 @@ export class CatalogRepository {
     const rows = result.rows.slice(0, filters.limit);
     const lastRow = rows.at(-1);
     return {
-      items: rows.map(mapPublicProduct),
+      items: rows.map(row => publicCatalogValue(mapPublicProduct(row)) as ReturnType<typeof mapPublicProduct>),
       nextCursor: result.rows.length > filters.limit && lastRow ? encodeCursor(lastRow) : null
     };
   }
@@ -351,7 +352,7 @@ export class CatalogRepository {
              jsonb_agg(jsonb_build_object('url', md.public_url, 'width', md.width) ORDER BY md.width)
                FILTER (WHERE md.width <= 768) AS sources
            FROM media_derivatives md
-           WHERE md.media_asset_id = pm.media_asset_id
+           WHERE md.media_asset_id = pm.media_asset_id AND md.mime_type = ma.mime_type
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
@@ -397,7 +398,7 @@ export class CatalogRepository {
       : Number(Number(reviewStats.rows[0].average_rating).toFixed(1));
 
     return {
-      ...product,
+      ...(publicCatalogValue(product) as typeof product),
       reviews: publishedReviews,
       reviewSummary: ratingCount ? { ratingCount, averageRating } : null
     };

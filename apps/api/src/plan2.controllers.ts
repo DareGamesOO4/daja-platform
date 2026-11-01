@@ -26,6 +26,7 @@ import type { RequestContext } from '@daja/shared';
 import {
   AuditRepository,
   CatalogRepository,
+  publicCatalogText,
   ImportRepository,
   InventoryRepository,
   MediaRepository,
@@ -406,7 +407,7 @@ export class PublicCatalogController {
   @Get('merchant-feed.xml')
   async merchantFeed(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:merchant-feed:v2:${ctx.organizationId}`;
+    const cacheKey = `catalog:merchant-feed:v3:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600').send(cached);
@@ -462,7 +463,7 @@ export class PublicCatalogController {
         const identifier = row.barcode
           ? `<g:gtin>${escapeXml(row.barcode)}</g:gtin>`
           : '<g:identifier_exists>false</g:identifier_exists>';
-        return `<item><g:id>${escapeXml(row.variant_id)}</g:id><g:item_group_id>${escapeXml(row.product_id)}</g:item_group_id><title>${escapeXml(title)}</title><description>${escapeXml(merchantDescription(row.description, title))}</description><link>${escapeXml(`${siteUrl}/product/${encodeURIComponent(row.slug)}`)}</link>${primaryImage ? `<g:image_link>${escapeXml(primaryImage)}</g:image_link>` : ''}${additionalImages}<g:availability>${row.available_quantity > 0 ? 'in_stock' : 'out_of_stock'}</g:availability><g:price>${escapeXml(`${(row.price / 100).toFixed(2)} ${row.currency}`)}</g:price><g:condition>${merchantCondition(row.item_condition)}</g:condition>${row.brand ? `<g:brand>${escapeXml(row.brand)}</g:brand>` : ''}${identifier}${row.mpn ? `<g:mpn>${escapeXml(row.mpn)}</g:mpn>` : ''}${row.sku ? `<g:sku>${escapeXml(row.sku)}</g:sku>` : ''}${productType ? `<g:product_type>${escapeXml(productType)}</g:product_type>` : ''}<g:shipping><g:country>RS</g:country><g:service>Standardna dostava</g:service><g:price>${this.config.STOREFRONT_SHIPPING_COST_RSD.toFixed(2)} RSD</g:price></g:shipping></item>`;
+        return `<item><g:id>${escapeXml(row.variant_id)}</g:id><g:item_group_id>${escapeXml(row.product_id)}</g:item_group_id><title>${escapeXml(title)}</title><description>${escapeXml(merchantDescription(row.description ? publicCatalogText(row.description) : null, title))}</description><link>${escapeXml(`${siteUrl}/product/${encodeURIComponent(row.slug)}`)}</link>${primaryImage ? `<g:image_link>${escapeXml(primaryImage)}</g:image_link>` : ''}${additionalImages}<g:availability>${row.available_quantity > 0 ? 'in_stock' : 'out_of_stock'}</g:availability><g:price>${escapeXml(`${(row.price / 100).toFixed(2)} ${row.currency}`)}</g:price><g:condition>${merchantCondition(row.item_condition)}</g:condition>${row.brand ? `<g:brand>${escapeXml(row.brand)}</g:brand>` : ''}${identifier}${row.mpn ? `<g:mpn>${escapeXml(row.mpn)}</g:mpn>` : ''}${row.sku ? `<g:sku>${escapeXml(row.sku)}</g:sku>` : ''}${productType ? `<g:product_type>${escapeXml(productType)}</g:product_type>` : ''}<g:shipping><g:country>RS</g:country><g:service>Standardna dostava</g:service><g:price>${this.config.STOREFRONT_SHIPPING_COST_RSD.toFixed(2)} RSD</g:price></g:shipping></item>`;
       })
       .join('');
     const xml = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>DajaShop Merchant Feed</title><link>${escapeXml(siteUrl)}</link><description>DajaShop proizvodi</description>${items}</channel></rss>`;
@@ -505,7 +506,7 @@ export class PublicCatalogController {
   ) {
     const ctx = this.publicContext(request);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
-    const cacheKey = `catalog:slug:public-v2:${ctx.organizationId}:${normalizedSlug}`;
+    const cacheKey = `catalog:slug:public-v3:${ctx.organizationId}:${normalizedSlug}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as unknown;
@@ -2823,7 +2824,7 @@ export class StaffCatalogController {
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          LEFT JOIN LATERAL (
-           SELECT public_url FROM media_derivatives WHERE media_asset_id = ma.id ORDER BY width ASC LIMIT 1
+           SELECT public_url FROM media_derivatives WHERE media_asset_id = ma.id ORDER BY (mime_type = 'image/webp') DESC, width ASC LIMIT 1
          ) md ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
@@ -2853,7 +2854,8 @@ export class StaffCatalogController {
       `catalog:sitemap:v4:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
-      ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`])
+      `catalog:merchant-feed:v3:${organizationId}`,
+      ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`, `catalog:slug:public-v3:${organizationId}:${slug}`])
     ];
     await this.redis.client.del(...keys);
     if (!validSlugs.length) return;
@@ -3565,9 +3567,28 @@ export class ImportsController {
   async execute(@Req() request: Request, @Param('jobId') jobId: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
-    return new TransactionManager(this.database.pool, this.logger).run((client) =>
-      new ImportRepository(client).executeJob(ctx, parseWithSchema(uuidSchema, jobId))
-    );
+    const importedIds: string[] = [];
+    try {
+      return await new TransactionManager(this.database.pool, this.logger).run(client =>
+        new ImportRepository(client, async (url, productId, index) => {
+          const product = await client.query<{ slug: string }>(
+            'SELECT slug FROM products WHERE organization_id=$1 AND id=$2', [ctx.organizationId, productId]);
+          const image = await importRemoteImage({ config: this.config, database: this.database,
+            organizationId: ctx.organizationId, sourceUrl: url,
+            productSlug: product.rows[0]!.slug, imageIndex: index + 1 });
+          importedIds.push(image.mediaId);
+          return image.mediaId;
+        }).executeJob(ctx, parseWithSchema(uuidSchema, jobId))
+      );
+    } catch (error) {
+      const storage = new R2MediaStorageAdapter(this.config);
+      for (const mediaId of importedIds) {
+        await new TransactionManager(this.database.pool, this.logger).run(client =>
+          new MediaRepository(client).discardUnreferenced(ctx, mediaId, storage)
+        ).catch(cleanupError => this.logger.warn({ cleanupError, mediaId }, 'Import media cleanup failed'));
+      }
+      throw error;
+    }
   }
 
   @Get(':jobId/reconciliation')

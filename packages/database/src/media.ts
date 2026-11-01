@@ -13,7 +13,7 @@ import { Readable } from 'node:stream';
 import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
-import { prepareImageVariants } from './media-images.js';
+import { prepareProductImageVariants } from './media-images.js';
 
 export interface MediaStorageAdapter {
   createPresignedGet(input: { key: string }): Promise<{ downloadUrl: string; expiresAt: Date }>;
@@ -309,7 +309,7 @@ export class MediaRepository {
       throw new ValidationFailedError('Media asset is not awaiting image processing');
     }
     const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
-    const processed = await prepareImageVariants(bytes);
+    const { webp: processed, avif } = await prepareProductImageVariants(bytes);
     const mainKey = uploadedImageStorageKey(asset.storage_key);
     const thumbnailKey = productMediaThumbnailStorageKey({
       originalKey: mainKey, organizationId: ctx.organizationId, mediaId, width: 512
@@ -320,9 +320,17 @@ export class MediaRepository {
       'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
       [ctx.organizationId, mediaId]
     );
-    for (const [key, image] of [[mainKey, processed.original], [thumbnailKey, processed.thumbnail]] as const) {
+    const avifMainKey = mainKey.replace(/\.webp$/, '.avif');
+    const avifThumbnailKey = thumbnailKey.replace(/\.webp$/, '.avif');
+    const objects = [
+      { key: mainKey, image: processed.original, mimeType: processed.mimeType },
+      { key: thumbnailKey, image: processed.thumbnail, mimeType: processed.mimeType },
+      { key: avifMainKey, image: avif.original, mimeType: avif.mimeType },
+      { key: avifThumbnailKey, image: avif.thumbnail, mimeType: avif.mimeType }
+    ];
+    for (const { key, image, mimeType } of objects) {
       createdKeys.add(key);
-      await storage.putObject({ key, body: image.data, contentType: processed.mimeType,
+      await storage.putObject({ key, body: image.data, contentType: mimeType,
         cacheControl: 'public, max-age=31536000, immutable' });
     }
     const ready = await this.markReady({
@@ -331,16 +339,18 @@ export class MediaRepository {
       original: { storageKey: mainKey, publicUrl, mimeType: processed.mimeType,
         sizeBytes: processed.original.data.length, checksumSha256: sha256(processed.original.data) },
       replaceDerivatives: true,
-      derivatives: [{ width: processed.thumbnail.width, height: processed.thumbnail.height,
-        mimeType: processed.mimeType, storageKey: thumbnailKey, publicUrl: thumbnailUrl,
-        sizeBytes: processed.thumbnail.data.length, checksumSha256: sha256(processed.thumbnail.data) }]
+      derivatives: objects.slice(1).map(({ key, image, mimeType }) => ({
+        width: image.width, height: image.height, mimeType, storageKey: key,
+        publicUrl: requiredPublicUrl(storage, key), sizeBytes: image.data.length,
+        checksumSha256: sha256(image.data)
+      }))
     });
     if (!ready) throw new ResourceNotFoundError('media asset');
     return {
-      mediaId, status: 'ready', publicUrl, mainImageUrl: publicUrl, thumbnailUrl,
+      mediaId, status: 'ready', publicUrl, mainImageUrl: publicUrl, thumbnailUrl, storageKey: mainKey,
       width: processed.original.width, height: processed.original.height,
       obsoleteStorageKeys: [...new Set([asset.storage_key, ...previous.rows.map(row => row.storage_key)])]
-        .filter(key => key !== mainKey && key !== thumbnailKey)
+        .filter(key => !objects.some(object => object.key === key))
     };
   }
 
@@ -404,8 +414,8 @@ export class MediaRepository {
       await this.client.query(
         `INSERT INTO media_derivatives (organization_id, media_asset_id, width, height, mime_type, storage_key, public_url, size_bytes, checksum_sha256)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (media_asset_id, width) DO UPDATE
-         SET height = EXCLUDED.height, mime_type = EXCLUDED.mime_type, storage_key = EXCLUDED.storage_key,
+         ON CONFLICT (media_asset_id, storage_key) DO UPDATE
+         SET width = EXCLUDED.width, height = EXCLUDED.height, mime_type = EXCLUDED.mime_type, storage_key = EXCLUDED.storage_key,
              public_url = EXCLUDED.public_url, size_bytes = EXCLUDED.size_bytes, checksum_sha256 = EXCLUDED.checksum_sha256`,
         [
           input.organizationId,
@@ -467,13 +477,14 @@ export class MediaRepository {
     const sourceKeys = new Set<string>();
     try {
       for (const asset of assets.rows) {
-        const originalKey = productMediaStorageKey({
+        let originalKey = productMediaStorageKey({
           organizationId: ctx.organizationId,
           mediaId: asset.mediaId,
           productSlug: input.nextSlug,
           imageIndex: Math.max(1, Number(asset.position) + 1),
           extension: extensionFromStorageKey(asset.storageKey, asset.mimeType)
         });
+        if (asset.storageKey.endsWith('-avif65-webp75-main.webp')) originalKey = uploadedImageStorageKey(originalKey);
         const derivatives = await this.client.query<{
           id: string;
           width: number;
@@ -506,7 +517,9 @@ export class MediaRepository {
         );
 
         for (const derivative of derivatives.rows) {
-          const derivativeKey = productMediaThumbnailStorageKey({
+          const derivativeKey = originalKey.endsWith('-avif65-webp75-main.webp')
+            ? originalKey.replace(/-main\.webp$/, derivative.storageKey.endsWith('-main.avif') ? '-main.avif' : derivative.storageKey.endsWith('.avif') ? '-thumb.avif' : '-thumb.webp')
+            : productMediaThumbnailStorageKey({
             originalKey,
             organizationId: ctx.organizationId,
             mediaId: asset.mediaId,
@@ -694,7 +707,7 @@ export function productMediaStorageKey(input: {
 
 function uploadedImageStorageKey(sourceKey: string): string {
   // A fresh URL avoids caching the unprocessed upload as the optimized image.
-  return sourceKey.replace(/\.[^/.]+$/, '') + '-main.webp';
+  return sourceKey.replace(/(?:-avif65-webp75-main)?\.[^/.]+$/, '') + '-avif65-webp75-main.webp';
 }
 
 export function productMediaThumbnailStorageKey(input: {
@@ -703,6 +716,9 @@ export function productMediaThumbnailStorageKey(input: {
   mediaId: string;
   width: number;
 }): string {
+  if (input.originalKey.endsWith('-avif65-webp75-main.webp')) {
+    return input.originalKey.replace(/-main\.webp$/, '-thumb.webp');
+  }
   // Preserve the layout of existing objects. Newly uploaded product assets use
   // one flat product-slug folder for both originals and thumbnails.
   if (input.originalKey.startsWith('org/')) {

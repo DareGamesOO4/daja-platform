@@ -918,7 +918,7 @@ async function canonicalCartLines(
        SELECT md.public_url
        FROM media_derivatives md
        WHERE md.media_asset_id = primary_asset.id AND md.organization_id = p.organization_id
-       ORDER BY md.width ASC, md.id
+       ORDER BY (md.mime_type = 'image/webp') DESC, md.width ASC, md.id
        LIMIT 1
      ) thumb ON true
      LEFT JOIN LATERAL (

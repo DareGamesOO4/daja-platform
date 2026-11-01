@@ -21,7 +21,7 @@ interface SourceProduct {
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    format: { type: 'string', default: 'webp' },
+    format: { type: 'string', default: 'avif' },
     quality: { type: 'string' },
     'compare-webp': { type: 'boolean', default: false }
   }
@@ -31,6 +31,7 @@ const format = values.format;
 if (format !== 'webp' && format !== 'avif') throw new Error('Format must be webp or avif');
 const quality = values.quality === undefined ? (format === 'avif' ? 65 : 84) : Number(values.quality);
 if (!Number.isInteger(quality) || quality < 1 || quality > 100) throw new Error('Quality must be between 1 and 100');
+if (format !== 'avif' || quality !== 65) throw new Error('Catalog packages require AVIF 65 and WebP 75 fallbacks.');
 if (!inputFile || !outputDirectory) {
   throw new Error('Usage: tsx scripts/prepare-catalog-media.ts input.json output-dir [excel-preview-dir]');
 }
@@ -65,7 +66,7 @@ async function saveManifest() {
     schemaVersion: 'daja.catalog-media.v1',
     createdAt: new Date().toISOString(),
     processor: 'daja-platform/apps/api/src/remote-media.service.ts#prepareImageVariants',
-    presets: { main: { maxWidth: 2048, maxHeight: 2048, quality }, thumbnail: { maxWidth: 512, quality: format === 'avif' ? quality : 80 }, format, effort: 4, withoutEnlargement: true },
+    presets: { main: { maxWidth: 2048, maxHeight: 2048, quality }, thumbnail: { maxWidth: 512, quality: quality }, format, fallback: { format: 'webp', quality: 75, widths: [2048, 512] }, effort: 4, withoutEnlargement: true },
     measurement: { timingIncludes: 'main image and thumbnail encoding', timingExcludes: 'network download, file writes and Excel preview', concurrency: values['compare-webp'] ? 1 : 2 },
     sourceCount: products.length,
     processedCount: files.length,
@@ -83,6 +84,7 @@ for (let offset = 0; offset < products.length; offset += batchSize) {
       const downloadMs = Math.round(performance.now() - downloadStarted);
       const processingStarted = performance.now();
       const processed = await prepareImageVariants(downloaded.buffer, { format, quality });
+      const fallback = await prepareImageVariants(downloaded.buffer, { format: 'webp', quality: 75 });
       const processingMs = Math.round(performance.now() - processingStarted);
       let webp84: { imageBytes: number; thumbnailBytes: number; processingMs: number } | undefined;
       if (values['compare-webp'] && format === 'avif') {
@@ -94,6 +96,10 @@ for (let offset = 0; offset < products.length; offset += batchSize) {
       const thumbnailPath = `thumbnails/${product.stem}${processed.extension}`;
       await writeFile(path.join(output, imagePath), processed.original.data);
       await writeFile(path.join(output, thumbnailPath), processed.thumbnail.data);
+      const fallbackImagePath = `images/${product.stem}-fallback.webp`;
+      const fallbackThumbnailPath = `thumbnails/${product.stem}-fallback.webp`;
+      await writeFile(path.join(output, fallbackImagePath), fallback.original.data);
+      await writeFile(path.join(output, fallbackThumbnailPath), fallback.thumbnail.data);
       if (previewDirectory) {
         await sharp(processed.thumbnail.data)
           .resize({ width: 104, height: 104, fit: 'contain', background: '#ffffff' })
@@ -106,6 +112,8 @@ for (let offset = 0; offset < products.length; offset += batchSize) {
         sourceSizeBytes: downloaded.buffer.length,
         downloadMs, processingMs, ...(webp84 ? { webp84 } : {}),
         image: { path: imagePath, mimeType: processed.mimeType, width: processed.original.width, height: processed.original.height, sizeBytes: processed.original.data.length, sha256: checksum(processed.original.data) },
+        fallbackImage: { path: fallbackImagePath, mimeType: fallback.mimeType, width: fallback.original.width, height: fallback.original.height, sizeBytes: fallback.original.data.length, sha256: checksum(fallback.original.data) },
+        fallbackThumbnail: { path: fallbackThumbnailPath, mimeType: fallback.mimeType, width: fallback.thumbnail.width, height: fallback.thumbnail.height, sizeBytes: fallback.thumbnail.data.length, sha256: checksum(fallback.thumbnail.data) },
         thumbnail: { path: thumbnailPath, mimeType: processed.mimeType, width: processed.thumbnail.width, height: processed.thumbnail.height, sizeBytes: processed.thumbnail.data.length, sha256: checksum(processed.thumbnail.data) }
       });
       console.log(`Prepared ${product.source_id} ${product.sku ?? ''}`);

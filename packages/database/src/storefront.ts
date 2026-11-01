@@ -1014,7 +1014,7 @@ export class StorefrontRepository {
          FROM product_media pm
          JOIN media_derivatives md ON md.media_asset_id = pm.media_asset_id
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
-         ORDER BY pm.is_primary DESC, pm.position ASC, md.width ASC
+         ORDER BY pm.is_primary DESC, pm.position ASC, (md.mime_type = 'image/webp') DESC, md.width ASC
          LIMIT 1
        ) thumb ON true
        WHERE p.organization_id = $1 AND p.id = $2 AND p.deleted_at IS NULL`,
