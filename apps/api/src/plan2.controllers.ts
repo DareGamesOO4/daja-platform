@@ -1053,10 +1053,14 @@ export class StaffCatalogController {
     const input = parseWithSchema(z.object({
       after: uuidSchema.optional(),
       limit: z.coerce.number().int().min(1).max(200).default(100),
+      search: z.string().max(500).optional(),
+      fields: z.string().max(100).optional(),
     }), query);
     const rows = await this.adminProductRows(ctx.organizationId, undefined,
       this.isCatalogContributor(ctx) ? ctx.userId : undefined, false,
-      { after: input.after ?? null, limit: input.limit + 1 });
+      { after: input.after ?? null, limit: input.limit + 1,
+        ...(input.search ? { search: input.search } : {}),
+        ...(input.fields ? { fields: input.fields.split(',') } : {}) });
     const items = rows.slice(0, input.limit);
     return { items, nextCursor: rows.length > input.limit ? String(items.at(-1)!.id) : null };
   }
@@ -2709,13 +2713,22 @@ export class StaffCatalogController {
   }
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false,
-    page?: { after: string | null; limit: number }) {
+    page?: { after: string | null; limit: number; search?: string; fields?: string[] }) {
     // Page in the same order the product table displays. Resolve the cursor's
     // timestamps in PostgreSQL so sub-millisecond precision is preserved.
     const sortColumns = contributorId
       ? ["CASE WHEN p.quality_review_status = 'changes_requested' THEN 1 ELSE 0 END",
           'COALESCE(p.quality_reviewed_at, p.updated_at)', 'p.updated_at', 'p.id']
       : ['p.updated_at', 'p.id'];
+    const searchColumns: Record<string, string> = {
+      name: 'p.name', brand: 'b.name', sku: 'v.sku',
+      department: "COALESCE(d.slug, 'satovi')", category: 'c.name',
+      price: '(v.current_price_amount / 100.0)::text',
+    };
+    const searchFields = (page?.fields?.length ? page.fields : ['name', 'brand', 'sku'])
+      .filter(field => Object.hasOwn(searchColumns, field));
+    const searchPredicate = searchFields.map(field =>
+      `strpos(lower(COALESCE(${searchColumns[field]}, '')), lower($7::text)) > 0`).join(' OR ') || 'FALSE';
     const cursorColumns = sortColumns.map(column => column.replace(/\bp\./g, 'page_cursor.'));
     const rows = (
       await this.database.pool.query(
@@ -2810,8 +2823,9 @@ export class StaffCatalogController {
          AND ($3::uuid IS NULL OR p.created_by_user_id = $3)
          AND ($4::boolean OR p.deleted_at IS NULL)
          AND ($5::uuid IS NULL OR (${sortColumns.join(', ')}) < (${cursorColumns.join(', ')}))
+         AND ($7::text IS NULL OR (${searchPredicate}))
        ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6`,
-        [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null]
+        [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null, page?.search || null]
       )
     ).rows;
     const states=await supplierStatesForProducts(this.database.pool,organizationId,rows.map(row=>String(row.id)));
