@@ -91,17 +91,19 @@ export function browserSessionStatus(request: Request, response: Response, confi
     try { if (!token) return false; verifyJwt(token, type === 'refresh' ? config.JWT_REFRESH_SECRET : config.JWT_ACCESS_SECRET, type); return true; }
     catch { return false; }
   };
+  const staffExpiresIn = (() => {
+    try { return Math.max(0, Number(verifyJwt(browserStaffToken(request.headers.cookie, config) ?? '', config.JWT_ACCESS_SECRET, 'access').exp) - Math.floor(Date.now() / 1000)); }
+    catch { return 0; }
+  })();
   return {
     browserSessions: true,
+    staffExpiresIn,
     expiresIn: (() => {
       try { return Math.max(0, Number(verifyJwt(cookieValue(request.headers.cookie, BROWSER_COOKIES.customer) ?? '', config.JWT_ACCESS_SECRET, 'access').exp) - Math.floor(Date.now() / 1000)); }
       catch { return 0; }
     })(),
     webSession: valid(BROWSER_COOKIES.customer, 'access') || valid(BROWSER_COOKIES.refresh, 'refresh'),
-    staffSession: (() => {
-      try { verifyJwt(browserStaffToken(request.headers.cookie, config) ?? '', config.JWT_ACCESS_SECRET, 'access'); return true; }
-      catch { return false; }
-    })()
+    staffSession: staffExpiresIn > 0
   };
 }
 
