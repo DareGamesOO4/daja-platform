@@ -1,3 +1,4 @@
+import { catalogLanding } from './catalog-landings.js';
 import type { Configuration, Node } from './catalog-page.js';
 
 // Keep the public URL adapter aligned with dajashopweb/src/utils/catalogUrls.js.
@@ -14,6 +15,8 @@ const movementRole = (node: Node) => {
 };
 export function publicListingParams(raw: URLSearchParams, configuration: Configuration, pathname: string) {
   const next = new URLSearchParams(raw);
+  const landing = catalogLanding(pathname);
+  if (landing) next.set('landing', landing.path.slice(1));
   const used = new Set(['page', 'sort', 'q', 'utm-source', 'utm-medium', 'utm-campaign']);
   const unique = (base: string, keys: Set<string>) => {
     let key = base, index = 2;

@@ -1,3 +1,4 @@
+import { publicLandingPages } from './catalog-page.js';
 import { performance } from 'node:perf_hooks';
 import { CatalogDeliveryService, enqueueCatalogDelivery } from './catalog-delivery.service.js';
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
@@ -327,7 +328,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v4:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v5:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -383,6 +384,7 @@ export class PublicCatalogController {
       '/usluge/skracivanje-narukvice-sata',
       '/usluge/programiranje-daljinskih-upravljaca',
       '/graviranje',
+      ...(await publicLandingPages(this.database.pool, ctx.organizationId)).map(page => page.path),
       ...brandPaths
     ]
       .map((path) => localizedEntries(path))
@@ -2850,6 +2852,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v2:${organizationId}`,
       `catalog:sitemap:v3:${organizationId}`,
       `catalog:sitemap:v4:${organizationId}`,
+      `catalog:sitemap:v5:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,

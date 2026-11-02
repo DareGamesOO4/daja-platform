@@ -1,3 +1,4 @@
+import { watchSeries } from './catalog-landings.js';
 import { createHash } from 'node:crypto';
 import type { SearchSynonym } from './catalog-search-settings.js';
 import type { Pool } from 'pg';
@@ -268,10 +269,10 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
       name: canonical(row.name), brand: canonical(row.brand), category: canonical(row.category),
       // Boolean specification keys cannot imply function presence: only an
       // approved condition or an explicit feature title can establish it.
-      specs: canonical(Object.entries(publicAttributes(row.attributes)).flatMap(([key, value]) => {
+      specs: canonical([...watchSeries(row), ...Object.entries(publicAttributes(row.attributes)).flatMap(([key, value]) => {
         const items = (Array.isArray(value) ? value : [value]).filter((item) => item !== null && item !== undefined && typeof item !== 'object');
         return items.length && !items.every((item) => /^(da|ne|yes|no|true|false|0|1)$/i.test(String(item).trim())) ? [key, ...items] : [];
-      }).join(' ')),
+      })].join(' ')),
       features: canonical(publicFeatures(row.features).map((feature) => `${feature.title} ${feature.subtitle ?? ''}`).join(' ')),
       description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
     }));

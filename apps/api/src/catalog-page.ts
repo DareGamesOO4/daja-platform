@@ -1,3 +1,4 @@
+import { catalogLandings, catalogLanding, matchesLanding, withWatchSeries } from './catalog-landings.js';
 import { publicListingParams } from './catalog-page-params.js';
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -19,7 +20,7 @@ export const catalogPageSchema = z.object({
   department: z.enum(['satovi', 'daljinski', 'baterije', 'naocare']).default('satovi'),
   page: z.coerce.number().int().min(1).max(100000).default(1),
   params: z.string().max(16000).default(''),
-  pathname: z.string().max(200).regex(/^\/(?:catalog|muski-satovi|zenski-satovi|naocare|baterije|daljinski|brend\/[^/]+)\/?$/).optional(),
+  pathname: z.string().max(200).refine(path => /^\/(?:catalog|muski-satovi|zenski-satovi|naocare|baterije|daljinski|brend\/[^/]+)\/?$/.test(path) || Boolean(catalogLanding(path))).optional(),
   fixedGender: z.enum(['Muški', 'Ženski']).optional(),
   configurationVersion: z.string().max(64).optional(),
   prepareOnly: z.enum(['0', '1']).optional()
@@ -167,16 +168,17 @@ async function loadSnapshot(pool: Pool, organizationId: string, department: stri
     saved = (await pool.query<{configuration: Configuration}>('SELECT published AS configuration FROM catalog_filter_configurations WHERE organization_id=$1 AND department=$2',[organizationId,department])).rows[0]?.configuration;
   }
   if (!saved) throw new Error('Published catalog filters unavailable');
+  const derived = withWatchSeries(products, saved.filters);
   const sources = new Map<string, string[]>();
-  const configuration = {...saved,filters: automaticFilterOptions(saved.filters,source => {
+  const configuration = {...saved,filters: automaticFilterOptions(derived.filters,source => {
     let known = sources.get(source);
     if (!known) {
-      known = [...new Set([...(source === 'brand' ? brands : []), ...products.flatMap(product => values(product,source))])];
+      known = [...new Set([...(source === 'brand' ? brands : []), ...derived.products.flatMap(product => values(product,source))])];
       sources.set(source, known);
     }
     return known;
   })};
-  return { products, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
+  return { products: derived.products, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
     version: createHash('sha256').update(JSON.stringify(configuration)).digest('hex') };
 }
 function snapshot(pool: Pool, organizationId: string, department: string, includeHidden = false) {
@@ -195,7 +197,7 @@ export async function publicCatalogConfiguration(pool: Pool, organizationId: str
 }
 function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: string, withFacets = true): Selection {
   // Pagination and sorting cannot change facet counts. Ignore tracking keys too.
-  const selectionParams = new URLSearchParams([...params].filter(([key]) => key === 'q' || key.startsWith('cf_')));
+  const selectionParams = new URLSearchParams([...params].filter(([key]) => key === 'q' || key === 'landing' || key.startsWith('cf_')));
   selectionParams.sort();
   const key = JSON.stringify([fixedGender, selectionParams.toString()]);
   const cached = data.selections.get(key);
@@ -205,7 +207,9 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
   const tests = activeFilters(params, nodes, fixedGender, matches);
   const query = params.get('q')?.trim().toLowerCase();
   const failures = new Map<Product, string[]>();
+  const landing = catalogLanding('/' + params.get('landing'));
   const eligible = products.filter(product => {
+    if (landing && !matchesLanding(product, landing)) return false;
     if (query && !`${product.brand || ''} ${product.name}`.toLowerCase().includes(query)) return false;
     if (fixedGender && !values(product, 'gender').some(value => gender(value) === gender(fixedGender))) return false;
     failures.set(product, tests.filter(test => !test.test(product)).map(test => test.id));
@@ -247,7 +251,7 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const rawParams = new URLSearchParams(input.params);
   const params = input.pathname ? publicListingParams(rawParams, data.configuration, input.pathname) : rawParams;
   const selection = selectProducts(data, params, input.fixedGender, input.prepareOnly !== '1');
-  const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key.startsWith('cf_')));
+  const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key === 'landing' || key.startsWith('cf_')));
   orderParams.sort();
   const orderKey = JSON.stringify([input.fixedGender, orderParams.toString()]);
   const preparedOrder = data.orders.get(orderKey);
@@ -274,7 +278,7 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const productIds = filtered.slice((page-1)*32,page*32).map(product => product.id);
   // Planning resolves membership/order only. No card, gallery or stock query.
   const items = input.prepareOnly === '1' ? [] : await cards(pool,organizationId,productIds,includeHidden);
-  return {items,total,page,perPage:32,configurationVersion:data.version, ...(input.pathname ? { pathname: input.pathname } : {}),
+  return {items,total,page,perPage:32,landingPages: availableLandings(data.products),configurationVersion:data.version, ...(input.pathname ? { pathname: input.pathname } : {}),
     ...(input.configurationVersion === data.version ? {} : {configuration:data.configuration}),
     facets:selection.facets || {},...(input.prepareOnly === '1' ? {productIds} : {}),...(hiddenCount === undefined ? {} : {hiddenCount})};
 }
@@ -297,4 +301,14 @@ export async function publicHomeProducts(pool: Pool, organizationId: string) {
   const curated = homeSlugs.flatMap(slug => products.filter(product => product.slug === slug));
   const chosen = [...curated,...products.filter(product => !curated.some(item => item.id === product.id))].slice(0,6);
   return {items:await cards(pool,organizationId,chosen.map(product => product.id))};
+}
+
+const landingLists = new WeakMap<Product[], Array<{path:string;title:string;count:number}>>();
+function availableLandings(products: Product[]) {
+  let cached = landingLists.get(products);
+  if (!cached) { cached = catalogLandings.map(page=>({path:page.path,title:page.title,count:products.filter(product=>product.active && product.published && matchesLanding(product,page)).length})).filter(page=>page.count>0); landingLists.set(products,cached); }
+  return cached;
+}
+export async function publicLandingPages(pool: Pool, organizationId: string) {
+  return availableLandings((await snapshot(pool,organizationId,'satovi')).products);
 }
