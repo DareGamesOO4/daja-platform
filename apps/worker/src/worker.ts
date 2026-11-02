@@ -246,7 +246,7 @@ async function processMediaJob(
         logger.warn({ error, mediaId, key }, 'Could not remove source upload after image optimization'));
     }
   } catch (error) {
-    await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+    await new MediaRepository(database.pool).cleanupAttempt({ organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
     await tx.run((pgClient) =>
       new MediaRepository(pgClient).markFailed(
         organizationId,

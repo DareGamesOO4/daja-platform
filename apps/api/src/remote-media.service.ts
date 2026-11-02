@@ -3,7 +3,6 @@ import { lookup } from 'node:dns/promises';
 import { get as getHttp, type IncomingMessage, type RequestOptions } from 'node:http';
 import { get as getHttps } from 'node:https';
 import { isIP } from 'node:net';
-import sharp from 'sharp';
 import type { AppConfig } from '@daja/config';
 import {
   R2MediaStorageAdapter,
@@ -21,8 +20,6 @@ import { ValidationFailedError } from '@daja/security';
 import { createLogger } from '@daja/observability';
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
-const MAX_INPUT_PIXELS = 80_000_000;
-const THUMBNAIL_WIDTH = 512;
 const MAX_REDIRECTS = 3;
 const DOWNLOAD_TIMEOUT_MS = 15_000;
 const CACHE_CONTROL = 'public, max-age=31536000, immutable';
@@ -100,7 +97,7 @@ export async function importRemoteImage(input: {
   } catch (error) {
     await input.database.pool.query(`UPDATE media_assets SET status='failed', updated_at=now()
       WHERE organization_id=$1 AND id=$2 AND status='uploaded'`, [input.organizationId, mediaId]).catch(() => undefined);
-    await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+    await repository.cleanupAttempt({ organizationId: input.organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
     throw error;
   }
 }
@@ -137,10 +134,8 @@ export async function ensurePrimaryMediaThumbnail(input: {
 
   const storage = new R2MediaStorageAdapter(input.config);
   const original = await storage.getObject(row.storage_key);
-  const output = await sharp(original, { limitInputPixels: MAX_INPUT_PIXELS })
-    .resize({ width: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 75, effort: 4, smartSubsample: true })
-    .toBuffer({ resolveWithObject: true });
+  const { thumbnail } = await prepareImageVariants(original, { format: 'webp', quality: 75 });
+  const output = { data: thumbnail.data, info: { width: thumbnail.width, height: thumbnail.height } };
   if (!output.info.width || !output.info.height) {
     throw new ValidationFailedError('Thumbnail dimensions could not be determined');
   }
@@ -289,6 +284,8 @@ function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<Inc
       response.on('error', () => {});
       resolve(response);
     });
+    const deadline = setTimeout(() => request.destroy(new Error('Remote image total download time exceeded')), 20_000);
+    request.once('close', () => clearTimeout(deadline));
     request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
       request.destroy(new Error('Remote image request timed out'));
     });

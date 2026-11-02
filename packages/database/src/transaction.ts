@@ -23,6 +23,7 @@ export class TransactionManager {
     } catch (error) {
       if (!committed && !connectionError) {
         await client.query('ROLLBACK').catch((rollbackError) => {
+          connectionError = rollbackError instanceof Error ? rollbackError : new Error('Rollback failed');
           this.logger.error({ err: rollbackError }, 'Transaction rollback failed');
         });
       }

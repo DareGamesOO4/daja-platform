@@ -1,112 +1,62 @@
-import sharp from 'sharp';
+import { fork } from 'node:child_process';
 import { AppError, ValidationFailedError } from '@daja/security';
+import type { ImageOutputOptions } from './image-encoder-core.js';
+export type { ImageOutputOptions } from './image-encoder-core.js';
 
-// Keep libvips/AVIF work bounded on the 512 MB API instance. The queue contains
-// only a few upload buffers, and does not consume a PostgreSQL connection.
-sharp.concurrency(1);
-sharp.cache({ memory: 16, files: 0, items: 32 });
-let encoding = false;
+type ImageVariants = Awaited<ReturnType<typeof import('./image-encoder-core.js').prepareImageVariants>>;
+type ProductVariants = { webp: ImageVariants; avif: ImageVariants };
+let active = false;
 const waiting: Array<() => void> = [];
 
-async function serializeImage<T>(operation: () => Promise<T>): Promise<T> {
-  if (encoding) {
-    if (waiting.length >= 4) throw new AppError('SERVICE_UNAVAILABLE', 'Image processing is busy. Please retry shortly.', 503, { retryAfterSeconds: 3 });
-    await new Promise<void>(resolve => waiting.push(resolve));
-  } else encoding = true;
-  try { return await operation(); }
-  finally {
-    const next = waiting.shift();
-    if (next) next();
-    else encoding = false;
-  }
-}
-
-const MAX_INPUT_PIXELS = 80_000_000;
-const MAX_IMAGE_DIMENSION = 12_000;
-const MAX_MAIN_WIDTH = 2048;
-const THUMBNAIL_WIDTH = 512;
-
-export interface ImageOutputOptions {
-  format?: 'webp' | 'avif';
-  quality?: number;
-}
-
-export async function prepareImageVariants(source: Buffer, options: ImageOutputOptions = {}): Promise<{
-  format: 'webp' | 'avif';
-  mimeType: 'image/webp' | 'image/avif';
-  extension: '.webp' | '.avif';
-  original: { data: Buffer; width: number; height: number };
-  thumbnail: { data: Buffer; width: number; height: number };
-}> {
-  const format = options.format ?? 'webp';
-  const quality = options.quality ?? (format === 'avif' ? 65 : 84);
-  if (!['webp', 'avif'].includes(format) || !Number.isInteger(quality) || quality < 1 || quality > 100) {
-    throw new ValidationFailedError('Image output must be WebP or AVIF with quality between 1 and 100');
-  }
-  let originalData: Buffer | undefined;
-  let width: number | undefined;
-  let height: number | undefined;
+async function isolatedEncode<T>(source: Buffer, product: boolean, options?: ImageOutputOptions): Promise<T> {
+  if (!source.length || source.length > 25 * 1024 * 1024) throw new ValidationFailedError('Image must be 25 MiB or smaller');
+  if (active) {
+    if (waiting.length >= 2) throw busy();
+    await new Promise<void>((resolve, reject) => {
+      const resume = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        const index = waiting.indexOf(resume);
+        if (index >= 0) waiting.splice(index, 1);
+        reject(busy());
+      }, 15_000);
+      waiting.push(resume);
+    });
+  } else active = true;
   try {
-    const pipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
-      .rotate()
-      .resize({
-        width: MAX_MAIN_WIDTH,
-        height: MAX_MAIN_WIDTH,
-        fit: 'inside',
-        withoutEnlargement: true
+    return await new Promise<T>((resolve, reject) => {
+      // A native codec crash/abort or JS heap failure terminates only this child.
+      const child = fork(new URL('./image-encoder.js', import.meta.url), [], {
+        serialization: 'advanced', execArgv: ['--max-old-space-size=128'],
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        env: Object.fromEntries(['PATH','SystemRoot','TEMP','TMP','TMPDIR'].flatMap(key =>
+          process.env[key] ? [[key, process.env[key]!]] : []))
       });
-    const original = await (format === 'avif'
-      ? pipeline.avif({ quality, effort: 4 })
-      : pipeline.webp({ quality, effort: 4, smartSubsample: true }))
-      .toBuffer({ resolveWithObject: true });
-    originalData = original.data;
-    width = original.info.width;
-    height = original.info.height;
-  } catch {
-    throw new ValidationFailedError(
-      'The URL does not point to a supported image (JPEG, PNG, WebP, or AVIF)'
-    );
+      let settled = false;
+      const finish = (error?: Error, value?: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGKILL');
+        if (error) reject(error); else resolve(value!);
+      };
+      const timer = setTimeout(() => finish(new AppError('IMAGE_PROCESSING_TIMEOUT', 'Image processing timed out. Try a smaller image.', 503)), 45_000);
+      child.once('error', () => finish(new AppError('IMAGE_PROCESSING_FAILED', 'Image processing is temporarily unavailable', 503)));
+      child.once('exit', () => finish(new AppError('IMAGE_PROCESSING_FAILED', 'Image processor stopped. Please retry.', 503)));
+      child.once('message', (message: { ok?: boolean; result?: T }) => {
+        if (message.ok && message.result) finish(undefined, message.result);
+        else finish(new ValidationFailedError('Unsupported, damaged or oversized image (maximum 24 megapixels, 12000 px per side; no animation)'));
+      });
+      child.send({ source, product, options }, error => { if (error) finish(error); });
+    });
+  } finally {
+    const next = waiting.shift();
+    if (next) next(); else active = false;
   }
-
-  if (
-    !originalData ||
-    !width ||
-    !height ||
-    width > MAX_IMAGE_DIMENSION ||
-    height > MAX_IMAGE_DIMENSION
-  ) {
-    throw new ValidationFailedError('Image dimensions are unsupported');
-  }
-
-  const thumbnailPipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
-    .rotate()
-    .resize({ width: Math.min(THUMBNAIL_WIDTH, width), fit: 'inside', withoutEnlargement: true });
-  const thumbnail = await (format === 'avif'
-    ? thumbnailPipeline.avif({ quality, effort: 4 })
-    : thumbnailPipeline.webp({ quality, effort: 4, smartSubsample: true }))
-    .toBuffer({ resolveWithObject: true });
-  if (!thumbnail.info.width || !thumbnail.info.height) {
-    throw new ValidationFailedError('Thumbnail dimensions could not be determined');
-  }
-
-  return {
-    format,
-    mimeType: format === 'avif' ? 'image/avif' : 'image/webp',
-    extension: format === 'avif' ? '.avif' : '.webp',
-    original: { data: originalData, width, height },
-    thumbnail: {
-      data: thumbnail.data,
-      width: thumbnail.info.width,
-      height: thumbnail.info.height
-    }
-  };
 }
-
-/** Independent encodes from the source, serialized to bound native memory/CPU. */
-export async function prepareProductImageVariants(source: Buffer) {
-  return serializeImage(async () => {
-    const webp = await prepareImageVariants(source, { format: 'webp', quality: 75 });
-    const avif = await prepareImageVariants(source, { format: 'avif', quality: 65 });
-    return { avif, webp };
-  });
+function busy() { return new AppError('IMAGE_PROCESSING_BUSY', 'Image processing is busy. Retry shortly.', 503, { retryAfterSeconds: 3 }); }
+export function prepareImageVariants(source: Buffer, options: ImageOutputOptions = {}): Promise<ImageVariants> {
+  return isolatedEncode(source, false, options);
+}
+export function prepareProductImageVariants(source: Buffer): Promise<ProductVariants> {
+  return isolatedEncode(source, true);
 }

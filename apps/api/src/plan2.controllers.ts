@@ -2996,11 +2996,13 @@ export class MediaController {
     const storage = new R2MediaStorageAdapter(this.config);
     const createdKeys = new Set<string>();
     const repository = new MediaRepository(this.database.pool);
-    const prepared = await repository.readUploadedSource(ctx, id, storage)
-      .then(source => source.asset.mime_type.startsWith('image/')
-        ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : undefined)
+    const ready = await repository.readyUpload(ctx, id);
+    if (ready) return ready;
+    const source = await repository.readUploadedSource(ctx, id, storage);
+    const prepared = await (source.asset.mime_type.startsWith('image/')
+      ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : Promise.resolve(undefined))
       .catch(async error => {
-        await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+        await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
         throw error;
       });
     const result = await new TransactionManager(this.database.pool, this.logger).run(
@@ -3010,7 +3012,8 @@ export class MediaController {
           id,
           storage,
           createdKeys,
-          prepared
+          prepared,
+          source
         );
         await new OutboxRepository(client).append({
           ctx,
@@ -3024,7 +3027,7 @@ export class MediaController {
         return result;
       }
     ).catch(async error => {
-      await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+      await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
       throw error;
     });
     for (const key of result.obsoleteStorageKeys) {

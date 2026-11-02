@@ -5,6 +5,7 @@ import { SharedRateStorage } from './runtime/shared-rate-storage.js';
 import { CatalogBulkController } from './catalog-bulk.controller.js';
 import { CatalogBulkService } from './catalog-bulk.service.js';
 import { CatalogDeliveryService } from './catalog-delivery.service.js';
+import { MediaCleanupService } from './media-cleanup.service.js';
 import { clientNetwork } from './runtime/abuse-protection.js';
 import { BrowserSessionInterceptor } from './runtime/browser-session.js';
 import { APP_GUARD } from '@nestjs/core';
@@ -115,6 +116,7 @@ const rateStorage = new SharedRateStorage(config);
     ,ReaderStationController
   ],
   providers: [
+    MediaCleanupService,
     CatalogBulkService,
     CatalogDeliveryService,
     BrowserSessionInterceptor,

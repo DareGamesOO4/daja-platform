@@ -47,6 +47,7 @@ export function apiUnderLoad(): boolean { return activeRequests >= 16; }
 export function admissionMiddleware(storage: SharedRateStorage): RequestHandler {
   const active = new Map<string, number>();
   let total = 0;
+  let mediaActive = 0;
   return async (request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
     if (request.path === '/health/live' || request.path === '/health/ready') {
@@ -56,12 +57,19 @@ export function admissionMiddleware(storage: SharedRateStorage): RequestHandler 
       return next();
     }
     const network = clientNetwork(request.ip ?? request.socket.remoteAddress ?? 'unknown');
+    const mediaWork = request.method === 'POST' && /^\/api\/v1\/media\/(?:external|uploads\/[^/]+\/complete)\/?$/.test(request.path);
+    if (mediaWork && mediaActive >= 3) {
+      response.setHeader('Retry-After', '3');
+      response.status(503).json({ error: { code: 'IMAGE_PROCESSING_BUSY', message: 'Image processing is busy', details: {} } });
+      return;
+    }
     if (total >= 64 || (active.get(network) ?? 0) >= 32) {
       response.setHeader('Retry-After', '5');
       response.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable', details: {} } });
       return;
     }
     total++;
+    if (mediaWork) mediaActive++;
     activeRequests++;
     active.set(network, (active.get(network) ?? 0) + 1);
     let released = false;
@@ -69,6 +77,7 @@ export function admissionMiddleware(storage: SharedRateStorage): RequestHandler 
       if (released) return;
       released = true;
       total--;
+      if (mediaWork) mediaActive--;
       activeRequests--;
       const remaining = (active.get(network) ?? 1) - 1;
       if (remaining) active.set(network, remaining);

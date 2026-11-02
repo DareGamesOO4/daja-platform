@@ -72,6 +72,8 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       region: 'auto',
       endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
       forcePathStyle: Boolean(config.R2_ENDPOINT),
+      maxAttempts: 2,
+      requestHandler: { connectionTimeout: 3_000, requestTimeout: 15_000 },
       credentials: {
         accessKeyId: config.R2_ACCESS_KEY_ID,
         secretAccessKey: config.R2_SECRET_ACCESS_KEY
@@ -130,8 +132,9 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
   }
 
   async getObject(key: string): Promise<Buffer> {
+    const signal = AbortSignal.timeout(20_000);
     const response = await this.client.send(
-      new GetObjectCommand({ Bucket: this.bucketName, Key: key })
+      new GetObjectCommand({ Bucket: this.bucketName, Key: key }), { abortSignal: signal }
     );
     if (!response.Body) throw new ValidationFailedError('Media object body is empty');
     return readObjectBody(response.Body);
@@ -188,6 +191,28 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
 
 export class MediaRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
+
+  /** A lost COMMIT response is ambiguous. Never erase keys referenced by a
+   * successful commit; if PostgreSQL is unavailable leave cleanup for later. */
+  async cleanupAttempt(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter, keys: Iterable<string>) {
+    const referenced = await this.client.query<{ storage_key: string }>(
+      `SELECT storage_key FROM media_assets WHERE organization_id=$1 AND id=$2
+       UNION ALL SELECT storage_key FROM media_derivatives WHERE organization_id=$1 AND media_asset_id=$2`,
+      [ctx.organizationId, mediaId]);
+    const keep = new Set(referenced.rows.map(row => row.storage_key));
+    await Promise.allSettled([...keys].filter(key => !keep.has(key)).map(key => storage.deleteObject(key)));
+  }
+
+  async readyUpload(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string) {
+    const row = (await this.client.query<{ public_url: string; storage_key: string; width: number; height: number; thumbnail_url: string | null }>(
+      `SELECT ma.public_url,ma.storage_key,ma.width,ma.height,
+        (SELECT public_url FROM media_derivatives WHERE media_asset_id=ma.id AND mime_type='image/webp' ORDER BY width LIMIT 1) AS thumbnail_url
+       FROM media_assets ma WHERE ma.organization_id=$1 AND ma.id=$2 AND ma.status='ready' AND ma.deleted_at IS NULL`,
+      [ctx.organizationId, mediaId])).rows[0];
+    return row ? { mediaId, status: 'ready', publicUrl: row.public_url, mainImageUrl: row.public_url,
+      thumbnailUrl: row.thumbnail_url ?? row.public_url, storageKey: row.storage_key,
+      width: row.width, height: row.height, obsoleteStorageKeys: [] as string[] } : null;
+  }
 
   async createPendingUpload(
     ctx: RequestContext,
@@ -280,14 +305,20 @@ export class MediaRepository {
   }
 
   async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter, createdKeys: Set<string>,
-    prepared?: Awaited<ReturnType<MediaRepository['stageUploadedImage']>>) {
+    prepared?: Awaited<ReturnType<MediaRepository['stageUploadedImage']>>,
+    validated?: Awaited<ReturnType<MediaRepository['readUploadedSource']>>) {
     const asset = await this.getForUpdate(ctx, mediaId);
+    if (asset.status === 'ready') {
+      const ready = await this.readyUpload(ctx, mediaId);
+      if (ready) return { ...ready, obsoleteStorageKeys: [...createdKeys] };
+    }
     if (asset.status !== 'pending_upload') throw new ValidationFailedError('Media asset is not pending upload');
     if (prepared) return this.optimizeUploadedImage(ctx, mediaId, storage, createdKeys, undefined, prepared);
-    const { bytes, object } = await this.readUploadedSource(ctx, mediaId, storage);
-    if (asset.mime_type.startsWith('image/')) {
-      return this.optimizeUploadedImage(ctx, mediaId, storage, createdKeys, { asset, bytes });
+    // Enforce preparation before BEGIN; never silently reintroduce slow I/O here.
+    if (!validated || validated.asset.storage_key !== asset.storage_key || asset.mime_type.startsWith('image/')) {
+      throw new ValidationFailedError('Upload must be prepared before its database transaction');
     }
+    const { bytes, object } = validated;
     await this.client.query(
       `UPDATE media_assets
        SET status = 'uploaded', mime_type = COALESCE($3, mime_type), size_bytes = $4,
@@ -346,8 +377,8 @@ export class MediaRepository {
     if (prepared && (prepared.asset.storage_key !== asset.storage_key || prepared.asset.checksum_sha256 !== asset.checksum_sha256)) {
       throw new ValidationFailedError('Media asset changed during processing');
     }
-    const { processed, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects } = prepared ??
-      await this.stageUploadedImage(ctx, mediaId, storage, createdKeys, source);
+    if (!prepared) throw new ValidationFailedError('Image must be prepared before its database transaction');
+    const { processed, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects } = prepared;
     const previous = await this.client.query<{ storage_key: string }>(
       'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
       [ctx.organizationId, mediaId]);
@@ -460,113 +491,14 @@ export class MediaRepository {
     );
   }
 
-  /**
-   * R2 has object keys rather than real folders. When a product slug changes,
-   * copy each linked R2 asset and derivative under the new readable prefix and
-   * update the canonical DB references in the active transaction. The caller
-   * deletes the old keys only after that transaction commits.
-   */
+  /** Slug changes must not copy R2 objects inside a catalog transaction.
+   * Existing immutable URLs remain valid; new uploads use the new slug prefix. */
   async relocateProductMedia(
-    ctx: Pick<RequestContext, 'organizationId'>,
-    input: { productId: string; previousSlug: string; nextSlug: string },
-    createStorage: () => MediaStorageAdapter
+    _ctx: Pick<RequestContext, 'organizationId'>,
+    _input: { productId: string; previousSlug: string; nextSlug: string },
+    _createStorage: () => MediaStorageAdapter
   ): Promise<{ sourceKeys: string[] }> {
-    if (input.previousSlug === input.nextSlug) return { sourceKeys: [] };
-
-    const assets = await this.client.query<{
-      mediaId: string;
-      storageKey: string;
-      mimeType: string;
-      position: number;
-    }>(
-      `SELECT DISTINCT ON (asset.id)
-         asset.id AS "mediaId", asset.storage_key AS "storageKey", asset.mime_type AS "mimeType", link.position
-       FROM product_media link
-       JOIN media_assets asset ON asset.id = link.media_asset_id
-       WHERE link.organization_id = $1 AND link.product_id = $2
-         AND asset.organization_id = $1 AND asset.storage_provider = 'r2' AND asset.deleted_at IS NULL
-       ORDER BY asset.id, link.position ASC`,
-      [ctx.organizationId, input.productId]
-    );
-    if (!assets.rowCount) return { sourceKeys: [] };
-
-    const storage = createStorage();
-    const copiedKeys = new Set<string>();
-    const sourceKeys = new Set<string>();
-    try {
-      for (const asset of assets.rows) {
-        let originalKey = productMediaStorageKey({
-          organizationId: ctx.organizationId,
-          mediaId: asset.mediaId,
-          productSlug: input.nextSlug,
-          imageIndex: Math.max(1, Number(asset.position) + 1),
-          extension: extensionFromStorageKey(asset.storageKey, asset.mimeType)
-        });
-        if (asset.storageKey.endsWith('-avif65-webp75-main.webp')) originalKey = uploadedImageStorageKey(originalKey);
-        const derivatives = await this.client.query<{
-          id: string;
-          width: number;
-          storageKey: string;
-        }>(
-          `SELECT id, width, storage_key AS "storageKey"
-           FROM media_derivatives
-           WHERE organization_id = $1 AND media_asset_id = $2`,
-          [ctx.organizationId, asset.mediaId]
-        );
-
-        if (asset.storageKey !== originalKey) {
-          await storage.copyObject(asset.storageKey, originalKey);
-          copiedKeys.add(originalKey);
-          sourceKeys.add(asset.storageKey);
-        }
-        await this.client.query(
-          `UPDATE media_assets
-           SET storage_key = $3, public_url = $4,
-               metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{productSlug}', to_jsonb($5::text), true),
-               version = version + 1, updated_at = now()
-           WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL`,
-          [
-            ctx.organizationId,
-            asset.mediaId,
-            originalKey,
-            storage.publicUrl(originalKey),
-            input.nextSlug
-          ]
-        );
-
-        for (const derivative of derivatives.rows) {
-          const derivativeKey = originalKey.endsWith('-avif65-webp75-main.webp')
-            ? originalKey.replace(/-main\.webp$/, derivative.storageKey.endsWith('-main.avif') ? '-main.avif' : derivative.storageKey.endsWith('.avif') ? '-thumb.avif' : '-thumb.webp')
-            : productMediaThumbnailStorageKey({
-            originalKey,
-            organizationId: ctx.organizationId,
-            mediaId: asset.mediaId,
-            width: Number(derivative.width)
-          });
-          if (derivative.storageKey !== derivativeKey) {
-            await storage.copyObject(derivative.storageKey, derivativeKey);
-            copiedKeys.add(derivativeKey);
-            sourceKeys.add(derivative.storageKey);
-          }
-          await this.client.query(
-            `UPDATE media_derivatives
-             SET storage_key = $4, public_url = $5
-             WHERE organization_id = $1 AND id = $2 AND media_asset_id = $3`,
-            [
-              ctx.organizationId,
-              derivative.id,
-              asset.mediaId,
-              derivativeKey,
-              requiredPublicUrl(storage, derivativeKey)
-            ]
-          );
-        }
-      }
-      return { sourceKeys: [...sourceKeys] };
-    } catch (error) {
-      await Promise.allSettled([...copiedKeys].map((key) => storage.deleteObject(key)));
-      throw error;
-    }
+    return { sourceKeys: [] };
   }
 
   async deleteStorageObjects(storage: MediaStorageAdapter, keys: Iterable<string>): Promise<void> {
@@ -575,9 +507,8 @@ export class MediaRepository {
 
   /**
    * Removes an uploaded asset only when nothing in the catalog still refers to it.
-   * The R2 deletes are deliberately performed before the database tombstone: an
-   * intermittent storage error leaves the asset available for a later retry
-   * instead of making an undeletable orphan invisible to the application.
+   * Persist storage cleanup in the same short transaction as the tombstone.
+   * A failed R2 deletion is retried by the API cleanup consumer.
    */
   async discardUnreferenced(
     ctx: Pick<RequestContext, 'organizationId'>,
@@ -602,7 +533,9 @@ export class MediaRepository {
     );
     if (asset.storage_provider === 'r2') {
       const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key)]);
-      for (const key of keys) await storage.deleteObject(key);
+      for (const key of keys) await this.client.query(
+        `INSERT INTO media_storage_deletions (organization_id, storage_key) VALUES ($1,$2)
+         ON CONFLICT (organization_id, storage_key) DO NOTHING`, [ctx.organizationId, key]);
     }
     await this.client.query(
       `DELETE FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2`,

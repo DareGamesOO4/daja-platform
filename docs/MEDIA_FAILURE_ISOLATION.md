@@ -1,0 +1,70 @@
+# Dodavanje slika: uzrok incidenta i ograničavanje posledica
+
+Pregled izvornog koda: 02.11.2026. Prethodno pročitani Render logovi beleže
+`Uncaught exception` sa kodom `25P03`; default `idle_in_transaction_session_timeout`
+je 10 s. Ovo je izveštaj o izmenama koda, ne potvrda novog produkcijskog deploya.
+
+## Uzrok
+
+`BEGIN` i zaključavanje media_assets reda prethodili su Sharp/AVIF konverziji i
+R2 pozivima. To nije SQL rad, pa je PostgreSQL mogao da prekine neaktivnu
+transakciju usred konverzije. pg emituje `error` i na zauzetoj konekciji;
+prethodni pool handler pokrivao je samo konekcije vraćene u pool. Neobrađeni
+EventEmitter error stizao je do globalnog uncaughtException handlera koji
+ispravno prekida proces umesto da nastavi rad u nepoznatom stanju. Propust je
+bio opseg transakcije i neobrađen lokalni događaj, a ne sama zaštita PostgreSQL-a.
+
+Hitni commit bc3266a skratio je transakcije i dodao obradu grešaka konekcije.
+Dodatni pregled obuhvatio je upload, link import, glavnu sličicu, worker,
+čuvanje proizvoda, promenu sluga, uklanjanje slike, rollback i web red fajlova.
+
+## Dodatna zaštita
+
+- Sharp/WebP/AVIF za ovaj tok radi u zasebnom Node procesu bez DB/R2 tajni.
+  Abort, crash ili prekoračenje 45 s postaje greška konkretnog zahteva. Potproces
+  ima JS heap limit 128 MB, jedan native thread i isključen Sharp cache.
+- Najviše jedan enkoder i dva čekajuća posla po procesu; čekanje najviše 15 s.
+  Najviše tri teška media HTTP zahteva pre preuzimanja buffer-a. Zauzetost vraća
+  503 i Retry-After, bez zadržavanja konekcije baze.
+- Najviše 25 MiB izvora, 24 miliona piksela i 12000 px po strani; animacije se
+  odbijaju. Dimenzije se proveravaju pre dekodiranja. WebP i AVIF potiču direktno
+  iz izvora; main ostaje do 2048 px, thumbnail do 512 x 512 uz očuvanje odnosa.
+- Konverzija, R2 prenos i priprema glavne sličice obavljaju se pre BEGIN.
+  Završne repository metode odbijaju nepripremljen upload, umesto sporog fallbacka
+  unutar transakcije. Isto važi za PDF validaciju i pozadinski worker.
+- R2 ima ograničene pokušaje, connection/request timeout i deadline za čitanje;
+  direktan link ima i apsolutni deadline po preuzimanju uz postojeće SSRF provere.
+- Ponovljeni complete za isti završen mediaId vraća isti rezultat. Web ponavlja
+  taj korak najviše dvaput kod prolaznih grešaka, bez stvaranja nove slike.
+- Cleanup posle neuspelog/ambivalentnog COMMIT-a proverava stvarne reference u
+  bazi i ne briše potvrđene objekte. Ako baza nije dostupna, prednost ima čuvanje
+  objekata; mogu ostati privremeni orphan objekti za naknadno čišćenje.
+- Brisanje slike unutar transakcije samo upisuje tombstone i trajan R2 delete
+  posao. MediaCleanupService obavlja mrežno brisanje izvan transakcije, sa leaseom
+  i ponavljanjem posle prekida. Potrebna je migracija 097_media_storage_cleanup.
+- Promena sluga više ne kopira R2 objekte tokom čuvanja proizvoda. Postojeći
+  immutable URL-ovi ostaju ispravni; nove slike koriste novi slug prefiks.
+- Greške i rollback kvarovi izbacuju oštećenu konekciju iz poola. Globalno gašenje
+  na nepoznatom uncaughtException ostaje; namerno nije uvedeno ignorisanje svih
+  izuzetaka koje bi moglo da prikrije oštećeno stanje aplikacije.
+
+## Web
+
+Dve slike mogu se otpremati paralelno i može se dodavati još fajlova dok to traje.
+CPU konverzije se kontrolišu na serveru. Red čuva originalni raspored i glavnu
+sliku, pokazuje neuspeh i omogućava ponovni pokušaj/uklanjanje. Save ostaje
+blokiran dok postoje nezavršene slike. Prethodno ograničenje paralelizma na jedan
+bilo je hitna mera; uklonjeno je nakon izdvajanja enkodera. Ne postoji limit od
+dve slike po proizvodu. Prethodna ispravka refs sprečava da lokalni status render
+prepiše novu listu slika starim roditeljskim props-ima.
+
+## Granice provere
+
+Pokrenuta je TypeScript kompilacija API-ja i workera i web produkcijski build.
+Testovi i simulacije kvarova nisu pokretani prema korisnikovom uputstvu.
+Nije čekan završetak deploya niti potvrđen upload na novoj produkcijskoj verziji.
+Zaseban proces deli host/container RAM i bazu sa API-jem: ovo nije potpuna izolacija
+posebnim Render servisom i ne garantuje odsustvo svih infrastrukturnih kvarova.
+Za dodatnu izolaciju od ukupnog container OOM-a potreban je zaseban media servis
+sa sopstvenim resursima i trajnim asinhronim protokolom. Time se ovde nisu menjali
+cloud planovi niti dodavali troškovi.
