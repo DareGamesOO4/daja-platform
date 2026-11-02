@@ -2995,13 +2995,22 @@ export class MediaController {
     const id = parseWithSchema(uuidSchema, mediaId);
     const storage = new R2MediaStorageAdapter(this.config);
     const createdKeys = new Set<string>();
+    const repository = new MediaRepository(this.database.pool);
+    const prepared = await repository.readUploadedSource(ctx, id, storage)
+      .then(source => source.asset.mime_type.startsWith('image/')
+        ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : undefined)
+      .catch(async error => {
+        await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
+        throw error;
+      });
     const result = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
         const result = await new MediaRepository(client).completeUpload(
           ctx,
           id,
           storage,
-          createdKeys
+          createdKeys,
+          prepared
         );
         await new OutboxRepository(client).append({
           ctx,

@@ -46,6 +46,12 @@ export function createDatabase(config: AppConfig, logger: Logger): Database {
   pool.on('error', (error) => {
     logger.error({ err: error }, 'PostgreSQL pool error');
   });
+  // pg-pool handles errors only while a client is idle in its pool. A checked-out
+  // connection can also emit an error (e.g. idle transaction timeout or restart).
+  // Keep that event from becoming an uncaught exception that kills the API.
+  pool.on('connect', client => {
+    client.on('error', error => logger.error({ err: error }, 'PostgreSQL client connection error'));
+  });
 
   const query: Database['query'] = async <T extends QueryResultRow = QueryResultRow>(
     text: string,

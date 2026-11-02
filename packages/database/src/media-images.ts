@@ -1,5 +1,25 @@
 import sharp from 'sharp';
-import { ValidationFailedError } from '@daja/security';
+import { AppError, ValidationFailedError } from '@daja/security';
+
+// Keep libvips/AVIF work bounded on the 512 MB API instance. The queue contains
+// only a few upload buffers, and does not consume a PostgreSQL connection.
+sharp.concurrency(1);
+sharp.cache({ memory: 16, files: 0, items: 32 });
+let encoding = false;
+const waiting: Array<() => void> = [];
+
+async function serializeImage<T>(operation: () => Promise<T>): Promise<T> {
+  if (encoding) {
+    if (waiting.length >= 4) throw new AppError('SERVICE_UNAVAILABLE', 'Image processing is busy. Please retry shortly.', 503, { retryAfterSeconds: 3 });
+    await new Promise<void>(resolve => waiting.push(resolve));
+  } else encoding = true;
+  try { return await operation(); }
+  finally {
+    const next = waiting.shift();
+    if (next) next();
+    else encoding = false;
+  }
+}
 
 const MAX_INPUT_PIXELS = 80_000_000;
 const MAX_IMAGE_DIMENSION = 12_000;
@@ -82,11 +102,11 @@ export async function prepareImageVariants(source: Buffer, options: ImageOutputO
   };
 }
 
-/** Four independent encodes from the source, never AVIF converted back to WebP. */
+/** Independent encodes from the source, serialized to bound native memory/CPU. */
 export async function prepareProductImageVariants(source: Buffer) {
-  const [avif, webp] = await Promise.all([
-    prepareImageVariants(source, { format: 'avif', quality: 65 }),
-    prepareImageVariants(source, { format: 'webp', quality: 75 })
-  ]);
-  return { avif, webp };
+  return serializeImage(async () => {
+    const webp = await prepareImageVariants(source, { format: 'webp', quality: 75 });
+    const avif = await prepareImageVariants(source, { format: 'avif', quality: 65 });
+    return { avif, webp };
+  });
 }

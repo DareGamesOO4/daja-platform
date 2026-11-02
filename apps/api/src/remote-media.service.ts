@@ -14,9 +14,11 @@ import {
   sha256,
   prepareImageVariants,
   type ImageOutputOptions,
-  type Database
+  type Database,
+  TransactionManager
 } from '@daja/database';
 import { ValidationFailedError } from '@daja/security';
+import { createLogger } from '@daja/observability';
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 80_000_000;
@@ -75,10 +77,9 @@ export async function importRemoteImage(input: {
     productSlug: input.productSlug, imageIndex: input.imageIndex, extension: '.source'
   });
   const createdKeys = new Set<string>();
-  const client = await input.database.pool.connect();
+  const repository = new MediaRepository(input.database.pool);
   try {
-    await client.query('BEGIN');
-    const inserted = await client.query<MediaAssetRow>(
+    const inserted = await input.database.pool.query<MediaAssetRow>(
       `INSERT INTO media_assets (id, organization_id, storage_provider, storage_bucket, storage_key,
         public_url, mime_type, size_bytes, checksum_sha256, status, metadata)
        VALUES ($1,$2,'r2',$3,$4,$5,$6,$7,$8,'uploaded',$9::jsonb) RETURNING *`,
@@ -89,19 +90,18 @@ export async function importRemoteImage(input: {
           imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString() })]
     );
     const asset = inserted.rows[0]!;
-    const result = await new MediaRepository(client).optimizeUploadedImage(
-      { organizationId: input.organizationId }, mediaId, storage, createdKeys,
-      { asset, bytes: downloaded.buffer }
-    );
-    await client.query('COMMIT');
+    const prepared = await repository.stageUploadedImage(
+      { organizationId: input.organizationId }, mediaId, storage, createdKeys, { asset, bytes: downloaded.buffer });
+    const result = await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(client =>
+      new MediaRepository(client).optimizeUploadedImage(
+        { organizationId: input.organizationId }, mediaId, storage, createdKeys, undefined, prepared));
     return { id: mediaId, mediaId, publicUrl: result.publicUrl, mainImageUrl: result.mainImageUrl,
       thumbnailUrl: result.thumbnailUrl, storageKey: result.storageKey, width: result.width, height: result.height };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await input.database.pool.query(`UPDATE media_assets SET status='failed', updated_at=now()
+      WHERE organization_id=$1 AND id=$2 AND status='uploaded'`, [input.organizationId, mediaId]).catch(() => undefined);
     await Promise.allSettled([...createdKeys].map(key => storage.deleteObject(key)));
     throw error;
-  } finally {
-    client.release();
   }
 }
 
@@ -283,7 +283,12 @@ function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<Inc
       },
       lookup: (_hostname, _options, callback) => callback(null, address, family)
     };
-    const request = (url.protocol === 'https:' ? getHttps : getHttp)(url, options, resolve);
+    const request = (url.protocol === 'https:' ? getHttps : getHttp)(url, options, response => {
+      // Redirect/unsupported responses may be drained without a body reader.
+      // Their stream errors must never become an uncaught process exception.
+      response.on('error', () => {});
+      resolve(response);
+    });
     request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
       request.destroy(new Error('Remote image request timed out'));
     });

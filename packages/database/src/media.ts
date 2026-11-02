@@ -258,11 +258,10 @@ export class MediaRepository {
     return { mediaId, storageKey, publicUrl, ...presign };
   }
 
-  async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter, createdKeys: Set<string>) {
+  /** Read/validate R2 bytes without holding a database transaction or row lock. */
+  async readUploadedSource(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter) {
     const asset = await this.getForUpdate(ctx, mediaId);
-    if (asset.status !== 'pending_upload') {
-      throw new ValidationFailedError('Media asset is not pending upload');
-    }
+    if (asset.status !== 'pending_upload') throw new ValidationFailedError('Media asset is not pending upload');
     const object = await storage.headObject(asset.storage_key);
     validateUploadMetadata({ mimeType: object.mimeType || '', sizeBytes: object.sizeBytes });
     if (object.mimeType !== asset.mime_type) {
@@ -277,6 +276,15 @@ export class MediaRepository {
     if (asset.checksum_sha256 && sha256(bytes) !== asset.checksum_sha256.toLowerCase()) {
       throw new ValidationFailedError('Uploaded content checksum does not match');
     }
+    return { asset, bytes, object };
+  }
+
+  async completeUpload(ctx: RequestContext, mediaId: string, storage: MediaStorageAdapter, createdKeys: Set<string>,
+    prepared?: Awaited<ReturnType<MediaRepository['stageUploadedImage']>>) {
+    const asset = await this.getForUpdate(ctx, mediaId);
+    if (asset.status !== 'pending_upload') throw new ValidationFailedError('Media asset is not pending upload');
+    if (prepared) return this.optimizeUploadedImage(ctx, mediaId, storage, createdKeys, undefined, prepared);
+    const { bytes, object } = await this.readUploadedSource(ctx, mediaId, storage);
     if (asset.mime_type.startsWith('image/')) {
       return this.optimizeUploadedImage(ctx, mediaId, storage, createdKeys, { asset, bytes });
     }
@@ -296,30 +304,21 @@ export class MediaRepository {
     return { mediaId, status: 'uploaded', obsoleteStorageKeys: [] as string[] };
   }
 
-  /** Caller owns the transaction and removes created objects on rollback, obsolete ones after commit. */
-  async optimizeUploadedImage(
-    ctx: Pick<RequestContext, 'organizationId'>,
-    mediaId: string,
-    storage: MediaStorageAdapter,
-    createdKeys: Set<string>,
-    source?: { asset: MediaAssetRow; bytes: Buffer }
-  ) {
+  /** CPU encoding and R2 writes happen outside the metadata transaction. */
+  async stageUploadedImage(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string,
+    storage: MediaStorageAdapter, createdKeys: Set<string>, source?: { asset: MediaAssetRow; bytes: Buffer }) {
     const asset = source?.asset ?? await this.getForUpdate(ctx, mediaId);
     if (!['pending_upload', 'uploaded', 'processing'].includes(asset.status)) {
       throw new ValidationFailedError('Media asset is not awaiting image processing');
     }
     const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
     const { webp: processed, avif } = await prepareProductImageVariants(bytes);
-    const mainKey = uploadedImageStorageKey(asset.storage_key);
+    const mainKey = uploadedImageStorageKey(asset.storage_key).replace(/-avif65-webp75-main\.webp$/, `-${randomUUID().slice(0, 8)}-avif65-webp75-main.webp`);
     const thumbnailKey = productMediaThumbnailStorageKey({
       originalKey: mainKey, organizationId: ctx.organizationId, mediaId, width: 512
     });
     const publicUrl = requiredPublicUrl(storage, mainKey);
     const thumbnailUrl = requiredPublicUrl(storage, thumbnailKey);
-    const previous = await this.client.query<{ storage_key: string }>(
-      'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
-      [ctx.organizationId, mediaId]
-    );
     const avifMainKey = mainKey.replace(/\.webp$/, '.avif');
     const avifThumbnailKey = thumbnailKey.replace(/\.webp$/, '.avif');
     const objects = [
@@ -333,6 +332,25 @@ export class MediaRepository {
       await storage.putObject({ key, body: image.data, contentType: mimeType,
         cacheControl: 'public, max-age=31536000, immutable' });
     }
+    return { asset, processed, avif, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects };
+  }
+
+  /** Caller owns only the short database metadata transaction. */
+  async optimizeUploadedImage(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string,
+    storage: MediaStorageAdapter, createdKeys: Set<string>, source?: { asset: MediaAssetRow; bytes: Buffer },
+    prepared?: Awaited<ReturnType<MediaRepository['stageUploadedImage']>>) {
+    const asset = await this.getForUpdate(ctx, mediaId);
+    if (!['pending_upload', 'uploaded', 'processing'].includes(asset.status)) {
+      throw new ValidationFailedError('Media asset is not awaiting image processing');
+    }
+    if (prepared && (prepared.asset.storage_key !== asset.storage_key || prepared.asset.checksum_sha256 !== asset.checksum_sha256)) {
+      throw new ValidationFailedError('Media asset changed during processing');
+    }
+    const { processed, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects } = prepared ??
+      await this.stageUploadedImage(ctx, mediaId, storage, createdKeys, source);
+    const previous = await this.client.query<{ storage_key: string }>(
+      'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
+      [ctx.organizationId, mediaId]);
     const ready = await this.markReady({
       organizationId: ctx.organizationId, mediaId,
       width: processed.original.width, height: processed.original.height,

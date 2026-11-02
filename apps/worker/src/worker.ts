@@ -229,9 +229,10 @@ async function processMediaJob(
       );
       return;
     }
+    const prepared = await new MediaRepository(database.pool).stageUploadedImage({ organizationId }, mediaId, storage, createdKeys);
     const result = await tx.run(async pgClient => {
       const result = await new MediaRepository(pgClient).optimizeUploadedImage(
-        { organizationId }, mediaId, storage, createdKeys
+        { organizationId }, mediaId, storage, createdKeys, undefined, prepared
       );
       await new OutboxRepository(pgClient).append({
         ctx: { organizationId }, eventType: 'MediaReady', aggregateType: 'media_asset', aggregateId: mediaId,
