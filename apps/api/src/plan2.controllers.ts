@@ -333,7 +333,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v6:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v7:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -375,6 +375,15 @@ export class PublicCatalogController {
       '/',
       '/catalog',
       '/kolekcije-satova',
+      '/magazin/brendovi/orient',
+      '/magazin/brendovi/orient-star',
+      '/magazin/brendovi/daniel-klein',
+      '/magazin/brendovi/casio',
+      '/magazin/brendovi/q-q',
+      '/magazin/clanci/g-shock-analogni-2500',
+      '/magazin/clanci/orient-jesen-zima-2026',
+      '/magazin/clanci/orient-mako-40-boje-2026',
+
       '/muski-satovi',
       '/zenski-satovi',
       '/naocare',
@@ -2860,6 +2869,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v4:${organizationId}`,
       `catalog:sitemap:v5:${organizationId}`,
       `catalog:sitemap:v6:${organizationId}`,
+      `catalog:sitemap:v7:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,

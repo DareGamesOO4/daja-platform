@@ -58,3 +58,11 @@ i postojeće landing izbore. Za svaki neprazan izbor vraća broj proizvoda i naj
 tri kartice. Fotografije za jedinstvene proizvode učitavaju se grupno jednim pozivom
 postojećeg repozitorijuma, bez posebnog zahteva po kolekciji.
 Sitemap uključuje i SSR magazin `/kolekcije-satova`.
+
+## Stranice magazina
+
+Sitemap v7 dodaje pet stranica istorije brenda pod `/magazin/brendovi/` i tri
+članka pod `/magazin/clanci/`. Rute moraju odgovarati web manifestima
+`watchStories.js` i `watchArticles.js`. Datumi novosti i citirani izvori održavaju
+se u web projektu; ne generišu se automatski niti predstavljaju stanje zaliha.
+Ulaz je u hamburger meniju i footeru web sajta.
