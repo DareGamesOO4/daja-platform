@@ -1,4 +1,4 @@
-import { publicLandingPages } from './catalog-page.js';
+import { publicCollectionPreviews, publicLandingPages } from './catalog-page.js';
 import { performance } from 'node:perf_hooks';
 import { CatalogDeliveryService, enqueueCatalogDelivery } from './catalog-delivery.service.js';
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
@@ -289,6 +289,11 @@ export class PublicCatalogController {
     return rate;
   }
 
+  @Get('collections')
+  async collections(@Req() request: Request) {
+    return publicCollectionPreviews(this.database.pool, this.publicContext(request).organizationId);
+  }
+
   @Get('page')
   async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>,
     @Res({ passthrough: true }) response: Response) {
@@ -328,7 +333,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v5:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v6:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -369,6 +374,7 @@ export class PublicCatalogController {
     const staticEntries = [
       '/',
       '/catalog',
+      '/kolekcije-satova',
       '/muski-satovi',
       '/zenski-satovi',
       '/naocare',
@@ -2853,6 +2859,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v3:${organizationId}`,
       `catalog:sitemap:v4:${organizationId}`,
       `catalog:sitemap:v5:${organizationId}`,
+      `catalog:sitemap:v6:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,

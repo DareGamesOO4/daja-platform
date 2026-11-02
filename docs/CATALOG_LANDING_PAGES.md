@@ -7,8 +7,8 @@ Definicije putanja, naslova i opisa uskladiti sa
 API proverava putanje prema dozvoljenim rutama; `publicListingParams` pretvara
 stalnu putanju u parametar `landing`. Taj parametar učestvuje u izboru, facetima,
 sortiranju i ključevima keša. Dodatni uslovi su presek sa izborom stalne stranice.
-Sitemap v5 sadrži samo selekcije sa aktivnim/objavljenim proizvodima. Sve postojeće
-putanje invalidacije sitemap-a sada uključuju v5.
+Sitemap v6 sadrži samo selekcije sa aktivnim/objavljenim proizvodima. Sve postojeće
+putanje invalidacije sitemap-a sada uključuju v6.
 
 Serija se izvodi u odgovoru, bez migracije ili prepisivanja baze i sačuvane
 konfiguracije filtera. Izvedeni facet `watch_series` koristi
@@ -50,3 +50,11 @@ Nisu sve Casio oznake automatski razvrstane. Kada se ponuda dodaje, uneti i seri
 
 Pravila ne potvrđuju stanje dobavljača niti automatski otkrivaju skrivene artikle.
 Javni izbori nastavljaju da koriste postojeća pravila objavljivanja kataloga.
+
+## Pregledi kolekcija
+
+`GET /public/catalog/collections` koristi javni snapshot satova, pet grupa brendova
+i postojeće landing izbore. Za svaki neprazan izbor vraća broj proizvoda i najviše
+tri kartice. Fotografije za jedinstvene proizvode učitavaju se grupno jednim pozivom
+postojećeg repozitorijuma, bez posebnog zahteva po kolekciji.
+Sitemap uključuje i SSR magazin `/kolekcije-satova`.

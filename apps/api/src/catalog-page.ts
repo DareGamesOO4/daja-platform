@@ -312,3 +312,18 @@ function availableLandings(products: Product[]) {
 export async function publicLandingPages(pool: Pool, organizationId: string) {
   return availableLandings((await snapshot(pool,organizationId,'satovi')).products);
 }
+
+// One public snapshot and one batched media lookup, rather than one request per tile.
+export async function publicCollectionPreviews(pool: Pool, organizationId: string) {
+  const data = await snapshot(pool, organizationId, 'satovi');
+  const visible = data.products.filter(product => product.active && product.published);
+  const groups = [
+    ...['ORIENT', 'ORIENT STAR', 'DANIEL KLEIN', 'CASIO', 'Q&Q'].map(brand => ({path:`/brend/${brand.toLowerCase().replace(/&/g,'-').replace(/ /g,'-')}`,title:brand,brand,
+      products:visible.filter(product=>normalize(product.brand)===normalize(brand))})),
+    ...catalogLandings.map(page=>({...page,products:visible.filter(product=>matchesLanding(product,page))}))
+  ].filter(group=>group.products.length);
+  const ids = [...new Set(groups.flatMap(group=>group.products.slice(0,3).map(product=>product.id)))];
+  const previews = await cards(pool,organizationId,ids);
+  const byId = new Map(previews.map(product=>[product.productId,product]));
+  return {groups:groups.map(({products,...group})=>({...group,count:products.length,items:products.slice(0,3).flatMap(product=>{const card=byId.get(product.id);return card?[card]:[];})}))};
+}
