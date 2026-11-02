@@ -546,7 +546,7 @@ export class CatalogRepository {
         `UPDATE products
          SET name = $3, slug = $4, description = $5, item_condition = $6, department_id = $7, brand_id = $8, primary_category_id = $9,
              seo = $10::jsonb, features = $11::jsonb, model_3d_url = $12, marketing_flags = $13::jsonb, active = $14, published = $15, version = version + 1, updated_at = now()
-         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND version = $16
          RETURNING *`,
         [
           ctx.organizationId,
@@ -563,9 +563,11 @@ export class CatalogRepository {
           next.model3DUrl,
           JSON.stringify(next.marketingFlags),
           next.active,
-          next.published
+          next.published,
+          current.version
         ]
       );
+      if (result.rowCount !== 1) throw new VersionConflictError();
       return mapProduct(requireRow(result));
     } catch (error) {
       throwConflictForUnique(error, 'Product slug already exists');
@@ -675,7 +677,7 @@ export class CatalogRepository {
          SET sku = $3, barcode = $4, mpn = $5, name = $6, gender = $7, current_price_amount = $8,
              currency = $9, attributes = $10::jsonb, active = $11, published = $12,
              version = version + 1, updated_at = now()
-         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL AND version = $13
          RETURNING *`,
         [
           ctx.organizationId,
@@ -689,9 +691,11 @@ export class CatalogRepository {
           next.currency,
           JSON.stringify(next.attributes),
           next.active,
-          next.published
+          next.published,
+          before.version
         ]
       );
+      if (result.rowCount !== 1) throw new VersionConflictError();
       const after = mapVariant(requireRow(result));
       if (priceChanged) {
         await this.client.query(

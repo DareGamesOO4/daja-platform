@@ -1,5 +1,10 @@
 import { MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { ApiRateGuard } from './runtime/api-rate.guard.js';
+import { SharedRateStorage } from './runtime/shared-rate-storage.js';
+import { CatalogBulkController } from './catalog-bulk.controller.js';
+import { CatalogBulkService } from './catalog-bulk.service.js';
+import { CatalogDeliveryService } from './catalog-delivery.service.js';
 import { clientNetwork } from './runtime/abuse-protection.js';
 import { BrowserSessionInterceptor } from './runtime/browser-session.js';
 import { APP_GUARD } from '@nestjs/core';
@@ -58,10 +63,12 @@ import {
 
 const config = loadConfig();
 const logger = createLogger(config, 'api');
+const rateStorage = new SharedRateStorage(config);
 
 @Module({
   imports: [
     ThrottlerModule.forRoot({
+      storage: rateStorage,
       // HTTP limits must not run against the WebSocket gateway or health probes.
       skipIf: context => context.getType() !== 'http' || context.getClass() === HealthController,
       getTracker: request => {
@@ -79,6 +86,7 @@ const logger = createLogger(config, 'api');
     })
   ],
   controllers: [
+    CatalogBulkController,
     ContactController,
     EngravingController,
     CatalogFiltersController,
@@ -107,8 +115,11 @@ const logger = createLogger(config, 'api');
     ,ReaderStationController
   ],
   providers: [
+    CatalogBulkService,
+    CatalogDeliveryService,
     BrowserSessionInterceptor,
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: ApiRateGuard },
+    { provide: SharedRateStorage, useValue: rateStorage },
     EngravingService,
     { provide: CONFIG, useValue: config },
     { provide: LOGGER, useValue: logger },

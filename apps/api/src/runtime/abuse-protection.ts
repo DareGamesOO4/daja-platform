@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import type { RequestHandler } from 'express';
+import type { SharedRateStorage } from './shared-rate-storage.js';
 
 /** Group IPv6 privacy addresses by /64; never key counters by caller headers. */
 export function clientNetwork(address: string): string {
@@ -40,11 +41,13 @@ export class AdmissionBudget {
   }
 }
 
-export function admissionMiddleware(): RequestHandler {
-  const budget = new AdmissionBudget();
+let activeRequests = 0;
+export function apiUnderLoad(): boolean { return activeRequests >= 16; }
+
+export function admissionMiddleware(storage: SharedRateStorage): RequestHandler {
   const active = new Map<string, number>();
   let total = 0;
-  return (request, response, next) => {
+  return async (request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
     if (request.path === '/health/live' || request.path === '/health/ready') {
       // A public caller must not exhaust a shared quota and make Render's
@@ -53,29 +56,40 @@ export function admissionMiddleware(): RequestHandler {
       return next();
     }
     const network = clientNetwork(request.ip ?? request.socket.remoteAddress ?? 'unknown');
-    if (!budget.take('global', 6000, 60_000) || !budget.take(network, 1200, 60_000)) {
-      response.setHeader('Retry-After', '60');
-      response.status(429).json({ error: { code: 'RATE_LIMITED', message: 'Too many requests', details: {} } });
-      return;
-    }
-    if (total >= 64 || (active.get(network) ?? 0) >= 16) {
+    if (total >= 64 || (active.get(network) ?? 0) >= 32) {
       response.setHeader('Retry-After', '5');
       response.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable', details: {} } });
       return;
     }
     total++;
+    activeRequests++;
     active.set(network, (active.get(network) ?? 0) + 1);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       total--;
+      activeRequests--;
       const remaining = (active.get(network) ?? 1) - 1;
       if (remaining) active.set(network, remaining);
       else active.delete(network);
     };
     response.once('finish', release);
     response.once('close', release);
+    try {
+      const global = await storage.window('admission:global', 6000, 60_000);
+      const budget = global.allowed
+        ? await storage.window(`admission:network:${network}`, 3000, 60_000)
+        : global;
+      if (!budget.allowed) {
+        response.setHeader('Retry-After', budget.retryAfter);
+        response.status(429).json({ error: { code: 'RATE_LIMITED', message: 'Too many requests', details: {} } });
+        return;
+      }
+    } catch (error) {
+      next(error);
+      return;
+    }
     next();
   };
 }

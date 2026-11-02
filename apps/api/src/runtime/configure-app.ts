@@ -12,6 +12,7 @@ import { ApiExceptionFilter } from './api-exception.filter.js';
 import { EnvelopeInterceptor } from './envelope.interceptor.js';
 import { allowedCorsOrigins } from './cors-policy.js';
 import { admissionMiddleware } from './abuse-protection.js';
+import { SharedRateStorage } from './shared-rate-storage.js';
 import { edgeIngress } from './edge-ingress.js';
 import { BrowserSessionInterceptor, browserSessionMiddleware } from './browser-session.js';
 
@@ -29,10 +30,12 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   app.enableCors({
     origin: corsOrigins,
     credentials: true,
-    exposedHeaders: ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset']
+    exposedHeaders: ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Burst', 'X-RateLimit-Remaining', 'X-RateLimit-Reset']
   });
   // Must precede body parsing and AuthMiddleware (which queries PostgreSQL).
-  app.use(admissionMiddleware());
+  app.use(admissionMiddleware(app.get(SharedRateStorage)));
+  // A bounded bulk plan can contain many individual descriptions. Other routes retain 1 MB.
+  app.use('/api/v1/admin/catalog/jobs', json({ limit: '8mb' }));
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: false, limit: '1mb' }));
   app.use(browserSessionMiddleware(config));

@@ -6,6 +6,7 @@ import type { RedisConnection } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { ValidationFailedError } from '@daja/security';
 import { CONFIG, LOGGER, REDIS } from './tokens.js';
+import { consumeLoginAttempt } from './login-attempts.js';
 
 export type PhoneOtpPurpose = 'login' | 'link';
 
@@ -37,6 +38,7 @@ export class PhoneOtpService {
     this.assertConfigured();
     const client = await this.redisClient();
     const scope = this.scope(input);
+    await consumeLoginAttempt(this.config, `otp:send:${scope}`);
     const cooldown = await client.set(this.cooldownKey(scope), '1', 'EX', RESEND_COOLDOWN_SECONDS, 'NX');
     if (cooldown !== 'OK') {
       throw new ValidationFailedError('Sačekajte minut pre ponovnog slanja koda.');
@@ -86,6 +88,7 @@ export class PhoneOtpService {
   }) {
     const client = await this.redisClient();
     const scope = this.scope(input);
+    await consumeLoginAttempt(this.config, `otp:verify:${scope}`);
     const key = this.challengeKey(scope);
     // Compare, count and consume in one Redis operation. Separate GET/SET/DEL
     // allowed concurrent wrong guesses to overwrite each other's attempt count,

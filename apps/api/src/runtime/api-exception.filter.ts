@@ -20,7 +20,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
         // rediscovering its still-signed cookie and retrying indefinitely.
         clearBrowserSession(response);
       }
-      if (exception.statusCode === 429 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '900');
+      if (exception.statusCode === 429 && !response.hasHeader('Retry-After')) {
+        const seconds = exception.details.retryAfterSeconds;
+        if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+          response.setHeader('Retry-After', Math.ceil(seconds));
+        }
+      }
       if (exception.statusCode === 503 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '5');
       response.status(exception.statusCode).json({
         error: {

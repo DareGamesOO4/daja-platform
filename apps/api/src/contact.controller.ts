@@ -24,7 +24,7 @@ export class ContactController {
   ) {}
 
   @Post()
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: 3, ttl: 600_000 } })
   async submit(@Body() body: unknown) {
     const input = parseWithSchema(contactSchema, body);
     if (input.website) return { status: 'accepted' };

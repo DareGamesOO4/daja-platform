@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { CatalogDeliveryService, enqueueCatalogDelivery } from './catalog-delivery.service.js';
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
 import {
   Body,
@@ -565,7 +566,8 @@ export class StaffCatalogController {
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(REDIS) private readonly redis: RedisConnection,
     private readonly realtime: RealtimeGateway,
-    private readonly productAlerts: ProductAlertService
+    private readonly productAlerts: ProductAlertService,
+    @Inject(CatalogDeliveryService) private readonly catalogDelivery: CatalogDeliveryService
   ) {}
 
   private variantGroupContext(request: Request) {
@@ -990,13 +992,16 @@ export class StaffCatalogController {
       for (const item of variants.rows) await sync.publishProductChange(ctx, productId, item.id, !input.id && item.id === variant.id ? 'create' : 'update');
       await outbox.append({ ctx, eventType: before ? 'ProductUpdated' : 'ProductCreated', aggregateType: 'product', aggregateId: productId, payload: { productId, variantId: variant.id, slug: product.slug, published: product.published } });
       const result: SaveResult = { productId, variantId: variant.id, slug: product.slug, previousSlug: before?.slug || product.slug, epcs: [...epcs], staleMediaKeys: relocated.sourceKeys, removedMediaIds, stockAdded, saleChanged: Boolean(input.sale?.replace && input.sale.price), previousPriceAmount: changed?.priceChanged ? changed.before.currentPriceAmount : null, currentPriceAmount: variant.currentPriceAmount };
+      await enqueueCatalogDelivery(client, ctx, productId, [result.previousSlug, result.slug], result.epcs.map(epc => `rfid:resolve:${ctx.organizationId}:${epc}`));
       await client.query(`INSERT INTO idempotency_records (organization_id,idempotency_key,request_hash,status,response_status,response_payload) VALUES ($1,$2,$3,'completed',200,$4::jsonb)`, [ctx.organizationId, requestKey, requestHash, JSON.stringify(result)]);
       return result;
     });
     // These are the same public/staff signals and durable sync records used by
     // the existing RFID routes. Publish only after the complete save commits.
-    if (saved.epcs.length) await this.redis.client.del(...saved.epcs.map(epc => `rfid:resolve:${ctx.organizationId}:${epc}`));
-    await this.invalidateCatalog(ctx.organizationId, ...new Set([saved.previousSlug, saved.slug]));
+    try {
+      if (saved.epcs.length) await this.catalogDelivery.invalidateKeys(saved.epcs.map(epc => `rfid:resolve:${ctx.organizationId}:${epc}`));
+      await this.invalidateCatalog(ctx.organizationId, ...new Set([saved.previousSlug, saved.slug]));
+    } catch { this.logger.warn({ productId: saved.productId }, 'Saved product cache invalidation queued for retry'); }
     if (saved.previousPriceAmount !== null) await this.productAlerts.notifyPriceChanged({ organizationId: ctx.organizationId, variantId: saved.variantId, previousPriceAmount: saved.previousPriceAmount, currentPriceAmount: saved.currentPriceAmount });
     if (saved.stockAdded) await this.productAlerts.notifyBackInStock({ organizationId: ctx.organizationId, variantId: saved.variantId });
     // Persisted sale events are dispatched by the independent worker.
@@ -1569,6 +1574,7 @@ export class StaffCatalogController {
           beforePayload: before,
           afterPayload: after
         });
+        await enqueueCatalogDelivery(client, ctx, productId, [before.slug, after.slug]);
         return { beforeSlug: before.slug, after, staleMediaKeys: relocated.sourceKeys };
       }
     );
@@ -1584,36 +1590,8 @@ export class StaffCatalogController {
         this.logger.warn({ err: error, productId }, 'Could not delete old product media keys');
       }
     }
-    // Outbox/sync must never prevent a catalog administrator from saving a
-    // product. The audit record was already committed atomically with the
-    // catalog change above, so it can never be missing from a saved update.
-    try {
-      await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-        await new OutboxRepository(client).append({
-          ctx,
-          eventType: 'ProductUpdated',
-          aggregateType: 'product',
-          aggregateId: productId,
-          payload: { productId, slug: patched.after.slug, published: patched.after.published }
-        });
-        const variant = await client.query<{ id: string }>(
-          `SELECT id FROM product_variants
-           WHERE organization_id = $1 AND product_id = $2 AND deleted_at IS NULL
-           ORDER BY created_at LIMIT 1`,
-          [ctx.organizationId, productId]
-        );
-        if (variant.rows[0]) {
-          await new OperationalSyncProjector(client).publishProductChange(
-            ctx,
-            productId,
-            variant.rows[0].id
-          );
-        }
-      });
-    } catch (error) {
-      this.logger.warn({ err: error, productId }, 'Product saved but operational sync failed');
-    }
-    await this.invalidateCatalog(ctx.organizationId, patched.beforeSlug, patched.after.slug);
+    try { await this.invalidateCatalog(ctx.organizationId, patched.beforeSlug, patched.after.slug); }
+    catch { this.logger.warn({ productId }, 'Catalog cache invalidation queued for retry'); }
     return patched.after;
   }
 
@@ -1815,11 +1793,7 @@ export class StaffCatalogController {
           aggregateId: variantId,
           payload: { variantId, productId: after.productId, price: after.currentPriceAmount }
         });
-        await new OperationalSyncProjector(client).publishProductChange(
-          ctx,
-          after.productId,
-          variantId
-        );
+        await enqueueCatalogDelivery(client, ctx, after.productId, [product.slug]);
         return {
           productSlug: product.slug,
           after,
@@ -1828,7 +1802,8 @@ export class StaffCatalogController {
         };
       }
     );
-    await this.invalidateCatalog(ctx.organizationId, patched.productSlug);
+    try { await this.invalidateCatalog(ctx.organizationId, patched.productSlug); }
+    catch { this.logger.warn({ variantId }, 'Catalog cache invalidation queued for retry'); }
     if (patched.priceChanged) {
       await this.productAlerts.notifyPriceChanged({
         organizationId: ctx.organizationId,
@@ -1922,49 +1897,37 @@ export class StaffCatalogController {
   }
 
   @Put('variants/:id/specifications')
-  async replaceVariantSpecifications(
-    @Req() request: Request,
-    @Param('id') id: string,
-    @Body() body: unknown
-  ) {
+  async replaceVariantSpecifications(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const variantId = parseWithSchema(uuidSchema, id);
-    const input = parseWithSchema(
-      z.object({
-        values: z
-          .array(z.object({ specKeyId: uuidSchema, value: z.string().trim().min(1).max(1000) }))
-          .max(100)
-      }),
-      body
-    );
-    const variant = await this.database.pool.query(
-      `SELECT v.product_id, p.department_id FROM product_variants v JOIN products p ON p.id = v.product_id
-       WHERE v.organization_id = $1 AND v.id = $2 AND v.deleted_at IS NULL AND p.deleted_at IS NULL`,
-      [ctx.organizationId, variantId]
-    );
-    if (variant.rowCount !== 1) throw new TenantAccessDeniedError();
-    const departmentId = variant.rows[0].department_id;
-    for (const item of input.values) {
-      const valid = await this.database.pool.query(
-        `SELECT 1 FROM spec_keys WHERE organization_id = $1 AND id = $2 AND active AND deleted_at IS NULL
-         AND ($3::uuid IS NULL OR department_id = $3::uuid)`,
-        [ctx.organizationId, item.specKeyId, departmentId]
-      );
-      if (valid.rowCount !== 1)
-        throw new Error('Specification does not belong to this product department');
-    }
-    await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      await client.query(
-        `DELETE FROM variant_specification_values WHERE organization_id = $1 AND variant_id = $2`,
-        [ctx.organizationId, variantId]
-      );
-      for (const item of input.values) {
-        await client.query(
-          `INSERT INTO variant_specification_values (organization_id, variant_id, spec_key_id, value) VALUES ($1, $2, $3, $4)`,
-          [ctx.organizationId, variantId, item.specKeyId, item.value]
-        );
-      }
+    const input = parseWithSchema(z.object({
+      expectedVersion: z.number().int().positive().optional(),
+      values: z.array(z.object({ specKeyId: uuidSchema, value: z.string().trim().min(1).max(1000) })).max(100)
+        .refine(values => new Set(values.map(value => value.specKeyId)).size === values.length, 'Duplicate specification')
+    }), body);
+    await new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const product = (await client.query<{ id: string; slug: string; department_id: string | null; created_by_user_id: string | null }>(
+        `SELECT p.id,p.slug,p.department_id,p.created_by_user_id FROM products p
+         JOIN product_variants v ON v.product_id=p.id AND v.organization_id=p.organization_id
+         WHERE p.organization_id=$1 AND v.id=$2 AND v.deleted_at IS NULL AND p.deleted_at IS NULL FOR UPDATE OF p`,
+        [ctx.organizationId, variantId])).rows[0];
+      if (!product || (this.isCatalogContributor(ctx) && product.created_by_user_id !== ctx.userId)) throw new TenantAccessDeniedError();
+      await client.query('SELECT id FROM product_variants WHERE organization_id=$1 AND id=$2 FOR UPDATE', [ctx.organizationId, variantId]);
+      const keys = input.values.map(value => value.specKeyId);
+      const valid = await client.query(`SELECT id FROM spec_keys WHERE organization_id=$1 AND id=ANY($2::uuid[])
+        AND active AND deleted_at IS NULL AND ($3::uuid IS NULL OR department_id=$3)`, [ctx.organizationId, keys, product.department_id]);
+      if (valid.rowCount !== keys.length) throw new ValidationFailedError('Specification does not belong to this product department');
+      const before = (await client.query('SELECT spec_key_id,value FROM variant_specification_values WHERE organization_id=$1 AND variant_id=$2', [ctx.organizationId, variantId])).rows;
+      await new CatalogRepository(client).patchVariant(ctx, variantId, { expectedVersion: input.expectedVersion });
+      await new CatalogRepository(client).patchProduct(ctx, product.id, {});
+      await client.query('DELETE FROM variant_specification_values WHERE organization_id=$1 AND variant_id=$2', [ctx.organizationId, variantId]);
+      for (const value of input.values) await client.query(`INSERT INTO variant_specification_values
+        (organization_id,variant_id,spec_key_id,value) VALUES ($1,$2,$3,$4)`, [ctx.organizationId, variantId, value.specKeyId, value.value]);
+      await new StorefrontRepository(client).refreshProductSnapshots({ organizationId: ctx.organizationId, productId: product.id });
+      await new AuditRepository(client).append({ ctx, aggregateType: 'variant', aggregateId: variantId,
+        operation: 'update', beforePayload: { specifications: before }, afterPayload: { specifications: input.values } });
+      await enqueueCatalogDelivery(client, ctx, product.id, [product.slug]);
     });
     return this.listVariantSpecifications(request, id);
   }
@@ -2784,7 +2747,7 @@ export class StaffCatalogController {
          AND ($7::text IS NULL OR (${searchPredicate}))
          ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6
        )
-       SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.department_id AS "departmentId",
+       SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.version::float8 AS version, p.department_id AS "departmentId",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", p.created_by_user_id AS "createdByUserId",
               supplier.url AS "supplierUrl", supplier.external_reference AS "supplierReference",
@@ -2813,7 +2776,7 @@ export class StaffCatalogController {
                 AND a.aggregate_type='product' AND a.aggregate_id=p.id AND a.operation='quality_changes_requested') AS "lastReturnedAt",
               p.compensation_amount_minor AS "compensationAmountMinor", p.compensation_approved_at AS "compensationApprovedAt", p.created_at AS "createdAt", p.updated_at AS "updatedAt", p.deleted_at AS "deletedAt",
               d.slug AS department, b.name AS brand, c.name AS category,
-              v.id AS "variantId", v.sku, v.barcode, v.mpn, v.name AS "variantName", v.current_price_amount AS "currentPriceAmount", v.currency,
+              v.id AS "variantId", v.version::float8 AS "variantVersion", v.sku, v.barcode, v.mpn, v.name AS "variantName", v.current_price_amount AS "currentPriceAmount", v.currency,
               v.gender, v.attributes AS specs, v.active AS "variantActive", v.published AS "variantPublished",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
@@ -2892,7 +2855,7 @@ export class StaffCatalogController {
       `catalog:merchant-feed:v3:${organizationId}`,
       ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`, `catalog:slug:public-v3:${organizationId}:${slug}`])
     ];
-    await this.redis.client.del(...keys);
+    await this.catalogDelivery.invalidateKeys(keys);
     if (!validSlugs.length) return;
     const products = await this.database.pool.query<{ id: string; slug: string }>(
       `SELECT id, slug FROM products
