@@ -33,6 +33,7 @@ import { NovostiEmailService } from './novosti-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
+import { CatalogDeliveryService } from './catalog-delivery.service.js';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -809,6 +810,7 @@ export class StorefrontContentController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
+    @Inject(CatalogDeliveryService) private readonly catalogDelivery: CatalogDeliveryService,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
     @Inject(PromotionsService) private readonly promotions: PromotionsService,
@@ -837,14 +839,17 @@ export class StorefrontContentController {
       ? await this.auth.authenticateAccessToken(token).catch(() => null)
       : null;
     const input = parseWithSchema(reviewSchema, body);
-    return new StorefrontRepository(this.database.pool).addReview({
-      organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
+    const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
+    const review = await new StorefrontRepository(this.database.pool).addReview({
+      organizationId,
       productId: parseWithSchema(uuidSchema, productId),
       customerId: customer?.customerId ?? null,
       userName: input.userName ?? customer?.displayName ?? 'Kupac',
       rating: input.rating,
       comment: input.comment
     });
+    await this.catalogDelivery.refreshProductReviews(organizationId, review.productId);
+    return review;
   }
 
   @Post('products/:productId/alerts')

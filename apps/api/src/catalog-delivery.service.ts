@@ -79,6 +79,30 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
     if (this.connecting) await this.connecting;
     await this.cache.del(...keys);
   }
+  async refreshProductReviews(organizationId: string, productId: string) {
+    // Review writes have already succeeded. Cache failure must not make the
+    // customer retry and submit a duplicate; public entries also expire.
+    try {
+      const result = await this.database.pool.query<{ slug: string }>(
+        `UPDATE products SET updated_at=now()
+         WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING slug`,
+        [organizationId, productId]
+      );
+      const slug = result.rows[0]?.slug;
+      if (!slug) return;
+      try {
+        await this.invalidateKeys([
+          ...['slug', 'slug:public-v2', 'slug:public-v3'].map(key => `catalog:${key}:${organizationId}:${slug}`),
+          `catalog:sitemap:v8:${organizationId}`,
+        ]);
+      } catch (error) {
+        this.logger.warn({ err: error, productId }, 'Review cache refresh deferred to cache expiry');
+      }
+      this.realtime.publish({ organizationId, event: 'product.updated', payload: { productId, slug } });
+    } catch (error) {
+      this.logger.warn({ err: error, productId }, 'Review saved; product refresh deferred to cache expiry');
+    }
+  }
   private async tick() {
     try {
       if (apiUnderLoad()) return;

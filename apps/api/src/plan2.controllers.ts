@@ -2262,11 +2262,12 @@ export class StaffCatalogController {
       body
     );
     const result = await this.database.pool.query(
-      `UPDATE product_reviews SET status=$3 WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id,status`,
+      `UPDATE product_reviews SET status=$3 WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id,status,product_id`,
       [ctx.organizationId, parseWithSchema(uuidSchema, id), input.status]
     );
     if (!result.rowCount) throw new TenantAccessDeniedError();
-    return result.rows[0];
+    await this.catalogDelivery.refreshProductReviews(ctx.organizationId, result.rows[0].product_id);
+    return { id: result.rows[0].id, status: result.rows[0].status };
   }
 
   @Delete('admin/reviews/:id')
@@ -2274,10 +2275,11 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.write');
     const result = await this.database.pool.query(
-      `UPDATE product_reviews SET deleted_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL`,
+      `UPDATE product_reviews SET deleted_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING product_id`,
       [ctx.organizationId, parseWithSchema(uuidSchema, id)]
     );
     if (!result.rowCount) throw new TenantAccessDeniedError();
+    await this.catalogDelivery.refreshProductReviews(ctx.organizationId, result.rows[0].product_id);
     return { deleted: true };
   }
 
