@@ -224,7 +224,7 @@ export class CatalogRepository {
                'linkId', pm.id,
                'mediaId', pm.media_asset_id,
                'url', ma.public_url,
-               'thumb', thumb.public_url,
+               'thumb', COALESCE(thumb.public_url, ma.public_url),
                'sources', thumb.sources,
                'role', pm.role,
                'position', pm.position,
@@ -234,7 +234,7 @@ export class CatalogRepository {
              ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
            ) FILTER (WHERE ma.id IS NOT NULL) AS items,
            (array_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS primary_image_url,
-           (array_agg(thumb.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
+           (array_agg(COALESCE(thumb.public_url, ma.public_url) ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          LEFT JOIN LATERAL (
@@ -334,7 +334,7 @@ export class CatalogRepository {
                'linkId', pm.id,
                'mediaId', pm.media_asset_id,
                'url', ma.public_url,
-               'thumb', thumb.public_url,
+               'thumb', COALESCE(thumb.public_url, ma.public_url),
                'sources', thumb.sources,
                'role', pm.role,
                'position', pm.position,
@@ -344,7 +344,7 @@ export class CatalogRepository {
              ORDER BY pm.is_primary DESC, pm.position ASC, pm.id
            ) FILTER (WHERE ma.id IS NOT NULL) AS items,
            (array_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS primary_image_url,
-           (array_agg(thumb.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
+           (array_agg(COALESCE(thumb.public_url, ma.public_url) ORDER BY pm.is_primary DESC, pm.position ASC, pm.id))[1] AS thumbnail_url
          FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
          LEFT JOIN LATERAL (

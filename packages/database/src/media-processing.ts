@@ -31,7 +31,8 @@ export function mediaProcessingSignal(): AbortSignal | undefined {
 /** Queue callbacks, not image buffers. Never call this while holding a DB transaction. */
 export async function runMediaProcessing<T>(
   config: AppConfig,
-  operation: () => Promise<T>
+  operation: () => Promise<T>,
+  options: { background?: boolean; stopAt?: number } = {}
 ): Promise<T> {
   const parent = context.getStore();
   if (parent) {
@@ -40,6 +41,7 @@ export async function runMediaProcessing<T>(
   }
   const deadline = Date.now() + 20_000;
   if (active) {
+    if (options.background) throw busy();
     if (waiting.length >= 4) throw busy();
     await new Promise<void>((resolve, reject) => {
       const resume = () => {
@@ -58,6 +60,7 @@ export async function runMediaProcessing<T>(
   const controller = new AbortController();
   let owned = false;
   let renewal: ReturnType<typeof setInterval> | undefined;
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
   let renewing = false;
   try {
     connection ??= new Redis(config.REDIS_URL, {
@@ -76,9 +79,15 @@ export async function runMediaProcessing<T>(
         owned = true;
         break;
       }
+      if (options.background) throw busy();
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     if (!owned) throw busy();
+    if (options.stopAt !== undefined) {
+      if (options.stopAt <= Date.now()) throw busy();
+      stopTimer = setTimeout(() => controller.abort(busy()), options.stopAt - Date.now());
+      stopTimer.unref();
+    }
     renewal = setInterval(() => {
       if (renewing) return;
       renewing = true;
@@ -99,6 +108,7 @@ export async function runMediaProcessing<T>(
     throw error;
   } finally {
     if (renewal) clearInterval(renewal);
+    if (stopTimer) clearTimeout(stopTimer);
     // SET may have succeeded even if its reply timed out. Compare the token
     // before deleting so this cannot release another process's lease.
     await connection?.eval(releaseScript, 1, LOCK, token).catch(() => undefined);

@@ -19,6 +19,9 @@ export interface RequestContext {
   isOwner?: boolean;
 }
 
+// Background metadata work has no acting user and must not impersonate one.
+export type SystemRequestContext = Omit<RequestContext, 'userId'> & { userId: null };
+
 export function createRequestId(): string {
   return randomUUID();
 }

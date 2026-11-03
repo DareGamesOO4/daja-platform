@@ -13,7 +13,7 @@ import { Readable } from 'node:stream';
 import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
-import { prepareProductImageVariants } from './media-images.js';
+import { prepareAvifMainImage } from './media-images.js';
 
 export interface MediaStorageAdapter {
   createPresignedGet(input: { key: string }): Promise<{ downloadUrl: string; expiresAt: Date }>;
@@ -197,7 +197,8 @@ export class MediaRepository {
   async cleanupAttempt(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter, keys: Iterable<string>) {
     const referenced = await this.client.query<{ storage_key: string }>(
       `SELECT storage_key FROM media_assets WHERE organization_id=$1 AND id=$2
-       UNION ALL SELECT storage_key FROM media_derivatives WHERE organization_id=$1 AND media_asset_id=$2`,
+       UNION ALL SELECT storage_key FROM media_derivatives WHERE organization_id=$1 AND media_asset_id=$2
+       UNION ALL SELECT source_key AS storage_key FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2`,
       [ctx.organizationId, mediaId]);
     const keep = new Set(referenced.rows.map(row => row.storage_key));
     await Promise.allSettled([...keys].filter(key => !keep.has(key)).map(key => storage.deleteObject(key)));
@@ -343,27 +344,17 @@ export class MediaRepository {
       throw new ValidationFailedError('Media asset is not awaiting image processing');
     }
     const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
-    const { webp: processed, avif } = await prepareProductImageVariants(bytes);
-    const mainKey = uploadedImageStorageKey(asset.storage_key).replace(/-avif65-webp75-main\.webp$/, `-${randomUUID().slice(0, 8)}-avif65-webp75-main.webp`);
-    const thumbnailKey = productMediaThumbnailStorageKey({
-      originalKey: mainKey, organizationId: ctx.organizationId, mediaId, width: 512
-    });
+    const original = await prepareAvifMainImage(bytes);
+    const mainKey = uploadedImageStorageKey(asset.storage_key)
+      .replace(/-avif65-webp75-main\.webp$/, `-${randomUUID().slice(0, 8)}-avif65-webp75-main.avif`);
     const publicUrl = requiredPublicUrl(storage, mainKey);
-    const thumbnailUrl = requiredPublicUrl(storage, thumbnailKey);
-    const avifMainKey = mainKey.replace(/\.webp$/, '.avif');
-    const avifThumbnailKey = thumbnailKey.replace(/\.webp$/, '.avif');
-    const objects = [
-      { key: mainKey, image: processed.original, mimeType: processed.mimeType },
-      { key: thumbnailKey, image: processed.thumbnail, mimeType: processed.mimeType },
-      { key: avifMainKey, image: avif.original, mimeType: avif.mimeType },
-      { key: avifThumbnailKey, image: avif.thumbnail, mimeType: avif.mimeType }
-    ];
-    for (const { key, image, mimeType } of objects) {
-      createdKeys.add(key);
-      await storage.putObject({ key, body: image.data, contentType: mimeType,
-        cacheControl: 'public, max-age=31536000, immutable' });
-    }
-    return { asset, processed, avif, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects };
+    const processed = { original, mimeType: 'image/avif' as const };
+    const objects = [{ key: mainKey, image: original, mimeType: 'image/avif' as const }];
+    createdKeys.add(mainKey);
+    await storage.putObject({ key: mainKey, body: original.data, contentType: 'image/avif',
+      cacheControl: 'public, max-age=31536000, immutable' });
+    return { asset, processed, mainKey, publicUrl, thumbnailUrl: publicUrl, objects,
+      sourceChecksum: sha256(bytes) };
   }
 
   /** Caller owns only the short database metadata transaction. */
@@ -378,7 +369,7 @@ export class MediaRepository {
       throw new ValidationFailedError('Media asset changed during processing');
     }
     if (!prepared) throw new ValidationFailedError('Image must be prepared before its database transaction');
-    const { processed, mainKey, thumbnailKey, publicUrl, thumbnailUrl, objects } = prepared;
+    const { processed, mainKey, publicUrl, thumbnailUrl, objects } = prepared;
     const previous = await this.client.query<{ storage_key: string }>(
       'SELECT storage_key FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2',
       [ctx.organizationId, mediaId]);
@@ -395,11 +386,18 @@ export class MediaRepository {
       }))
     });
     if (!ready) throw new ResourceNotFoundError('media asset');
+    // Persist the original and its deferred work atomically with the visible AVIF.
+    await this.client.query(
+      `INSERT INTO media_derivative_jobs
+       (organization_id,media_asset_id,source_key,source_checksum,avif_main_key)
+       VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id,media_asset_id) DO NOTHING`,
+      [ctx.organizationId, mediaId, asset.storage_key, prepared.sourceChecksum, mainKey]
+    );
     return {
       mediaId, status: 'ready', publicUrl, mainImageUrl: publicUrl, thumbnailUrl, storageKey: mainKey,
       width: processed.original.width, height: processed.original.height,
       obsoleteStorageKeys: [...new Set([asset.storage_key, ...previous.rows.map(row => row.storage_key)])]
-        .filter(key => !objects.some(object => object.key === key))
+        .filter(key => key !== asset.storage_key && !objects.some(object => object.key === key))
     };
   }
 
@@ -531,8 +529,13 @@ export class MediaRepository {
        WHERE organization_id = $1 AND media_asset_id = $2`,
       [ctx.organizationId, mediaId]
     );
+    const deferred = await this.client.query<{ source_key: string }>(
+      'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 RETURNING source_key',
+      [ctx.organizationId, mediaId]
+    );
     if (asset.storage_provider === 'r2') {
-      const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key)]);
+      const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key),
+        ...deferred.rows.map(row => row.source_key)]);
       for (const key of keys) await this.client.query(
         `INSERT INTO media_storage_deletions (organization_id, storage_key) VALUES ($1,$2)
          ON CONFLICT (organization_id, storage_key) DO NOTHING`, [ctx.organizationId, key]);

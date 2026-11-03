@@ -980,7 +980,7 @@ export class StorefrontRepository {
       `SELECT p.id AS product_id, p.name, p.slug, b.name AS brand,
               variant.id AS variant_id,
               COALESCE(active_sale.amount_minor, variant.current_price_amount)::double precision / 100 AS price,
-              primary_asset.public_url AS image, thumb.public_url AS thumb
+              primary_asset.public_url AS image, COALESCE(thumb.public_url, primary_asset.public_url) AS thumb
        FROM products p
        LEFT JOIN LATERAL (
          SELECT pv.id, pv.current_price_amount

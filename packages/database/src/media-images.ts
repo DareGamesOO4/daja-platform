@@ -14,7 +14,7 @@ const waiting: Array<() => void> = [];
 
 async function isolatedEncode<T>(
   source: Buffer,
-  product: boolean,
+  product: boolean | 'avif-main' | 'remaining',
   options?: ImageOutputOptions
 ): Promise<T> {
   if (!source.length || source.length > 25 * 1024 * 1024)
@@ -148,4 +148,15 @@ export function prepareImageVariants(
 }
 export function prepareProductImageVariants(source: Buffer): Promise<ProductVariants> {
   return isolatedEncode(source, true);
+}
+
+export function prepareAvifMainImage(
+  source: Buffer
+): Promise<Awaited<ReturnType<typeof import('./image-encoder-core.js').prepareAvifMain>>> {
+  return isolatedEncode(source, 'avif-main');
+}
+export function prepareRemainingImageVariants(
+  source: Buffer
+): Promise<Awaited<ReturnType<typeof import('./image-encoder-core.js').prepareRemainingVariants>>> {
+  return isolatedEncode(source, 'remaining');
 }

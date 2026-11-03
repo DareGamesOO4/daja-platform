@@ -96,6 +96,10 @@ async function importRemoteImageNow(input: {
           imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString() })]
     );
     const asset = inserted.rows[0]!;
+    // Remote sources also need a durable original for the three overnight files.
+    createdKeys.add(sourceKey);
+    await storage.putObject({ key: sourceKey, body: downloaded.buffer,
+      contentType: asset.mime_type, cacheControl: 'private, no-store' });
     const prepared = await repository.stageUploadedImage(
       { organizationId: input.organizationId }, mediaId, storage, createdKeys, { asset, bytes: downloaded.buffer });
     const result = await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(client =>
@@ -107,6 +111,11 @@ async function importRemoteImageNow(input: {
     await input.database.pool.query(`UPDATE media_assets SET status='failed', updated_at=now()
       WHERE organization_id=$1 AND id=$2 AND status='uploaded'`, [input.organizationId, mediaId]).catch(() => undefined);
     await repository.cleanupAttempt({ organizationId: input.organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
+    await input.database.pool.query(
+      `INSERT INTO media_storage_deletions (organization_id,storage_key)
+       SELECT organization_id,storage_key FROM media_assets WHERE organization_id=$1 AND id=$2 AND status='failed'
+       AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2)
+       ON CONFLICT DO NOTHING`, [input.organizationId, mediaId]).catch(() => undefined);
     throw error;
   }
 }
@@ -117,6 +126,12 @@ async function ensurePrimaryMediaThumbnailNow(input: {
   organizationId: string;
   mediaId: string;
 }): Promise<string> {
+  const deferred = await input.database.pool.query<{ public_url: string }>(
+    `SELECT a.public_url FROM media_assets a JOIN media_derivative_jobs j
+     ON j.organization_id=a.organization_id AND j.media_asset_id=a.id
+     WHERE a.organization_id=$1 AND a.id=$2 AND a.status='ready' AND a.deleted_at IS NULL`,
+    [input.organizationId, input.mediaId]);
+  if (deferred.rows[0]) return deferred.rows[0].public_url;
   const existing = await input.database.pool.query<{ public_url: string }>(
     `SELECT public_url FROM media_derivatives
      WHERE organization_id = $1 AND media_asset_id = $2

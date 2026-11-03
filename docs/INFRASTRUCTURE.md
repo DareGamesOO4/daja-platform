@@ -1,5 +1,28 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: velika AVIF odmah, preostala tri fajla nocu, 03.11.2026.
+
+- Ova dopuna zamenjuje prethodnu sinhronu izradu cetiri verzije za nove slike.
+  Upload/link uvoz odmah generise samo veliki AVIF (do 2048 px, quality 65,
+  effort 4). Taj URL se koristi i za preview/thumbnail dok ostatak nije spreman.
+- Migracija 099_media_derivative_jobs dodaje trajan posao po media asset-u.
+  Izvorni fajl ostaje u R2 do zavrsetka reda, bez blob-ova u PostgreSQL-u.
+- API MediaDerivativesService radi svakog dana od 03:00 do 07:00 u vremenskoj
+  zoni Europe/Belgrade (automatski letnje/zimsko vreme). Generise tacno tri
+  preostala fajla: veliki WebP, mali WebP i mali AVIF. Ne kodira ponovo veliki AVIF.
+- Jedan globalni Redis lease deli se sa interaktivnim uploadom; jedan posao
+  odjednom, bez cekanja/konverzije u DB transakciji i bez novog placenog servisa.
+  U 07:00 prekida se aktivno kodiranje; nezavrseni posao nastavlja sledece noci.
+- SQL lease/ponavljanje obnavljaju red posle restarta/greske. Brisanje slike uklanja
+  i njen posao/izvor. Naknadni worker ne vraca obrisane slike u katalog.
+- Tek kada su tri fajla upisana u R2, kratka transakcija objavljuje komplet,
+  osvezava korpu/listu zelja i upisuje trajno osvezavanje kataloga/sync-a.
+  Originalni AVIF URL ostaje validan; privremeni izvor brise postojeci cleanup red.
+- Kompresija ostaje WebP 75 / AVIF 65, effort 4 i WebP smartSubsample=true.
+  Ne koristi se brze kodiranje koje bi povecalo izlazne fajlove. Postojece slike
+  nisu masovno ponovo kodirane. Privremeno se zadrzava vise izvornih fajlova u R2.
+- Provera: API/worker TypeScript i web build; bez testova ili provere deploy-a.
+
 ## Dopuna: serijska obrada slika, 03.11.2026.
 
 - Radnik moze da izabere/prevuce sve slike ili nalepi vise linkova; web salje

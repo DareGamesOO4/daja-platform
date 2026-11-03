@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { OutboxRepository, TransactionManager, type Database } from '@daja/database';
 import type { AppConfig } from '@daja/config';
 import type { Logger } from '@daja/observability';
-import type { RequestContext } from '@daja/shared';
+import type { RequestContext, SystemRequestContext } from '@daja/shared';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
@@ -13,7 +13,7 @@ import { apiUnderLoad } from './runtime/abuse-protection.js';
 
 export async function enqueueCatalogDelivery(
   client: pg.PoolClient,
-  ctx: RequestContext,
+  ctx: RequestContext | SystemRequestContext,
   productId: string,
   slugs: string[],
   cacheKeys: string[] = []
@@ -129,7 +129,7 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
               id: string;
               organization_id: string;
               product_id: string;
-              context: RequestContext;
+              context: RequestContext | SystemRequestContext;
               slugs: string[];
               cache_keys: string[];
               attempts: number;

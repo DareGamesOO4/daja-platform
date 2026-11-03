@@ -8,7 +8,7 @@ import {
   type SyncPushEvent
 } from '@daja/database';
 import { requirePermission, ValidationFailedError } from '@daja/security';
-import type { RequestContext } from '@daja/shared';
+import type { RequestContext, SystemRequestContext } from '@daja/shared';
 import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
@@ -3075,7 +3075,7 @@ export class OperationalSyncProjector {
   }
 
   async publishProductChange(
-    ctx: RequestContext,
+    ctx: RequestContext | SystemRequestContext,
     productId: string,
     variantId: string,
     operation: 'create' | 'update' | 'delete' = 'update'

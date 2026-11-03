@@ -74,8 +74,8 @@ export class SyncRepository {
   async appendServerEvent(
     ctx: Pick<
       RequestContext,
-      'organizationId' | 'requestId' | 'correlationId' | 'userId' | 'deviceId' | 'locationId'
-    >,
+      'organizationId' | 'requestId' | 'correlationId' | 'deviceId' | 'locationId'
+    > & { userId: string | null },
     input: {
       aggregateType: string;
       aggregateId: string;

@@ -40,6 +40,30 @@ async function decodeImage(source: Buffer): Promise<Raster> {
   return { data, width: info.width, height: info.height, channels: info.channels };
 }
 
+async function encodeRaster(raster: Raster, width: number, options: ImageOutputOptions) {
+  const format = options.format ?? 'webp';
+  const quality = options.quality ?? (format === 'avif' ? 65 : 84);
+  if (
+    !['webp', 'avif'].includes(format) ||
+    !Number.isInteger(quality) ||
+    quality < 1 ||
+    quality > 100
+  ) {
+    throw new ValidationFailedError(
+      'Image output must be WebP or AVIF with quality between 1 and 100'
+    );
+  }
+  const pipeline = sharp(raster.data, {
+    raw: { width: raster.width, height: raster.height, channels: raster.channels }
+  }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
+  const { data, info } = await (
+    format === 'avif'
+      ? pipeline.avif({ quality, effort: 4 })
+      : pipeline.webp({ quality, effort: 4, smartSubsample: true })
+  ).toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height };
+}
+
 async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) {
   const format = options.format ?? 'webp';
   const quality = options.quality ?? (format === 'avif' ? 65 : 84);
@@ -53,24 +77,15 @@ async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) 
       'Image output must be WebP or AVIF with quality between 1 and 100'
     );
   }
-  const encode = (width: number) => {
-    const pipeline = sharp(raster.data, {
-      raw: { width: raster.width, height: raster.height, channels: raster.channels }
-    }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
-    return (
-      format === 'avif'
-        ? pipeline.avif({ quality, effort: 4 })
-        : pipeline.webp({ quality, effort: 4, smartSubsample: true })
-    ).toBuffer({ resolveWithObject: true });
-  };
+  const encode = (width: number) => encodeRaster(raster, width, options);
   const original = await encode(MAX_MAIN_WIDTH);
   const thumbnail = await encode(THUMBNAIL_WIDTH);
   return {
     format,
     mimeType: format === 'avif' ? ('image/avif' as const) : ('image/webp' as const),
     extension: format === 'avif' ? ('.avif' as const) : ('.webp' as const),
-    original: { data: original.data, width: original.info.width, height: original.info.height },
-    thumbnail: { data: thumbnail.data, width: thumbnail.info.width, height: thumbnail.info.height }
+    original,
+    thumbnail
   };
 }
 
@@ -84,4 +99,20 @@ export async function prepareProductVariants(source: Buffer) {
     webp: await encodeVariants(raster, { format: 'webp', quality: 75 }),
     avif: await encodeVariants(raster, { format: 'avif', quality: 65 })
   };
+}
+
+/** The only output generated during an interactive image upload. */
+export async function prepareAvifMain(source: Buffer) {
+  return encodeRaster(await decodeImage(source), MAX_MAIN_WIDTH, { format: 'avif', quality: 65 });
+}
+
+/** Exactly three remaining files; never re-encode the already published AVIF. */
+export async function prepareRemainingVariants(source: Buffer) {
+  const raster = await decodeImage(source);
+  const webp = await encodeVariants(raster, { format: 'webp', quality: 75 });
+  const avifThumbnail = await encodeRaster(raster, THUMBNAIL_WIDTH, {
+    format: 'avif',
+    quality: 65
+  });
+  return { webp, avifThumbnail };
 }
