@@ -333,7 +333,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v8:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v9:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -410,6 +410,7 @@ export class PublicCatalogController {
         const productPath = `/product/${encodeURIComponent(row.slug)}`;
         const images = (Array.isArray(row.images) ? row.images : [])
           .filter(Boolean)
+          .slice(0, 1)
           .map((image) => `<image:image><image:loc>${escapeXml(image)}</image:loc></image:image>`)
           .join('');
         return localizedEntries(productPath, `<lastmod>${sitemapLastmod(row.updated_at)}</lastmod>${images}`);
@@ -2874,6 +2875,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v6:${organizationId}`,
       `catalog:sitemap:v7:${organizationId}`,
       `catalog:sitemap:v8:${organizationId}`,
+      `catalog:sitemap:v9:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,

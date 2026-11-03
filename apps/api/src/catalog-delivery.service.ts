@@ -94,6 +94,7 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
         await this.invalidateKeys([
           ...['slug', 'slug:public-v2', 'slug:public-v3'].map(key => `catalog:${key}:${organizationId}:${slug}`),
           `catalog:sitemap:v8:${organizationId}`,
+          `catalog:sitemap:v9:${organizationId}`,
         ]);
       } catch (error) {
         this.logger.warn({ err: error, productId }, 'Review cache refresh deferred to cache expiry');
@@ -154,6 +155,7 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
               'sitemap:v6',
               'sitemap:v7',
               'sitemap:v8',
+              'sitemap:v9',
               'merchant-feed',
               'merchant-feed:v2',
               'merchant-feed:v3'
