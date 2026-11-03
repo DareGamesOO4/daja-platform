@@ -20,7 +20,7 @@ import { StorefrontRepository, TransactionManager, type Database } from '@daja/d
 import type { Logger } from '@daja/observability';
 import { requirePermission, ValidationFailedError, verifyJwt } from '@daja/security';
 import { browserRequest } from './runtime/edge-ingress.js';
-import { beginBrowserOAuth, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
+import { beginBrowserOAuth, beginBrowserPhone, consumeBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { CustomerPasskeysService } from './customer-passkeys.service.js';
@@ -56,7 +56,8 @@ const phoneOtpStartSchema = z.object({
   purpose: z.enum(['login', 'link']).optional()
 });
 const phoneOtpVerifySchema = phoneOtpStartSchema.extend({
-  code: z.string().trim().regex(/^\d{6}$/, 'Kod mora imati šest cifara.')
+  firebaseIdToken: z.string().min(100).max(16384),
+  challengeToken: z.string().regex(/^[a-f0-9]{64}$/)
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
@@ -179,7 +180,7 @@ export class CustomerAuthController {
 
   @Get('security-capabilities')
   securityCapabilities() {
-    return { googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true, passkeys: true };
+    return { firebasePhone: this.phoneOtp.publicConfig(), googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true, passkeys: true };
   }
 
   @Get('browser-session')
@@ -295,12 +296,14 @@ export class CustomerAuthController {
 
   @Post('phone/start')
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
-  async phoneStart(@Req() request: Request, @Body() body: unknown) {
+  async phoneStart(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const input = parseWithSchema(phoneOtpStartSchema, body);
     const purpose = input.purpose ?? 'login';
     const customer =
       purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+    const browserNonce = beginBrowserPhone(request, response);
     return this.phoneOtp.start({
+      ...(browserNonce ? { browserNonce } : {}),
       organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
       phone: input.phone,
       purpose,
@@ -310,17 +313,20 @@ export class CustomerAuthController {
 
   @Post('phone/verify')
   @Throttle({ default: { limit: 8, ttl: 60_000 } })
-  async phoneVerify(@Req() request: Request, @Body() body: unknown) {
+  async phoneVerify(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const input = parseWithSchema(phoneOtpVerifySchema, body);
     const purpose = input.purpose ?? 'login';
     const customer =
       purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
     const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
+    const browserNonce = consumeBrowserPhone(request, response);
     await this.phoneOtp.verify({
+      ...(browserNonce ? { browserNonce } : {}),
       organizationId,
       phone: input.phone,
       purpose,
-      code: input.code,
+      firebaseIdToken: input.firebaseIdToken,
+      challengeToken: input.challengeToken,
       ...(customer ? { customerId: customer.customerId } : {})
     });
 

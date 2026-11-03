@@ -9,7 +9,7 @@ import { browserRequest, equalSecret } from './edge-ingress.js';
 
 export const BROWSER_COOKIES = {
   customer: '__Host-daja_customer', refresh: '__Host-daja_refresh',
-  staff: '__Host-daja_staff', csrf: '__Host-daja_csrf', oauth: '__Host-daja_oauth', passkey: '__Host-daja_passkey'
+  staff: '__Host-daja_staff', csrf: '__Host-daja_csrf', oauth: '__Host-daja_oauth', passkey: '__Host-daja_passkey', phone: '__Host-daja_phone'
 } as const;
 
 export function cookieValue(header: string | undefined, name: string): string | undefined {
@@ -123,6 +123,7 @@ export function storeBrowserTokens(response: Response, config: AppConfig, data: 
         setCookie(response, BROWSER_COOKIES.staff, '', 0);
         setCookie(response, BROWSER_COOKIES.oauth, '', 0);
         setCookie(response, BROWSER_COOKIES.passkey, '', 0);
+        setCookie(response, BROWSER_COOKIES.phone, '', 0);
       }
     }
   }
@@ -148,6 +149,22 @@ export function consumeBrowserPasskey(request: Request, response: Response): str
   if (!browserRequest(request)) throw new InvalidTokenError();
   const nonce = cookieValue(request.headers.cookie, BROWSER_COOKIES.passkey);
   setCookie(response, BROWSER_COOKIES.passkey, '', 0);
+  if (!nonce || !/^[a-f0-9]{64}$/.test(nonce)) throw new InvalidTokenError();
+  return nonce;
+}
+
+export function beginBrowserPhone(request: Request, response: Response): string | undefined {
+  if (!browserRequest(request)) return undefined;
+  const previous = cookieValue(request.headers.cookie, BROWSER_COOKIES.phone);
+  const nonce = previous && /^[a-f0-9]{64}$/.test(previous) ? previous : randomBytes(32).toString('hex');
+  setCookie(response, BROWSER_COOKIES.phone, nonce, 600);
+  return nonce;
+}
+
+export function consumeBrowserPhone(request: Request, response: Response): string | undefined {
+  if (!browserRequest(request)) return undefined;
+  const nonce = cookieValue(request.headers.cookie, BROWSER_COOKIES.phone);
+  setCookie(response, BROWSER_COOKIES.phone, '', 0);
   if (!nonce || !/^[a-f0-9]{64}$/.test(nonce)) throw new InvalidTokenError();
   return nonce;
 }

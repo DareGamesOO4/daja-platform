@@ -28,6 +28,14 @@ services:
         sync: false
       - key: PRIVACY_TOKEN_SECRET
         sync: false
+      - key: FIREBASE_PHONE_ENABLED
+        sync: false
+      - key: FIREBASE_PHONE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PHONE_API_KEY
+        sync: false
+      - key: FIREBASE_PHONE_APP_ID
+        sync: false
       - key: CONTACT_NOTIFICATION_EMAIL
         value: cvelenis42@yahoo.com
       - key: STOREFRONT_PUBLIC_BASE_URL

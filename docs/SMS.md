@@ -1,4 +1,10 @@
-# SMS iskljucen — 03.11.2026.
+# SMS status — 03.11.2026.
+
+Google/Firebase phone authentication is now prepared in the new `dajashop-sms`
+project. Cloud provider setup exists, but DAJA activation is off pending billing
+approval. See [FIREBASE_PHONE.md](FIREBASE_PHONE.md). No real delivery is confirmed.
+
+## Previous step: AWS SMS retired
 
 Korisnik je povukao AWS SMS integraciju i nije odobrio zamenskog provajdera.
 
