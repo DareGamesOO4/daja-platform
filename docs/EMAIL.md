@@ -26,7 +26,7 @@ Configure SES credentials and delivery settings **on the worker service**, not o
 - `API_PUBLIC_BASE_URL=https://daja-platform-api.onrender.com`
 - `PRIVACY_TOKEN_SECRET` (or the `JWT_ACCESS_SECRET` fallback), identical on API and worker
 
-Scheduled regular-price and sale-start events are dispatched by the worker every minute, including when the API is stopped. For SMS price alerts the worker also needs `SNS_SMS_REGION`, `SNS_SMS_ACCESS_KEY_ID`, `SNS_SMS_SECRET_ACCESS_KEY` and `SNS_SMS_SENDER_ID`; these are separate from SES settings. Render production configuration is deferred and has not been changed or verified by this source update.
+Scheduled regular-price and sale-start events are dispatched by the worker every minute, including when the API is stopped. SMS sending was removed on 2026-11-03; no replacement provider is configured. Existing SMS subscriptions are preserved and skipped. See `docs/SMS.md`.
 
 The worker also catches up active email back-in-stock subscriptions for variants with stock, independently of the API inventory request. Only email subscriptions are consumed by this catch-up; existing SMS handling remains separate. Claim and email enqueue commit together, including when API and worker race for the same subscription.
 

@@ -1463,6 +1463,7 @@ export class StorefrontRepository {
        WHERE alert.organization_id = $1
          AND alert.variant_id = $2
          AND alert.alert_type = 'back_in_stock'
+         AND alert.delivery_channel = 'email'
          AND ($3::text IS NULL OR alert.delivery_channel = $3)
          AND alert.active
          AND variant.id = alert.variant_id
@@ -1514,6 +1515,7 @@ export class StorefrontRepository {
        WHERE alert.organization_id = $1
          AND alert.variant_id = $2
          AND alert.alert_type = 'price_change'
+         AND alert.delivery_channel = 'email'
          AND alert.active
          AND variant.id = alert.variant_id
          AND variant.organization_id = alert.organization_id

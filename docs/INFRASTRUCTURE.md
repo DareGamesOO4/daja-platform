@@ -1,5 +1,18 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: AWS SMS uklonjen, 03.11.2026.
+
+- Po zahtevu korisnika SNS SMS slanje uklonjeno je iz API-ja i workera; novi
+  SMS provajder nije uveden. Web ne nudi SMS autentifikaciju ili SMS obavestenja.
+- Render API SMS credentials su ispraznjeni. IAM korisnik aplikacije ima eksplicitnu
+  zabranu sns:Publish i sms-voice:SendTextMessage; SES/SQS email dozvole ostaju.
+- AWS SMS ostaje u sandboxu; sender ID, verifikovani broj i logovi nisu obrisani.
+  Postojece SMS pretplate u bazi su sacuvane, bez lazne oznake isporuke.
+- SES email je odvojen: zahtev za produkciju poslat je 03.11.2026. kao Marketing;
+  zadnje vidjeno stanje Under review. Stara sandbox uputstva ispod su istorijska.
+- Testovi, nove SMS poruke i provera zavrsetka deploy-a nisu radjeni.
+  Detalji implementacije: daja-platform/docs/SMS.md.
+
 ## Aktuelna dopuna: zaštićen API i web sesije, 31.10.2026.
 
 Ova dopuna ima prednost nad istorijskim snimkom ispod. Detalji, prethodne revizije,

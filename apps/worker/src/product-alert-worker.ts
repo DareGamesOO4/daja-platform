@@ -1,5 +1,4 @@
 import { createHmac } from 'node:crypto';
-import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import type { AppConfig } from '@daja/config';
 import type { Logger } from '@daja/observability';
 import { enqueueEmail, ProductAlertDispatcher, type Database } from '@daja/database';
@@ -7,7 +6,6 @@ import { enqueueEmail, ProductAlertDispatcher, type Database } from '@daja/datab
 export class ProductAlertWorker {
   private timer: NodeJS.Timeout | undefined;
   private task: Promise<void> | undefined;
-  private sns: SNSClient | undefined;
   private stopping = false;
 
   constructor(private readonly config: AppConfig, private readonly logger: Logger, private readonly database: Database) {}
@@ -23,24 +21,7 @@ export class ProductAlertWorker {
         ...input, replyTo: this.config.SES_REPLY_TO_EMAIL ? [this.config.SES_REPLY_TO_EMAIL] : []
       })
     }, {
-      send: async input => {
-        if (!this.config.SNS_SMS_ACCESS_KEY_ID || !this.config.SNS_SMS_SECRET_ACCESS_KEY) {
-          this.logger.warn({ tag: input.tag }, 'Product alert SMS sender is not configured');
-          return;
-        }
-        try {
-          this.sns ??= new SNSClient({ region: this.config.SNS_SMS_REGION, credentials: {
-            accessKeyId: this.config.SNS_SMS_ACCESS_KEY_ID, secretAccessKey: this.config.SNS_SMS_SECRET_ACCESS_KEY
-          } });
-          await this.sns.send(new PublishCommand({ PhoneNumber: input.phone, Message: input.message,
-            MessageAttributes: {
-              'AWS.SNS.SMS.SMSType': { DataType: 'String', StringValue: 'Transactional' },
-              'AWS.SNS.SMS.SenderID': { DataType: 'String', StringValue: this.config.SNS_SMS_SENDER_ID }
-            } }), { abortSignal: AbortSignal.timeout(20_000) });
-        } catch (error) {
-          this.logger.error({ errorName: error instanceof Error ? error.name : 'UnknownError' }, 'Product alert SMS failed');
-        }
-      }
+      send: async () => { throw new Error('SMS delivery is disabled; no provider configured'); }
     }, {
       productAlertUnsubscribeUrl: id => {
         const signature = createHmac('sha256', secret).update('product_alert:' + id).digest('base64url');
@@ -66,6 +47,5 @@ export class ProductAlertWorker {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     await this.task;
-    this.sns?.destroy();
   }
 }

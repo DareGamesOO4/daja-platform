@@ -45,6 +45,9 @@ export class ProductAlertService {
   ) {}
 
   async subscribe(input: AlertInput) {
+    if (input.deliveryChannel === 'sms') {
+      throw new ValidationFailedError('SMS obaveštenja trenutno nisu dostupna. Izaberite email.');
+    }
     if (input.deliveryChannel === 'email' && input.customerId && !await this.verifiedCustomer(input.organizationId, input.customerId)) {
       throw new ValidationFailedError('Potvrdite email adresu naloga pre uključivanja email obaveštenja.');
     }
