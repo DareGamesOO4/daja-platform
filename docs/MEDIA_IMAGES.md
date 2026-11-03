@@ -1,5 +1,29 @@
 # Slike proizvoda — AVIF i WebP
 
+## Dopuna: admin obavestenja o slikama, 03.11.2026.
+
+- Admin dashboard ima sklopivi panel Slike i obavestenja na svim svojim karticama.
+  Nova poruka otvara i plutajuce obavestenje sa dugmetom Pogledaj poruke.
+  Brojac novih poruka, problemi, nocni red i istorija prikazuju proizvod/sliku,
+  bezbedan opis greske, vreme, pokusaje i stanje. Velika AVIF ostaje preview dok
+  nocni posao ceka. Panel osvezava podatke na 30 s samo dok je stranica vidljiva.
+- Migracija 100_media_processing_alerts cuva greske i oznake procitanog po korisniku.
+  Nova greska iste slike ponovo postaje neprocitana. I automatski resene greske
+  ostaju u istoriji i broje se kao nove dok ih korisnik ne procita. Istekao lease
+  posle restarta se prijavljuje pri sledecem otvaranju/osvezavanju admina.
+- API /admin/media-processing: summary/list/read, zakazivanje ponovnog pokusaja,
+  prijava neuspelog prenosa i zatvaranje poruke za neuspesan pocetni upload.
+  Citanje zahteva catalog.read; retry/close/report zahtevaju media.upload.
+  Sve je ograniceno na organizaciju; retry i zatvaranje beleze se u auditu.
+- Retry samo vraca sacuvani nocni posao u red za 03:00-07:00 Europe/Belgrade;
+  ne uvodi paralelne enkodere niti obradu dodatnih verzija usred dana.
+  Ako pocetni prenos nema sacuvan izvor, poruka vodi na proizvod za novo dodavanje.
+- Pune exception poruke, potpisani R2 URL-ovi, izvorni URL i tajne ne izlaze u inbox.
+  Uspeh/uklanjanje zatvara nocnu gresku; neuspesan privremeni upload ostavlja
+  obavestenje i posle cleanup-a dok ga korisnik ne zatvori. Zatvaranje poruke
+  ne oznacava sliku kao uspesno obradjenu. Slanje email/SMS/WhatsApp poruka nije dodato.
+- Provera: TypeScript API/worker i web build; bez testova i provere deploy-a.
+
 ## Dopuna: velika AVIF odmah, preostala tri fajla nocu, 03.11.2026.
 
 - Ova dopuna zamenjuje prethodnu sinhronu izradu cetiri verzije za nove slike.

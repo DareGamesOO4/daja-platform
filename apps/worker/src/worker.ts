@@ -5,6 +5,7 @@ import { brandedEmail, emailEscape } from '@daja/shared';
 import {
   MediaRepository,
   runMediaProcessing,
+  recordMediaFailure,
   enqueueEmail,
   OutboxRepository,
   R2MediaStorageAdapter,
@@ -248,6 +249,7 @@ async function processMediaJob(
           logger.warn({ error, mediaId, key }, 'Could not remove source upload after image optimization'));
       }
     } catch (error) {
+      await recordMediaFailure(database.pool,organizationId,mediaId,'upload',error).catch(() => undefined);
       await new MediaRepository(database.pool).cleanupAttempt({ organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
       await tx.run((pgClient) =>
         new MediaRepository(pgClient).markFailed(

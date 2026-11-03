@@ -33,6 +33,7 @@ import {
   InventoryRepository,
   MediaRepository,
   runMediaProcessing,
+  recordMediaFailure,
   OutboxRepository,
   R2MediaStorageAdapter,
   type RedisConnection,
@@ -3081,6 +3082,10 @@ export class MediaController {
       }
       const { obsoleteStorageKeys: _obsoleteStorageKeys, ...response } = result;
       return response;
+    }).catch(async error => {
+      await recordMediaFailure(this.database.pool,ctx.organizationId,id,'upload',error)
+        .catch(alertError => this.logger.warn({err:alertError},'Could not persist image notification'));
+      throw error;
     });
   }
 

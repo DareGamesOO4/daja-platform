@@ -13,6 +13,7 @@ import {
   sha256,
   prepareImageVariants,
   runMediaProcessing,
+  recordMediaFailure,
   type ImageOutputOptions,
   type Database,
   TransactionManager
@@ -110,6 +111,7 @@ async function importRemoteImageNow(input: {
   } catch (error) {
     await input.database.pool.query(`UPDATE media_assets SET status='failed', updated_at=now()
       WHERE organization_id=$1 AND id=$2 AND status='uploaded'`, [input.organizationId, mediaId]).catch(() => undefined);
+    await recordMediaFailure(input.database.pool,input.organizationId,mediaId,'upload',error).catch(() => undefined);
     await repository.cleanupAttempt({ organizationId: input.organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
     await input.database.pool.query(
       `INSERT INTO media_storage_deletions (organization_id,storage_key)

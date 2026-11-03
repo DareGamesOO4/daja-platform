@@ -5,6 +5,9 @@ import type { Logger } from '@daja/observability';
 import type { SystemRequestContext } from '@daja/shared';
 import {
   MediaRepository,
+  mediaFailure,
+  recordMediaFailure,
+  resolveMediaFailures,
   R2MediaStorageAdapter,
   StorefrontRepository,
   TransactionManager,
@@ -132,7 +135,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       }
       const source = await storage.getObject(job.source_key);
       if (sha256(source) !== job.source_checksum)
-        throw new Error('Deferred image source checksum mismatch');
+        throw new AppError('IMAGE_SOURCE_CHANGED', 'Deferred image source checksum mismatch', 409);
       const { webp, avifThumbnail } = await prepareRemainingImageVariants(source);
       const mainKey = job.avif_main_key.replace(/\.avif$/, '.webp');
       const thumbKey = mainKey.replace(/-main\.webp$/, '-thumb.webp');
@@ -220,6 +223,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
           ]
         });
         if (!updated) throw new Error('Deferred image was removed');
+        await resolveMediaFailures(client, job.organization_id, job.media_asset_id, 'overnight');
         await client.query(
           `INSERT INTO media_storage_deletions(organization_id,storage_key) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
           [job.organization_id, job.source_key]
@@ -245,16 +249,34 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       await new MediaRepository(this.db.pool)
         .cleanupAttempt(ctx, job.media_asset_id, storage, created)
         .catch(() => undefined);
-      await this.db.pool.query(
-        `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,last_error_code='DERIVATIVES_RETRY',
+      await new TransactionManager(this.db.pool, this.logger).run(async (client) => {
+        await client.query(
+          'SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2 FOR UPDATE',
+          [job.organization_id, job.media_asset_id]
+        );
+        const deferred = await client.query(
+          `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,
+         last_error_code=CASE WHEN $5::text IS NOT NULL THEN $5 ELSE last_error_code END,
+         last_error_at=CASE WHEN $5::text IS NOT NULL THEN now() ELSE last_error_at END,
          available_at=now()+($4*interval '1 second') WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3`,
-        [
-          job.organization_id,
-          job.media_asset_id,
-          token,
-          Math.min(3600, 30 * 2 ** Math.min(job.attempts, 7))
-        ]
-      );
+          [
+            job.organization_id,
+            job.media_asset_id,
+            token,
+            Math.min(3600, 30 * 2 ** Math.min(job.attempts, 7)),
+            mediaFailure(error)?.code ?? null
+          ]
+        );
+        if (deferred.rowCount)
+          await recordMediaFailure(
+            client,
+            job.organization_id,
+            job.media_asset_id,
+            'overnight',
+            error,
+            token
+          );
+      });
       throw error;
     }
   }
@@ -265,13 +287,21 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3 RETURNING source_key',
         [job.organization_id, job.media_asset_id, job.lease_token]
       );
-      if (removed.rowCount)
+      if (removed.rowCount) {
+        await resolveMediaFailures(
+          client,
+          job.organization_id,
+          job.media_asset_id,
+          undefined,
+          'removed'
+        );
         await client.query(
           `INSERT INTO media_storage_deletions(organization_id,storage_key)
          SELECT $1,$2 WHERE NOT EXISTS (SELECT 1 FROM media_assets WHERE organization_id=$1 AND storage_key=$2 AND deleted_at IS NULL)
          ON CONFLICT DO NOTHING`,
           [job.organization_id, job.source_key]
         );
+      }
     });
   }
 }

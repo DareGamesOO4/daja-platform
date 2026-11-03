@@ -14,6 +14,7 @@ import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
 import { prepareAvifMainImage } from './media-images.js';
+import { resolveMediaFailures } from './media-alerts.js';
 
 export interface MediaStorageAdapter {
   createPresignedGet(input: { key: string }): Promise<{ downloadUrl: string; expiresAt: Date }>;
@@ -386,6 +387,7 @@ export class MediaRepository {
       }))
     });
     if (!ready) throw new ResourceNotFoundError('media asset');
+    await resolveMediaFailures(this.client,ctx.organizationId,mediaId,'upload');
     // Persist the original and its deferred work atomically with the visible AVIF.
     await this.client.query(
       `INSERT INTO media_derivative_jobs
@@ -533,6 +535,9 @@ export class MediaRepository {
       'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 RETURNING source_key',
       [ctx.organizationId, mediaId]
     );
+    // A failed temporary upload being discarded is still an issue for the
+    // administrator; keep its notification until it is explicitly closed.
+    await resolveMediaFailures(this.client,ctx.organizationId,mediaId,asset.status === 'ready' ? undefined : 'overnight','removed');
     if (asset.storage_provider === 'r2') {
       const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key),
         ...deferred.rows.map(row => row.source_key)]);

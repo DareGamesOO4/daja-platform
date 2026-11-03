@@ -10,6 +10,7 @@ export * from './catalog.js';
 export * from './media.js';
 export * from './media-images.js';
 export * from './media-processing.js';
+export * from './media-alerts.js';
 export * from './rfid.js';
 export * from './inventory.js';
 export * from './imports.js';
