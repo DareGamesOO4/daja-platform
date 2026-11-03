@@ -1,5 +1,26 @@
 # Dodavanje slika: uzrok incidenta i ograničavanje posledica
 
+## Oporavak prekinutih upload-a i konačan retry, 03.11.2026.
+
+- Odabir više fajlova i red čekanja postoje samo u memoriji aktivnog taba. Pad
+  taba/računara pre `complete` ne može nastaviti prenos automatski; korisnik mora
+  ponovo izabrati nezavršene fajlove. Server-side upload koji ostane `pending_upload`
+  uklanja reaper nakon 24 h, kada je 15-minutni potpisani PUT URL odavno istekao.
+- Ako je API već završio upload, a tab se sruši, asset ostaje spreman i njegov noćni
+  posao ostaje trajan. Lease ističe posle prekida API procesa; sledeći tick ga ponovo
+  preuzima. Draft artikla čuva završene media ID-jeve u browser storage-u.
+- Brisanje artikla uklanja product-media reference i poziva `discardUnreferenced`
+  u istoj SQL transakciji. Ako noćni enkoder već radi, završna transakcija zahteva
+  važeći lease, postojeći ready asset i isti AVIF ključ, pa ne može oživeti obrisanu
+  sliku.
+- Derivative queue ima najviše 8 pokušaja. Posle osmog neuspeha posao je pauziran,
+  ostaje vidljiv kao problem u admin kartici i čeka ručni retry. Taj retry resetuje
+  brojač. Neuspeh zbog privremenog zauzeća/cutoff-a se i dalje odlaže bez lažne
+  poruke; procesni crash se otkriva kroz istek lease-a.
+- Svaki noćni pokušaj piše WebP fajlove pod jedinstvenim ključevima. Cleanup
+  ponovo proverava DB reference i neuspeh R2 brisanja stavlja u trajni red.
+  Provera je iz izvornog koda; testovi i deploy nisu pokretani.
+
 ## Dopuna: velika AVIF odmah, preostala tri fajla nocu, 03.11.2026.
 
 - Ova dopuna zamenjuje prethodnu sinhronu izradu cetiri verzije za nove slike.

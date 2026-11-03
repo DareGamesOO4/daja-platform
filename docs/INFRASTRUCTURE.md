@@ -1,5 +1,22 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: oporavak prekinutih upload-a i ograničeni noćni retry, 03.11.2026.
+
+- Brisanje artikla briše njegove `product_media` veze i u istoj transakciji
+  tombstonuje slike koje više nisu korišćene, uklanja njihov noćni posao i trajno
+  zakazuje R2 brisanje. Aktivna noćna obrada proverava lease i stanje asset-a pre
+  objave; obrisana slika se ne vraća u katalog.
+- Ako tab/računar nestane pre završetka upload-a, fajl koji je ostao u
+  `pending_upload` nema automatski nastavak jer izabrani fajl i lokalni red nisu
+  sačuvani serveru. API ga čisti posle 24 h, nakon isteka 15-minutnog PUT URL-a.
+  Uspešno završene slike i noćni poslovi su server-side; lease se oporavlja posle
+  restarta. Sačuvani novi artikal vraća media ID-jeve iz svog lokalnog nacrta.
+- Noćna obrada se zaustavlja posle 8 neuspešnih pokušaja, čuva grešku u admin
+  kartici i čeka ručni retry koji resetuje brojač. Svaki pokušaj koristi jedinstvene
+  WebP ključeve; neuspešno neposredno brisanje ide u trajni R2 cleanup red.
+- Ne pokretati testove ili proveru deploy-a bez zasebnog zahteva; ovo opisuje tok
+  u kodu i migraciji 101, a ne potvrđuje runtime rezultat.
+
 ## Dopuna: zasebna admin kartica za slike, 03.11.2026.
 
 - Slike i obavestenja je zasebna kartica u admin navigaciji, sa brojem novih

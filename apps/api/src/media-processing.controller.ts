@@ -64,6 +64,7 @@ const imageFields = `a.id AS "mediaId",a.metadata->>'originalFilename' AS filena
   a.metadata->>'imageIndex' AS "imageIndex",p.id AS "productId",
   coalesce(p.name,a.metadata->>'productSlug') AS "productName",p.slug AS "productSlug"`;
 const jobState = `CASE WHEN j.lease_until>now() THEN 'processing'
+  WHEN j.paused_at IS NOT NULL OR j.attempts>=8 THEN 'failed'
   WHEN j.lease_until IS NOT NULL THEN 'interrupted'
   WHEN j.last_error_code IS NOT NULL THEN 'failed' ELSE 'queued' END`;
 
@@ -101,7 +102,7 @@ export class MediaProcessingController {
         (SELECT count(*)::int FROM media_processing_alerts al LEFT JOIN media_processing_alert_reads r
           ON r.alert_id=al.id AND r.user_id=$2 WHERE al.organization_id=$1
           AND (r.seen_event_key IS DISTINCT FROM al.event_key)) AS unread,
-        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1) AS pending,
+        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.paused_at IS NULL AND j.attempts<8) AS pending,
         (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.lease_until>now()) AS processing`,
       [ctx.organizationId, ctx.userId]
     );
@@ -225,7 +226,8 @@ export class MediaProcessingController {
     const mediaId = parseWithSchema(uuidSchema, id);
     return new TransactionManager(this.db.pool, this.logger).run(async (client) => {
       const updated = await client.query(
-        `UPDATE media_derivative_jobs j SET available_at=now(),lease_until=NULL,lease_token=NULL,last_error_code=NULL
+        `UPDATE media_derivative_jobs j SET available_at=now(),lease_until=NULL,lease_token=NULL,
+         paused_at=NULL,attempts=0,last_error_code=NULL,last_error_at=NULL
          WHERE j.organization_id=$1 AND j.media_asset_id=$2 AND NOT coalesce(j.lease_until>now(),false)
          AND EXISTS (SELECT 1 FROM media_assets a WHERE a.organization_id=$1 AND a.id=$2 AND a.status='ready' AND a.deleted_at IS NULL)
          RETURNING media_asset_id`,

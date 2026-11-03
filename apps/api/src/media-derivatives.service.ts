@@ -102,7 +102,8 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         `UPDATE media_derivative_jobs j SET lease_until=now()+interval '5 minutes',
          lease_token=$1, attempts=j.attempts+1
        FROM (SELECT organization_id,media_asset_id FROM media_derivative_jobs
-         WHERE available_at<=now() AND (lease_until IS NULL OR lease_until<now())
+         WHERE available_at<=now() AND paused_at IS NULL AND attempts<8
+         AND (lease_until IS NULL OR lease_until<now())
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time >= time '03:00'
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time < time '07:00'
          ORDER BY available_at,created_at,media_asset_id LIMIT 1 FOR UPDATE SKIP LOCKED) candidate
@@ -137,7 +138,10 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       if (sha256(source) !== job.source_checksum)
         throw new AppError('IMAGE_SOURCE_CHANGED', 'Deferred image source checksum mismatch', 409);
       const { webp, avifThumbnail } = await prepareRemainingImageVariants(source);
-      const mainKey = job.avif_main_key.replace(/\.avif$/, '.webp');
+      const mainKey = job.avif_main_key.replace(
+        /-avif65-webp75-main\.avif$/,
+        `-${token}-avif65-webp75-main.webp`
+      );
       const thumbKey = mainKey.replace(/-main\.webp$/, '-thumb.webp');
       const objects = [
         { key: mainKey, image: webp.original, mimeType: 'image/webp' },
@@ -256,6 +260,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         );
         const deferred = await client.query(
           `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,
+         paused_at=CASE WHEN attempts>=8 THEN now() ELSE paused_at END,
          last_error_code=CASE WHEN $5::text IS NOT NULL THEN $5 ELSE last_error_code END,
          last_error_at=CASE WHEN $5::text IS NOT NULL THEN now() ELSE last_error_at END,
          available_at=now()+($4*interval '1 second') WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3`,

@@ -202,7 +202,20 @@ export class MediaRepository {
        UNION ALL SELECT source_key AS storage_key FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2`,
       [ctx.organizationId, mediaId]);
     const keep = new Set(referenced.rows.map(row => row.storage_key));
-    await Promise.allSettled([...keys].filter(key => !keep.has(key)).map(key => storage.deleteObject(key)));
+    await Promise.all([...new Set(keys)].filter(key => !keep.has(key)).map(async key => {
+      try {
+        await storage.deleteObject(key);
+      } catch {
+        // Each processing attempt writes unique immutable keys. A failed
+        // immediate cleanup can therefore be retried durably without racing a
+        // later attempt that might reuse the same object name.
+        await this.client.query(
+          `INSERT INTO media_storage_deletions(organization_id,storage_key) VALUES ($1,$2)
+           ON CONFLICT (organization_id,storage_key) DO NOTHING`,
+          [ctx.organizationId, key]
+        ).catch(() => undefined);
+      }
+    }));
   }
 
   async readyUpload(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string) {
