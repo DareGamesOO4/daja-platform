@@ -215,7 +215,9 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
   const row = result.rows[0];
   if (!row) return null;
   return { sourceId: row.sourceId, ids: row.ids,
-    groupId: createHash('sha256').update(`${organizationId}:${row.groupKey}`).digest('hex') };
+    // Public SEO identifiers must fit Google's 50-character limit. Keep a
+    // deterministic 160-bit prefix; internal group identities remain unchanged.
+    groupId: createHash('sha256').update(`${organizationId}:${row.groupKey}`).digest('hex').slice(0, 40) };
 }
 
 export async function mutateGroups(db: Database['pool'], ctx: RequestContext,
