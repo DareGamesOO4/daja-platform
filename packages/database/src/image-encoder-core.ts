@@ -59,8 +59,8 @@ async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) 
     }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
     return (
       format === 'avif'
-        ? pipeline.avif({ quality, effort: 0 })
-        : pipeline.webp({ quality, effort: 1 })
+        ? pipeline.avif({ quality, effort: 4 })
+        : pipeline.webp({ quality, effort: 4, smartSubsample: true })
     ).toBuffer({ resolveWithObject: true });
   };
   const original = await encode(MAX_MAIN_WIDTH);

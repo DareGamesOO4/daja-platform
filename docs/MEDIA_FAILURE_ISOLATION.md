@@ -8,8 +8,9 @@
 - API/worker koriste zajednicki Redis lease za ceo media postupak pre preuzimanja
   izvora. Jedan posao globalno; lokalno do cetiri cekajuca callback-a, najvise 20 s
   cekanja, pa 503 za ponavljanje. Nema cekanja u otvorenoj DB transakciji.
-- Izvor se dekodira jednom u raster do 2048 px. WebP effort=1, AVIF effort=0;
-  kvalitet 75/65 i thumbnail 512 px ostaju. Fajlovi mogu biti veci nego ranije.
+- Izvor se dekodira jednom u raster do 2048 px. WebP i AVIF ostaju na effort=4,
+  WebP smartSubsample=true, kvalitet 75/65 i thumbnail 512 px. Po zahtevu korisnika
+  nije uvedeno brze kodiranje koje bi uvecalo fajlove.
 - Izolovani Linux enkoder radi u vremenskim prozorima 40/200 ms i sa nizim
   prioritetom, jednim threadom, bez Sharp cache-a. To nije cgroup/hard CPU limit.
   Gubitak lease-a prekida enkoder. BullMQ media concurrency je 1.
