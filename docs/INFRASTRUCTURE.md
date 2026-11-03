@@ -7,12 +7,14 @@
 - Firebase Phone provider je ukljucen uz korisnikovo odobrenje; domen je
   `dajashop.rs`, SMS region allowlist samo Srbija (RS). Web i backend tok su
   pripremljeni; Firebase potpisan dokaz vezuje se za DAJA jednokratni izazov.
-- Render API Firebase web konfiguracija je pripremljena, ali
-  `FIREBASE_PHONE_ENABLED=false` ceka odobrenje billing-a. Zadnji potvrdjen plan
-  je Spark; billing predlog je Firebase Payment, upozorenje 5 USD (nije limit).
+- Korisnik je odobrio/zavrsio Blaze billing; konzola potvrdjuje Blaze plan.
+  Render API ima novu Firebase web konfiguraciju i `FIREBASE_PHONE_ENABLED=true`.
+  Probni billing predlog je bio Firebase Payment i upozorenje 5 USD (nije limit);
+  konacna sacuvana vrednost upozorenja nije ponovo citana.
 - AWS SMS ostaje iskljucen. SMS obavestenja o proizvodima nisu ponovo ukljucena.
-- WhatsApp zahteva zaseban Meta Business setup; ceka korisnikovu Facebook prijavu.
-  Nije aktiviran WhatsApp provajder. Detalji: daja-platform/docs/FIREBASE_PHONE.md.
+- Korisnik se prijavio na Facebook; Meta je odbila kreiranje poslovnog portfolija
+  jer je Facebook nalog previse nov i trazi pokusaj za sat vremena.
+  WhatsApp provajder nije aktiviran. Detalji: daja-platform/docs/FIREBASE_PHONE.md.
 - Build weba i API/worker-a prolazi; bez testova, slanja SMS-a ili provere deploy-a.
 
 ## Dopuna: AWS SMS uklonjen, 03.11.2026.

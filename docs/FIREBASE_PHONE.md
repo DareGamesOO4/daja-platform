@@ -10,10 +10,11 @@ Phone provider is enabled with user approval; authorized production domain is
 were disabled when creating the new project.
 
 Render API has FIREBASE_PHONE_PROJECT_ID, FIREBASE_PHONE_API_KEY and
-FIREBASE_PHONE_APP_ID prepared. FIREBASE_PHONE_ENABLED remains false pending
-approval of linking Firebase Payment billing and paid SMS. Spark is the last
-confirmed plan; no real SMS delivery has been verified. The billing dialog has
-an unsaved 5 USD alert amount: this is a notification threshold, not a hard cap.
+FIREBASE_PHONE_APP_ID prepared. User completed/approved Blaze billing; the console
+confirmed Blaze, and FIREBASE_PHONE_ENABLED was set to true on Render API.
+No real SMS delivery or completed deployment has been verified. A 5 USD alert
+was prepared in the billing dialog; its final saved amount was not re-read.
+A billing budget is a notification threshold, not a hard cap.
 
 ## Runtime flow
 
@@ -62,8 +63,10 @@ References:
 ## WhatsApp follow-up
 
 User also requested WhatsApp OTP preparation. Firebase Phone has no WhatsApp
-channel. A separate Meta WhatsApp Business setup is needed. WhatsApp Manager is
-waiting for user Facebook sign-in; the user reports no Meta Business account.
+channel. A separate Meta WhatsApp Business setup is needed. User signed in to Facebook. Creation of the DajaShop business portfolio was
+attempted, but Meta rejected it: Facebook account too new; try again in an hour.
+The user selected a business phone ending 2425, but has not yet confirmed whether
+it already uses WhatsApp or WhatsApp Business. Do not migrate it without approval.
 No Meta credentials, business phone, approved authentication template or billing
 has been supplied. No WhatsApp provider is active or implemented in this change.
 Do not invent account/phone IDs or use a personal WhatsApp session as an API.

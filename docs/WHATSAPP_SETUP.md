@@ -1,7 +1,9 @@
 # DAJA WhatsApp: priprema za povezivanje
 
 Status 03.11.2026: korisnik je zatrazio pripremu WhatsApp kodova i naveo da nema
-Meta Business nalog. WhatsApp Manager je otvoren za njegovu Facebook prijavu.
+Meta Business nalog. Korisnik se prijavio na Facebook. Pokusaj kreiranja portfolija DajaShop sa
+poslovnim emailom dajashopnis@gmail.com odbijen je porukom: Facebook nalog je
+previse nov; pokusati ponovo za sat vremena. Poslovni portfolio nije kreiran.
 Firebase Phone integracija ostaje zaseban SMS kanal; WhatsApp nije ukljucen.
 
 ## Podaci i predlog za pregled posle prijave
@@ -13,7 +15,8 @@ Firebase Phone integracija ostaje zaseban SMS kanal; WhatsApp nije ukljucen.
 - Pocetno trziste: Srbija (+381).
 - Predlog naziva authentication template-a: daja_phone_verification.
 - Predlog jezika: srpski; vazi 10 minuta; radnja kopiranja koda ako je dostupna.
-- Poslovni broj: korisnik mora odrediti broj koji poseduje. Postojeci broj kupca
+- Poslovni broj: korisnik je odredio broj sa zavrsetkom 2425; pre povezivanja
+  proveriti da li vec koristi WhatsApp ili WhatsApp Business. Postojeci broj kupca
   iz AWS sandboxa ne tretirati kao poslovnog WhatsApp posiljaoca.
 
 ## Sledeci koraci
