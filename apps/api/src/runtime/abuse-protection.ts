@@ -1,3 +1,4 @@
+import { mediaProcessingActive } from '@daja/database';
 import { isIP } from 'node:net';
 import type { RequestHandler } from 'express';
 import type { SharedRateStorage } from './shared-rate-storage.js';
@@ -42,7 +43,7 @@ export class AdmissionBudget {
 }
 
 let activeRequests = 0;
-export function apiUnderLoad(): boolean { return activeRequests >= 16; }
+export function apiUnderLoad(): boolean { return activeRequests >= 16 || mediaProcessingActive(); }
 
 export function admissionMiddleware(storage: SharedRateStorage): RequestHandler {
   const active = new Map<string, number>();

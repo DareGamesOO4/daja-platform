@@ -92,105 +92,138 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
       if (!slug) return;
       try {
         await this.invalidateKeys([
-          ...['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(key => `catalog:${key}:${organizationId}:${slug}`),
+          ...['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(
+            (key) => `catalog:${key}:${organizationId}:${slug}`
+          ),
           `catalog:sitemap:v8:${organizationId}`,
           `catalog:sitemap:v9:${organizationId}`,
           `catalog:sitemap:v10:${organizationId}`,
-          `catalog:sitemap:v11:${organizationId}`,
+          `catalog:sitemap:v11:${organizationId}`
         ]);
       } catch (error) {
-        this.logger.warn({ err: error, productId }, 'Review cache refresh deferred to cache expiry');
+        this.logger.warn(
+          { err: error, productId },
+          'Review cache refresh deferred to cache expiry'
+        );
       }
-      this.realtime.publish({ organizationId, event: 'product.updated', payload: { productId, slug } });
+      this.realtime.publish({
+        organizationId,
+        event: 'product.updated',
+        payload: { productId, slug }
+      });
     } catch (error) {
-      this.logger.warn({ err: error, productId }, 'Review saved; product refresh deferred to cache expiry');
+      this.logger.warn(
+        { err: error, productId },
+        'Review saved; product refresh deferred to cache expiry'
+      );
     }
   }
   private async tick() {
     try {
       if (apiUnderLoad()) return;
-      await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-        await client.query(`SET LOCAL statement_timeout = '10s'`);
-        const row = (
-          await client.query<{
-            id: string;
-            organization_id: string;
-            product_id: string;
-            context: RequestContext;
-            slugs: string[];
-            cache_keys: string[];
-            attempts: number;
-          }>(
-            `SELECT * FROM catalog_deliveries WHERE completed_at IS NULL AND available_at <= now()
+      const delivered = await new TransactionManager(this.database.pool, this.logger).run(
+        async (client) => {
+          await client.query(`SET LOCAL statement_timeout = '10s'`);
+          const row = (
+            await client.query<{
+              id: string;
+              organization_id: string;
+              product_id: string;
+              context: RequestContext;
+              slugs: string[];
+              cache_keys: string[];
+              attempts: number;
+              projected_at: Date | null;
+            }>(
+              `SELECT * FROM catalog_deliveries WHERE completed_at IS NULL AND available_at <= now()
            ORDER BY available_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`
-          )
-        ).rows[0];
-        if (!row) return;
-        await client.query('SAVEPOINT delivery');
-        try {
-          const variants = await client.query<{ id: string }>(
-            `SELECT id FROM product_variants
+            )
+          ).rows[0];
+          if (!row) return;
+          if (row.projected_at) return row;
+          await client.query('SAVEPOINT projection');
+          try {
+            const variants = await client.query<{ id: string }>(
+              `SELECT id FROM product_variants
             WHERE organization_id=$1 AND product_id=$2 AND deleted_at IS NULL
               AND EXISTS (SELECT 1 FROM products p WHERE p.organization_id=$1 AND p.id=$2 AND p.deleted_at IS NULL)
             ORDER BY id`,
-            [row.organization_id, row.product_id]
-          );
-          const projector = new OperationalSyncProjector(client);
-          for (const variant of variants.rows)
-            await projector.publishProductChange(row.context, row.product_id, variant.id);
-          await new OutboxRepository(client).append({
-            ctx: row.context,
-            eventType: 'ProductUpdated',
-            aggregateType: 'product',
-            aggregateId: row.product_id,
-            payload: { productId: row.product_id }
-          });
-          const prefix = row.organization_id;
-          await this.invalidateKeys([
-            ...row.cache_keys,
-            ...[
-              'sitemap',
-              'sitemap:v2',
-              'sitemap:v3',
-              'sitemap:v4',
-              'sitemap:v5',
-              'sitemap:v6',
-              'sitemap:v7',
-              'sitemap:v8',
-              'sitemap:v9',
-              'sitemap:v10',
-              'sitemap:v11',
-              'merchant-feed',
-              'merchant-feed:v2',
-              'merchant-feed:v3'
-            ].map((k) => `catalog:${k}:${prefix}`),
-            ...row.slugs.flatMap((slug) =>
-              ['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(
-                (k) => `catalog:${k}:${prefix}:${slug}`
-              )
-            )
-          ]);
-          invalidateCatalogSearch(prefix);
-          await client.query(
-            'UPDATE catalog_deliveries SET completed_at=now(), last_error_code=NULL WHERE id=$1',
-            [row.id]
-          );
-          // Notifications may be repeated after a crash; clients reload canonical state.
-          for (const slug of row.slugs)
-            this.realtime.publish({
-              organizationId: prefix,
-              event: 'product.updated',
-              payload: { productId: row.product_id, slug }
+              [row.organization_id, row.product_id]
+            );
+            const projector = new OperationalSyncProjector(client);
+            for (const variant of variants.rows)
+              await projector.publishProductChange(row.context, row.product_id, variant.id);
+            await new OutboxRepository(client).append({
+              ctx: row.context,
+              eventType: 'ProductUpdated',
+              aggregateType: 'product',
+              aggregateId: row.product_id,
+              payload: { productId: row.product_id }
             });
-        } catch {
-          await client.query('ROLLBACK TO SAVEPOINT delivery');
-          await client.query(
-            `UPDATE catalog_deliveries SET attempts=attempts+1, last_error_code='DELIVERY_RETRY',
-            available_at=now()+($2 * interval '1 second') WHERE id=$1`,
-            [row.id, Math.min(300, 2 ** Math.min(row.attempts + 1, 8))]
-          );
+            await client.query('UPDATE catalog_deliveries SET projected_at=now() WHERE id=$1', [
+              row.id
+            ]);
+            return row;
+          } catch (error) {
+            await client.query('ROLLBACK TO SAVEPOINT projection');
+            await client.query(
+              `UPDATE catalog_deliveries SET attempts=attempts+1, last_error_code='DELIVERY_RETRY',
+             available_at=now()+($2 * interval '1 second') WHERE id=$1`,
+              [row.id, Math.min(300, 2 ** Math.min(row.attempts + 1, 8))]
+            );
+            this.logger.warn({ err: error }, 'Catalog projection will retry');
+            return undefined;
+          }
         }
-      });
+      );
+      if (!delivered) return;
+      try {
+        const prefix = delivered.organization_id;
+        await this.invalidateKeys([
+          ...delivered.cache_keys,
+          ...[
+            'sitemap',
+            'sitemap:v2',
+            'sitemap:v3',
+            'sitemap:v4',
+            'sitemap:v5',
+            'sitemap:v6',
+            'sitemap:v7',
+            'sitemap:v8',
+            'sitemap:v9',
+            'sitemap:v10',
+            'sitemap:v11',
+            'merchant-feed',
+            'merchant-feed:v2',
+            'merchant-feed:v3'
+          ].map((k) => `catalog:${k}:${prefix}`),
+          ...delivered.slugs.flatMap((slug) =>
+            ['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(
+              (k) => `catalog:${k}:${prefix}:${slug}`
+            )
+          )
+        ]);
+        invalidateCatalogSearch(prefix);
+        await this.database.pool.query(
+          'UPDATE catalog_deliveries SET completed_at=now(), last_error_code=NULL WHERE id=$1 AND completed_at IS NULL',
+          [delivered.id]
+        );
+        // Cache/network calls run after COMMIT; no DB connection waits on Redis.
+        // A crash can repeat invalidation/notifications, but not the persisted projection.
+        for (const slug of delivered.slugs)
+          this.realtime.publish({
+            organizationId: prefix,
+            event: 'product.updated',
+            payload: { productId: delivered.product_id, slug }
+          });
+      } catch (error) {
+        await this.database.pool.query(
+          `UPDATE catalog_deliveries SET attempts=attempts+1, last_error_code='DELIVERY_RETRY',
+             available_at=now()+($2 * interval '1 second') WHERE id=$1 AND completed_at IS NULL`,
+          [delivered.id, Math.min(300, 2 ** Math.min(delivered.attempts + 1, 8))]
+        );
+        this.logger.warn({ err: error }, 'Catalog cache delivery will retry');
+      }
     } catch (error) {
       this.logger.warn({ err: error }, 'Catalog delivery will retry');
     } finally {

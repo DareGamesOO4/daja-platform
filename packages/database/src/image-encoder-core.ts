@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import sharp, { type Channels } from 'sharp';
 import { ValidationFailedError } from '@daja/security';
 sharp.concurrency(1);
 sharp.cache(false);
@@ -13,77 +13,75 @@ export interface ImageOutputOptions {
   quality?: number;
 }
 
-export async function prepareImageVariants(source: Buffer, options: ImageOutputOptions = {}): Promise<{
-  format: 'webp' | 'avif';
-  mimeType: 'image/webp' | 'image/avif';
-  extension: '.webp' | '.avif';
-  original: { data: Buffer; width: number; height: number };
-  thumbnail: { data: Buffer; width: number; height: number };
-}> {
+type Raster = { data: Buffer; width: number; height: number; channels: Channels };
+
+async function decodeImage(source: Buffer): Promise<Raster> {
+  const metadata = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
+  if (
+    !metadata.width ||
+    !metadata.height ||
+    metadata.width > MAX_IMAGE_DIMENSION ||
+    metadata.height > MAX_IMAGE_DIMENSION ||
+    (metadata.pages ?? 1) > 1
+  )
+    throw new ValidationFailedError('Image dimensions or animation are unsupported');
+  // Decode and orient the original once. Every output reuses this bounded raster
+  // (at most 2048 x 2048), not a second decode of a 24-megapixel source.
+  const { data, info } = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
+    .rotate()
+    .resize({
+      width: MAX_MAIN_WIDTH,
+      height: MAX_MAIN_WIDTH,
+      fit: 'inside',
+      withoutEnlargement: true
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height, channels: info.channels };
+}
+
+async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) {
   const format = options.format ?? 'webp';
   const quality = options.quality ?? (format === 'avif' ? 65 : 84);
-  if (!['webp', 'avif'].includes(format) || !Number.isInteger(quality) || quality < 1 || quality > 100) {
-    throw new ValidationFailedError('Image output must be WebP or AVIF with quality between 1 and 100');
-  }
-  const metadata = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
-  if (!metadata.width || !metadata.height || metadata.width > MAX_IMAGE_DIMENSION || metadata.height > MAX_IMAGE_DIMENSION
-    || (metadata.pages ?? 1) > 1) throw new ValidationFailedError('Image dimensions or animation are unsupported');
-  let originalData: Buffer | undefined;
-  let width: number | undefined;
-  let height: number | undefined;
-  try {
-    const pipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
-      .rotate()
-      .resize({
-        width: MAX_MAIN_WIDTH,
-        height: MAX_MAIN_WIDTH,
-        fit: 'inside',
-        withoutEnlargement: true
-      });
-    const original = await (format === 'avif'
-      ? pipeline.avif({ quality, effort: 4 })
-      : pipeline.webp({ quality, effort: 4, smartSubsample: true }))
-      .toBuffer({ resolveWithObject: true });
-    originalData = original.data;
-    width = original.info.width;
-    height = original.info.height;
-  } catch {
+  if (
+    !['webp', 'avif'].includes(format) ||
+    !Number.isInteger(quality) ||
+    quality < 1 ||
+    quality > 100
+  ) {
     throw new ValidationFailedError(
-      'The URL does not point to a supported image (JPEG, PNG, WebP, or AVIF)'
+      'Image output must be WebP or AVIF with quality between 1 and 100'
     );
   }
-
-  if (
-    !originalData ||
-    !width ||
-    !height ||
-    width > MAX_IMAGE_DIMENSION ||
-    height > MAX_IMAGE_DIMENSION
-  ) {
-    throw new ValidationFailedError('Image dimensions are unsupported');
-  }
-
-  const thumbnailPipeline = sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })
-    .rotate()
-    .resize({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_WIDTH, fit: 'inside', withoutEnlargement: true });
-  const thumbnail = await (format === 'avif'
-    ? thumbnailPipeline.avif({ quality, effort: 4 })
-    : thumbnailPipeline.webp({ quality, effort: 4, smartSubsample: true }))
-    .toBuffer({ resolveWithObject: true });
-  if (!thumbnail.info.width || !thumbnail.info.height) {
-    throw new ValidationFailedError('Thumbnail dimensions could not be determined');
-  }
-
+  const encode = (width: number) => {
+    const pipeline = sharp(raster.data, {
+      raw: { width: raster.width, height: raster.height, channels: raster.channels }
+    }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
+    return (
+      format === 'avif'
+        ? pipeline.avif({ quality, effort: 0 })
+        : pipeline.webp({ quality, effort: 1 })
+    ).toBuffer({ resolveWithObject: true });
+  };
+  const original = await encode(MAX_MAIN_WIDTH);
+  const thumbnail = await encode(THUMBNAIL_WIDTH);
   return {
     format,
-    mimeType: format === 'avif' ? 'image/avif' : 'image/webp',
-    extension: format === 'avif' ? '.avif' : '.webp',
-    original: { data: originalData, width, height },
-    thumbnail: {
-      data: thumbnail.data,
-      width: thumbnail.info.width,
-      height: thumbnail.info.height
-    }
+    mimeType: format === 'avif' ? ('image/avif' as const) : ('image/webp' as const),
+    extension: format === 'avif' ? ('.avif' as const) : ('.webp' as const),
+    original: { data: original.data, width: original.info.width, height: original.info.height },
+    thumbnail: { data: thumbnail.data, width: thumbnail.info.width, height: thumbnail.info.height }
   };
 }
 
+export async function prepareImageVariants(source: Buffer, options: ImageOutputOptions = {}) {
+  return encodeVariants(await decodeImage(source), options);
+}
+
+export async function prepareProductVariants(source: Buffer) {
+  const raster = await decodeImage(source);
+  return {
+    webp: await encodeVariants(raster, { format: 'webp', quality: 75 }),
+    avif: await encodeVariants(raster, { format: 'avif', quality: 65 })
+  };
+}

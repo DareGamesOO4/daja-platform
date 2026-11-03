@@ -4,6 +4,7 @@ import type { AppConfig } from '@daja/config';
 import { brandedEmail, emailEscape } from '@daja/shared';
 import {
   MediaRepository,
+  runMediaProcessing,
   enqueueEmail,
   OutboxRepository,
   R2MediaStorageAdapter,
@@ -103,7 +104,7 @@ export function createPlatformWorkers(
     (job) => processMediaJob(job, database, config, logger),
     {
       connection: mediaConnection,
-      concurrency: 2,
+      concurrency: 1,
       limiter: { max: 20, duration: 1000 }
     }
   );
@@ -210,50 +211,52 @@ async function processMediaJob(
   ) {
     throw new Error('R2 credentials are required for media processing');
   }
-  const storage = new R2MediaStorageAdapter(config);
-  const createdKeys = new Set<string>();
-  const tx = new TransactionManager(database.pool, logger);
-  const asset = await tx.run(async (pgClient) =>
-    new MediaRepository(pgClient).markProcessing({ organizationId }, mediaId)
-  );
-  try {
-    if (!asset.mime_type.startsWith('image/')) {
+  return runMediaProcessing(config, async () => {
+    const storage = new R2MediaStorageAdapter(config);
+    const createdKeys = new Set<string>();
+    const tx = new TransactionManager(database.pool, logger);
+    const asset = await tx.run(async (pgClient) =>
+      new MediaRepository(pgClient).markProcessing({ organizationId }, mediaId)
+    );
+    try {
+      if (!asset.mime_type.startsWith('image/')) {
+        await tx.run((pgClient) =>
+          new MediaRepository(pgClient).markReady({
+            organizationId,
+            mediaId,
+            width: asset.width ?? 1,
+            height: asset.height ?? 1,
+            derivatives: []
+          })
+        );
+        return;
+      }
+      const prepared = await new MediaRepository(database.pool).stageUploadedImage({ organizationId }, mediaId, storage, createdKeys);
+      const result = await tx.run(async pgClient => {
+        const result = await new MediaRepository(pgClient).optimizeUploadedImage(
+          { organizationId }, mediaId, storage, createdKeys, undefined, prepared
+        );
+        await new OutboxRepository(pgClient).append({
+          ctx: { organizationId }, eventType: 'MediaReady', aggregateType: 'media_asset', aggregateId: mediaId,
+          payload: { mediaId, publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl }
+        });
+        return result;
+      });
+      createdKeys.clear();
+      for (const key of result.obsoleteStorageKeys) {
+        await storage.deleteObject(key).catch(error =>
+          logger.warn({ error, mediaId, key }, 'Could not remove source upload after image optimization'));
+      }
+    } catch (error) {
+      await new MediaRepository(database.pool).cleanupAttempt({ organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
       await tx.run((pgClient) =>
-        new MediaRepository(pgClient).markReady({
+        new MediaRepository(pgClient).markFailed(
           organizationId,
           mediaId,
-          width: asset.width ?? 1,
-          height: asset.height ?? 1,
-          derivatives: []
-        })
+          error instanceof Error ? error.message : 'Unknown media processing failure'
+        )
       );
-      return;
+      throw error;
     }
-    const prepared = await new MediaRepository(database.pool).stageUploadedImage({ organizationId }, mediaId, storage, createdKeys);
-    const result = await tx.run(async pgClient => {
-      const result = await new MediaRepository(pgClient).optimizeUploadedImage(
-        { organizationId }, mediaId, storage, createdKeys, undefined, prepared
-      );
-      await new OutboxRepository(pgClient).append({
-        ctx: { organizationId }, eventType: 'MediaReady', aggregateType: 'media_asset', aggregateId: mediaId,
-        payload: { mediaId, publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl }
-      });
-      return result;
-    });
-    createdKeys.clear();
-    for (const key of result.obsoleteStorageKeys) {
-      await storage.deleteObject(key).catch(error =>
-        logger.warn({ error, mediaId, key }, 'Could not remove source upload after image optimization'));
-    }
-  } catch (error) {
-    await new MediaRepository(database.pool).cleanupAttempt({ organizationId }, mediaId, storage, createdKeys).catch(() => undefined);
-    await tx.run((pgClient) =>
-      new MediaRepository(pgClient).markFailed(
-        organizationId,
-        mediaId,
-        error instanceof Error ? error.message : 'Unknown media processing failure'
-      )
-    );
-    throw error;
-  }
+  });
 }

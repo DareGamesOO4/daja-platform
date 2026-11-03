@@ -12,6 +12,7 @@ import {
   productMediaThumbnailStorageKey,
   sha256,
   prepareImageVariants,
+  runMediaProcessing,
   type ImageOutputOptions,
   type Database,
   TransactionManager
@@ -54,11 +55,19 @@ export async function prepareRemoteImage(sourceUrl: string, options: ImageOutput
   };
 }
 
+export function importRemoteImage(input: Parameters<typeof importRemoteImageNow>[0]): Promise<RemoteMediaImportResult> {
+  return runMediaProcessing(input.config, () => importRemoteImageNow(input));
+}
+
+export function ensurePrimaryMediaThumbnail(input: Parameters<typeof ensurePrimaryMediaThumbnailNow>[0]): Promise<string> {
+  return runMediaProcessing(input.config, () => ensurePrimaryMediaThumbnailNow(input));
+}
+
 /**
  * Imports a direct image URL into our own R2 bucket. The database only keeps
  * metadata and R2 keys; it never stores image blobs in PostgreSQL.
  */
-export async function importRemoteImage(input: {
+async function importRemoteImageNow(input: {
   config: AppConfig;
   database: Database;
   organizationId: string;
@@ -102,7 +111,7 @@ export async function importRemoteImage(input: {
   }
 }
 
-export async function ensurePrimaryMediaThumbnail(input: {
+async function ensurePrimaryMediaThumbnailNow(input: {
   config: AppConfig;
   database: Database;
   organizationId: string;

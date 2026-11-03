@@ -32,6 +32,7 @@ import {
   ImportRepository,
   InventoryRepository,
   MediaRepository,
+  runMediaProcessing,
   OutboxRepository,
   R2MediaStorageAdapter,
   type RedisConnection,
@@ -3029,52 +3030,58 @@ export class MediaController {
     const repository = new MediaRepository(this.database.pool);
     const ready = await repository.readyUpload(ctx, id);
     if (ready) return ready;
-    const source = await repository.readUploadedSource(ctx, id, storage);
-    const prepared = await (source.asset.mime_type.startsWith('image/')
-      ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : Promise.resolve(undefined))
-      .catch(async error => {
+    return runMediaProcessing(this.config, async () => {
+      const alreadyReady = await repository.readyUpload(ctx, id);
+      if (alreadyReady) return alreadyReady;
+      const source = await repository.readUploadedSource(ctx, id, storage);
+      const prepared = await (source.asset.mime_type.startsWith('image/')
+        ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : Promise.resolve(undefined))
+        .catch(async error => {
+          await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
+          throw error;
+        });
+      const result = await new TransactionManager(this.database.pool, this.logger).run(
+        async (client) => {
+          const result = await new MediaRepository(client).completeUpload(
+            ctx,
+            id,
+            storage,
+            createdKeys,
+            prepared,
+            source
+          );
+          await new OutboxRepository(client).append({
+            ctx,
+            eventType: result.status === 'ready' ? 'MediaReady' : 'MediaUploaded',
+            aggregateType: 'media_asset',
+            aggregateId: id,
+            payload: { mediaId: id, ...('thumbnailUrl' in result ? {
+              publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl
+            } : {}) }
+          });
+          return result;
+        }
+      ).catch(async error => {
         await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
         throw error;
       });
-    const result = await new TransactionManager(this.database.pool, this.logger).run(
-      async (client) => {
-        const result = await new MediaRepository(client).completeUpload(
-          ctx,
-          id,
-          storage,
-          createdKeys,
-          prepared,
-          source
-        );
-        await new OutboxRepository(client).append({
-          ctx,
-          eventType: result.status === 'ready' ? 'MediaReady' : 'MediaUploaded',
-          aggregateType: 'media_asset',
-          aggregateId: id,
-          payload: { mediaId: id, ...('thumbnailUrl' in result ? {
-            publicUrl: result.publicUrl, thumbnailUrl: result.thumbnailUrl
-          } : {}) }
-        });
-        return result;
+      for (const key of result.obsoleteStorageKeys) {
+        await storage.deleteObject(key).catch(error =>
+          this.logger.warn({ error, mediaId: id, key }, 'Could not remove source upload after image optimization'));
       }
-    ).catch(async error => {
-      await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
-      throw error;
+      if (result.status !== 'ready') {
+        const queue = new Queue('media-processing', { connection: this.redis.client });
+        try {
+          await queue.add('process-media', { organizationId: ctx.organizationId, mediaId: id }, {
+            attempts: 5, backoff: { type: 'exponential', delay: 3000 }
+          });
+        } finally {
+          await queue.close();
+        }
+      }
+      const { obsoleteStorageKeys: _obsoleteStorageKeys, ...response } = result;
+      return response;
     });
-    for (const key of result.obsoleteStorageKeys) {
-      await storage.deleteObject(key).catch(error =>
-        this.logger.warn({ error, mediaId: id, key }, 'Could not remove source upload after image optimization'));
-    }
-    if (result.status !== 'ready') {
-      const queue = new Queue('media-processing', { connection: this.redis.client });
-      try {
-        await queue.add('process-media', { organizationId: ctx.organizationId, mediaId: id });
-      } finally {
-        await queue.close();
-      }
-    }
-    const { obsoleteStorageKeys: _obsoleteStorageKeys, ...response } = result;
-    return response;
   }
 
   /** Deletes a completed or pending upload that was never attached to a product. */

@@ -1,5 +1,26 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: serijska obrada slika, 03.11.2026.
+
+- Radnik moze da izabere/prevuce sve slike ili nalepi vise linkova; web salje
+  samo jednu sliku do kraja obrade, ostale cekaju lokalno. Redosled, glavna slika,
+  alt tekst, ponavljanje i blokada cuvanja dok postoje nezavrseni poslovi ostaju.
+- API/worker koriste zajednicki Redis lease za ceo media postupak pre preuzimanja
+  izvora. Jedan posao globalno; lokalno do cetiri cekajuca callback-a, najvise 20 s
+  cekanja, pa 503 za ponavljanje. Nema cekanja u otvorenoj DB transakciji.
+- Izvor se dekodira jednom u raster do 2048 px. WebP effort=1, AVIF effort=0;
+  kvalitet 75/65 i thumbnail 512 px ostaju. Fajlovi mogu biti veci nego ranije.
+- Izolovani Linux enkoder radi u vremenskim prozorima 40/200 ms i sa nizim
+  prioritetom, jednim threadom, bez Sharp cache-a. To nije cgroup/hard CPU limit.
+  Gubitak lease-a prekida enkoder. BullMQ media concurrency je 1.
+- Pozadinski catalog/bulk/supplier dispatcher ustupa API dok traje media posao.
+  Catalog delivery cuva SQL projekciju migracijom 098, pa poziva Redis van
+  transakcije i ponavlja preostali deo bez dupliranja DB projekcije.
+- Logovi pokazuju 25P03 prekide idle transakcija; nije dokazano restartovanje
+  samog PostgreSQL servera. CPU prosek od 5 minuta ne dokazuje niti iskljucuje
+  kratki vrh od 90%. Nisu menjani Render planovi niti dodavani placeni servisi.
+- Provera: TypeScript API/worker i web build; bez testova i provere deploy-a.
+
 ## Dopuna: novi Firebase projekat za SMS, 03.11.2026.
 
 - Novi projekat `dajashop-sms` / DajaShop SMS pripada nalogu `dajashopnis@gmail.com`.

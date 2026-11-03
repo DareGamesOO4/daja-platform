@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { SyncRepository, type Database } from '@daja/database';
+import { SyncRepository, mediaProcessingActive, type Database } from '@daja/database';
 import { randomUUID } from 'node:crypto';
 import { recordSupplierStatistics } from './supplier-metrics.js';
 import type { Logger } from '@daja/observability';
@@ -57,17 +57,24 @@ export async function supplierTransaction<T>(
   action: (client: pg.PoolClient) => Promise<T>
 ): Promise<T> {
   const client = await pool.connect();
+  let connectionError: Error | undefined;
+  const onError = (error: Error) => { connectionError = error; };
+  client.on('error', onError);
   try {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('supplier-state'))`);
     const result = await action(client);
+    if (connectionError) throw connectionError;
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (!connectionError) await client.query('ROLLBACK').catch(rollbackError => {
+      connectionError = rollbackError instanceof Error ? rollbackError : new Error('Rollback failed');
+    });
     throw error;
   } finally {
-    client.release();
+    client.release(connectionError);
+    client.removeListener('error', onError);
   }
 }
 
@@ -846,7 +853,7 @@ export function startNumberedSupplierChecks(
     }
   };
   const dispatch = async () => {
-    if (closed || dispatching) return;
+    if (closed || dispatching || mediaProcessingActive()) return;
     dispatching = true;
     try {
       const claimed = await supplierTransaction(database.pool, async (client) => {
