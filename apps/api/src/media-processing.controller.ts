@@ -20,8 +20,25 @@ import { resolveRequestContext } from './runtime/request-context.js';
 import { DATABASE, LOGGER } from './tokens.js';
 
 const querySchema = z.object({
-  view: z.enum(['problems', 'queue', 'history']).default('problems'),
-  page: z.coerce.number().int().min(1).max(500).default(1)
+  view: z.enum(['all', 'problems', 'queue', 'history']).default('problems'),
+  page: z.coerce.number().int().min(1).max(500).default(1),
+  q: z.string().trim().max(160).default(''),
+  status: z
+    .enum([
+      'all',
+      'queued',
+      'processing',
+      'failed',
+      'interrupted',
+      'resolved',
+      'removed',
+      'upload_again',
+      'dismissed'
+    ])
+    .default('all'),
+  phase: z.enum(['all', 'upload', 'overnight']).default('all'),
+  unread: z.enum(['all', 'unread']).default('all'),
+  sort: z.enum(['newest', 'oldest', 'attempts']).default('newest')
 });
 const readSchema = z.object({
   items: z
@@ -95,45 +112,47 @@ export class MediaProcessingController {
   async list(@Req() request: Request, @Query() query: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
-    const { view, page } = parseWithSchema(querySchema, query);
-    let rows;
-    if (view === 'queue') {
-      rows = (
-        await this.db.pool.query(
-          `SELECT j.media_asset_id AS id,'overnight' AS phase,${imageFields},
-          ${jobState} AS status,j.attempts,j.last_error_at AS "lastFailureAt",j.available_at AS "availableAt",
-          al.message,al.error_code AS "errorCode",al.retry_requested_at AS "retryRequestedAt",
-          NOT coalesce(j.lease_until>now(),false) AS "canRetry"
-         FROM media_derivative_jobs j JOIN media_assets a ON a.id=j.media_asset_id AND a.organization_id=j.organization_id
-         LEFT JOIN media_processing_alerts al ON al.organization_id=j.organization_id AND al.media_asset_id=j.media_asset_id AND al.phase='overnight'
-         ${productJoin}
-         WHERE j.organization_id=$1 AND a.deleted_at IS NULL
-         ORDER BY (j.last_error_code IS NOT NULL) DESC,j.created_at,j.media_asset_id LIMIT 21 OFFSET $2`,
-          [ctx.organizationId, (page - 1) * 20]
-        )
-      ).rows;
-    } else {
-      rows = (
-        await this.db.pool.query(
-          `SELECT al.id,al.event_key AS "eventKey",al.phase,al.error_code AS "errorCode",al.message,al.occurrences,
-          al.first_failure_at AS "firstFailureAt",al.last_failure_at AS "lastFailureAt",
-          al.resolution,al.resolved_at AS "resolvedAt",al.retry_requested_at AS "retryRequestedAt",${imageFields},
-          coalesce(r.seen_event_key=al.event_key,false) AS "isRead",
-          CASE WHEN al.resolution='dismissed' THEN 'dismissed' WHEN al.resolution='removed' THEN 'removed' WHEN al.resolved_at IS NOT NULL THEN 'resolved'
-            WHEN j.media_asset_id IS NULL THEN 'upload_again' ELSE ${jobState} END AS status,
-          (al.resolved_at IS NULL AND j.media_asset_id IS NOT NULL AND a.deleted_at IS NULL
-            AND NOT coalesce(j.lease_until>now(),false)) AS "canRetry",
-          j.attempts,j.available_at AS "availableAt"
-         FROM media_processing_alerts al JOIN media_assets a ON a.id=al.media_asset_id AND a.organization_id=al.organization_id
-         LEFT JOIN media_processing_alert_reads r ON r.alert_id=al.id AND r.user_id=$2
-         LEFT JOIN media_derivative_jobs j ON j.organization_id=al.organization_id AND j.media_asset_id=al.media_asset_id AND al.phase='overnight'
-         ${productJoin}
-         WHERE al.organization_id=$1 AND ${view === 'history' ? 'al.resolved_at IS NOT NULL' : 'al.resolved_at IS NULL'}
-         ORDER BY al.last_failure_at DESC,al.id DESC LIMIT 21 OFFSET $3`,
-          [ctx.organizationId, ctx.userId, (page - 1) * 20]
-        )
-      ).rows;
-    }
+    const { view, page, q, status, phase, unread, sort } = parseWithSchema(querySchema, query);
+    const base =
+      view === 'queue'
+        ? `SELECT j.media_asset_id AS id,'overnight' AS phase,${imageFields},
+        ${jobState} AS status,j.attempts,j.created_at AS "createdAt",j.last_error_at AS "lastFailureAt",
+        j.available_at AS "availableAt",al.message,al.error_code AS "errorCode",al.event_key AS "eventKey",
+        al.retry_requested_at AS "retryRequestedAt",coalesce(r.seen_event_key=al.event_key,false) AS "isRead",
+        NOT coalesce(j.lease_until>now(),false) AS "canRetry"
+       FROM media_derivative_jobs j JOIN media_assets a ON a.id=j.media_asset_id AND a.organization_id=j.organization_id
+       LEFT JOIN media_processing_alerts al ON al.organization_id=j.organization_id AND al.media_asset_id=j.media_asset_id AND al.phase='overnight'
+       LEFT JOIN media_processing_alert_reads r ON r.alert_id=al.id AND r.user_id=$2
+       ${productJoin} WHERE j.organization_id=$1 AND a.deleted_at IS NULL`
+        : `SELECT al.id,al.event_key AS "eventKey",al.phase,al.error_code AS "errorCode",al.message,al.occurrences,
+        al.first_failure_at AS "createdAt",al.first_failure_at AS "firstFailureAt",al.last_failure_at AS "lastFailureAt",
+        al.resolution,al.resolved_at AS "resolvedAt",al.retry_requested_at AS "retryRequestedAt",${imageFields},
+        coalesce(r.seen_event_key=al.event_key,false) AS "isRead",
+        CASE WHEN al.resolution='dismissed' THEN 'dismissed' WHEN al.resolution='removed' THEN 'removed'
+          WHEN al.resolved_at IS NOT NULL THEN 'resolved' WHEN j.media_asset_id IS NULL THEN 'upload_again'
+          ELSE ${jobState} END AS status,
+        (al.resolved_at IS NULL AND j.media_asset_id IS NOT NULL AND a.deleted_at IS NULL
+          AND NOT coalesce(j.lease_until>now(),false)) AS "canRetry",j.attempts,j.available_at AS "availableAt"
+       FROM media_processing_alerts al JOIN media_assets a ON a.id=al.media_asset_id AND a.organization_id=al.organization_id
+       LEFT JOIN media_processing_alert_reads r ON r.alert_id=al.id AND r.user_id=$2
+       LEFT JOIN media_derivative_jobs j ON j.organization_id=al.organization_id AND j.media_asset_id=al.media_asset_id AND al.phase='overnight'
+       ${productJoin} WHERE al.organization_id=$1 AND ${view === 'history' ? 'al.resolved_at IS NOT NULL' : view === 'problems' ? 'al.resolved_at IS NULL' : 'true'}`;
+    const order =
+      sort === 'oldest'
+        ? `coalesce("lastFailureAt","createdAt") ASC,id ASC`
+        : sort === 'attempts'
+          ? `coalesce(attempts,${view === 'queue' ? '0' : 'occurrences'},0) DESC,coalesce("lastFailureAt","createdAt") DESC,id DESC`
+          : `coalesce("lastFailureAt","createdAt") DESC,id DESC`;
+    const rows = (
+      await this.db.pool.query(
+        `WITH entries AS (${base}) SELECT * FROM entries WHERE
+       ($3='' OR strpos(lower(concat_ws(' ',"productName","productSlug",filename,"mediaId"::text)),lower($3))>0)
+       AND ($4='all' OR status=$4) AND ($5='all' OR phase=$5)
+       AND ($6='all' OR ("eventKey" IS NOT NULL AND NOT "isRead"))
+       ORDER BY ${order} LIMIT 21 OFFSET $7`,
+        [ctx.organizationId, ctx.userId, q, status, phase, unread, (page - 1) * 20]
+      )
+    ).rows;
     return { items: rows.slice(0, 20), hasMore: rows.length > 20, page, view };
   }
 

@@ -1,5 +1,23 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: zasebna admin kartica za slike, 03.11.2026.
+
+- Slike i obavestenja je zasebna kartica u admin navigaciji, sa brojem novih
+  poruka na samoj kartici. Nema sklopivog panela iznad ostalih admin kartica.
+  Pozadinski monitor/brojac i plutajuce obavestenje ostaju dok je admin otvoren.
+- Pregledi: sve poruke, problemi, nocni red, resene poruke. Pretraga po proizvodu,
+  fajlu ili ID-u slike; filteri statusa/faze/neprocitanih; sortiranje po starosti
+  i broju pokusaja. API filtrira pre paginacije, najvise 20 redova po strani.
+- Izbor prikazanih redova omogucava grupno zakazivanje ponovnog pokusaja, citanje
+  poruka i zatvaranje neuspelih pocetnih upload poruka. Grupni zahtevi idu redom,
+  ne pokrecu paralelne enkodere i postuju prava/zakljucavanje pojedinacnih API akcija.
+- CSV izvoz obuhvata samo prikazane redove i stiti tekstualne celije od izvrsavanja
+  formula. Dostupni su otvaranje javne optimizovane slike, rucno osvezavanje i
+  ukljucivanje/iskljucivanje automatskog osvezavanja aktivne kartice.
+- Nocna obrada i dalje samo 03:00-07:00 Europe/Belgrade, jedna slika istovremeno.
+  Kompresija i velicina izlaznih slika nisu menjani ovim UI/API dopunama.
+- Provera: API/worker TypeScript i web build; bez testova i provere deploy-a.
+
 ## Dopuna: admin obavestenja o slikama, 03.11.2026.
 
 - Admin dashboard ima sklopivi panel Slike i obavestenja na svim svojim karticama.
