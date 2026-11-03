@@ -333,7 +333,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v10:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v11:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -352,13 +352,16 @@ export class PublicCatalogController {
         `SELECT p.slug, p.updated_at,
                 COALESCE(media.items, '[]'::jsonb) AS images
          FROM products p
+         LEFT JOIN departments sitemap_department ON sitemap_department.id=p.department_id
+           AND sitemap_department.organization_id=p.organization_id AND sitemap_department.deleted_at IS NULL
          LEFT JOIN LATERAL (
            SELECT jsonb_agg(ma.public_url ORDER BY pm.is_primary DESC, pm.position ASC, pm.id) AS items
            FROM product_media pm
            JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
            WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ) media ON true
-         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published
+         WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.published
+           AND (p.active OR sitemap_department.slug='satovi')
          ORDER BY p.updated_at DESC, p.id DESC`,
         [ctx.organizationId]
       )
@@ -526,7 +529,7 @@ export class PublicCatalogController {
   ) {
     const ctx = this.publicContext(request);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
-    const cacheKey = `catalog:slug:public-v3:${ctx.organizationId}:${normalizedSlug}`;
+    const cacheKey = `catalog:slug:public-v4:${ctx.organizationId}:${normalizedSlug}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as unknown;
@@ -2877,10 +2880,11 @@ export class StaffCatalogController {
       `catalog:sitemap:v8:${organizationId}`,
       `catalog:sitemap:v9:${organizationId}`,
       `catalog:sitemap:v10:${organizationId}`,
+      `catalog:sitemap:v11:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,
-      ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`, `catalog:slug:public-v3:${organizationId}:${slug}`])
+      ...validSlugs.flatMap((slug) => [`catalog:slug:${organizationId}:${slug}`, `catalog:slug:public-v2:${organizationId}:${slug}`, `catalog:slug:public-v3:${organizationId}:${slug}`, `catalog:slug:public-v4:${organizationId}:${slug}`])
     ];
     await this.catalogDelivery.invalidateKeys(keys);
     if (!validSlugs.length) return;

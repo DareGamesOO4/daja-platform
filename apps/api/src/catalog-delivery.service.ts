@@ -92,10 +92,11 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
       if (!slug) return;
       try {
         await this.invalidateKeys([
-          ...['slug', 'slug:public-v2', 'slug:public-v3'].map(key => `catalog:${key}:${organizationId}:${slug}`),
+          ...['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(key => `catalog:${key}:${organizationId}:${slug}`),
           `catalog:sitemap:v8:${organizationId}`,
           `catalog:sitemap:v9:${organizationId}`,
           `catalog:sitemap:v10:${organizationId}`,
+          `catalog:sitemap:v11:${organizationId}`,
         ]);
       } catch (error) {
         this.logger.warn({ err: error, productId }, 'Review cache refresh deferred to cache expiry');
@@ -158,12 +159,13 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
               'sitemap:v8',
               'sitemap:v9',
               'sitemap:v10',
+              'sitemap:v11',
               'merchant-feed',
               'merchant-feed:v2',
               'merchant-feed:v3'
             ].map((k) => `catalog:${k}:${prefix}`),
             ...row.slugs.flatMap((slug) =>
-              ['slug', 'slug:public-v2', 'slug:public-v3'].map(
+              ['slug', 'slug:public-v2', 'slug:public-v3', 'slug:public-v4'].map(
                 (k) => `catalog:${k}:${prefix}:${slug}`
               )
             )

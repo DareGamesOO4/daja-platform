@@ -356,7 +356,8 @@ export class CatalogRepository {
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
-       WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL AND p.active AND p.published
+       WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL AND p.published
+         AND (p.active OR d.slug = 'satovi')
        LIMIT 1`,
       [ctx.organizationId, slug, INTERNAL_CATALOG_ATTRIBUTE_KEYS]
     );
@@ -399,6 +400,12 @@ export class CatalogRepository {
 
     return {
       ...(publicCatalogValue(product) as typeof product),
+      procurementUnavailable: product.active === false,
+      ...(product.active === false ? {
+        inStock: false,
+        availableQuantity: 0,
+        availability: { inStock: false, availableQuantity: 0 },
+      } : {}),
       reviews: publishedReviews,
       reviewSummary: ratingCount ? { ratingCount, averageRating } : null
     };
@@ -413,7 +420,11 @@ export class CatalogRepository {
        FROM product_slug_redirects r
        JOIN products p ON p.id = r.product_id AND p.organization_id = r.organization_id
        WHERE r.organization_id = $1 AND r.old_slug = $2
-         AND p.deleted_at IS NULL AND p.active AND p.published
+         AND p.deleted_at IS NULL AND p.published
+         AND (p.active OR EXISTS (
+           SELECT 1 FROM departments d WHERE d.organization_id=p.organization_id
+             AND d.id=p.department_id AND d.deleted_at IS NULL AND d.slug='satovi'
+         ))
        LIMIT 1`,
       [ctx.organizationId, oldSlug]
     );
