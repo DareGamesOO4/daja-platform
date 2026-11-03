@@ -360,7 +360,7 @@ export class MediaRepository {
     const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
     const original = await prepareAvifMainImage(bytes);
     const mainKey = uploadedImageStorageKey(asset.storage_key)
-      .replace(/-avif65-webp75-main\.webp$/, `-${randomUUID().slice(0, 8)}-avif65-webp75-main.avif`);
+      .replace(/-avif65-webp75-main\.webp$/, `-${randomUUID()}-avif65-webp75-main.avif`);
     const publicUrl = requiredPublicUrl(storage, mainKey);
     const processed = { original, mimeType: 'image/avif' as const };
     const objects = [{ key: mainKey, image: original, mimeType: 'image/avif' as const }];

@@ -260,7 +260,8 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         );
         const deferred = await client.query(
           `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,
-         paused_at=CASE WHEN attempts>=8 THEN now() ELSE paused_at END,
+         paused_at=CASE WHEN $5::text IS NOT NULL AND attempts>=8 THEN now() ELSE paused_at END,
+         attempts=CASE WHEN $5::text IS NULL THEN greatest(attempts-1,0) ELSE attempts END,
          last_error_code=CASE WHEN $5::text IS NOT NULL THEN $5 ELSE last_error_code END,
          last_error_at=CASE WHEN $5::text IS NOT NULL THEN now() ELSE last_error_at END,
          available_at=now()+($4*interval '1 second') WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3`,
