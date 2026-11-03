@@ -46,8 +46,9 @@ Stvarne runtime vrednosti proveriti zasebno; render.yaml nije dokaz njihove vred
 
 - SNS sandbox ima jedan verifikovan broj; broj uvek proveriti u konzoli.
 - Sender ID `DAJASHOP/RS` postoji i ima SNS resource policy.
-- IAM `dajashop-ses-sender` / `DajaShopSnsPublishOnly` tokom pregleda ima samo
-  `sns:Publish`: dopuna iznad je pripremljena, ali ovim dokumentom nije primenjena.
+- IAM `dajashop-ses-sender` / `DajaShopSnsPublishOnly` je korisnik sacuvao
+  03.11.2026; konzola potvrdjuje dopunu `SendDajaShopSmsViaSns` iznad.
+  Politika dozvoljava slanje samo kroz SNS, sa sender ID-a `DAJASHOP/RS`.
 - CloudWatch failure log od 28.10.2026. navodi odbijen pristup resursima.
   Jedan pokusaj ide na verifikovan broj, drugi na razlicit broj.
 - SMS Protect konfiguracije ne postoje; SMS limit je 1 USD, potrosnja 0 USD.
