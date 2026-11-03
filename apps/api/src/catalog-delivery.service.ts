@@ -129,6 +129,7 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
               'sitemap:v5',
               'sitemap:v6',
               'sitemap:v7',
+              'sitemap:v8',
               'merchant-feed',
               'merchant-feed:v2',
               'merchant-feed:v3'

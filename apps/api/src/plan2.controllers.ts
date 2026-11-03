@@ -333,7 +333,7 @@ export class PublicCatalogController {
   @Get('sitemap.xml')
   async sitemap(@Req() request: Request, @Res() response: Response): Promise<void> {
     const ctx = this.publicContext(request);
-    const cacheKey = `catalog:sitemap:v7:${ctx.organizationId}`;
+    const cacheKey = `catalog:sitemap:v8:${ctx.organizationId}`;
     const cached = await this.redis.client.get(cacheKey);
     if (cached) {
       response
@@ -368,7 +368,8 @@ export class PublicCatalogController {
     const localizedEntries = (path: string, details = '') => {
       const serbianUrl = `${siteUrl}${path}`;
       const englishUrl = `${siteUrl}/en${path === '/' ? '' : path}`;
-      const alternates = `<xhtml:link rel="alternate" hreflang="sr" href="${escapeXml(serbianUrl)}"/><xhtml:link rel="alternate" hreflang="en" href="${escapeXml(englishUrl)}"/><xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(serbianUrl)}"/>`;
+      const serbianRegions = ['sr', ...['RS', 'ME', 'MK', 'BA', 'HR', 'BG', 'SI', 'AL', 'RO', 'HU', 'GR'].map(country => `sr-${country}`)];
+      const alternates = serbianRegions.map(code => `<xhtml:link rel="alternate" hreflang="${code}" href="${escapeXml(serbianUrl)}"/>`).join('') + `<xhtml:link rel="alternate" hreflang="en" href="${escapeXml(englishUrl)}"/><xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(englishUrl)}"/>`;
       return [serbianUrl, englishUrl].map(url => `<url><loc>${escapeXml(url)}</loc>${alternates}${details}</url>`).join('');
     };
     const staticEntries = [
@@ -2870,6 +2871,7 @@ export class StaffCatalogController {
       `catalog:sitemap:v5:${organizationId}`,
       `catalog:sitemap:v6:${organizationId}`,
       `catalog:sitemap:v7:${organizationId}`,
+      `catalog:sitemap:v8:${organizationId}`,
       `catalog:merchant-feed:${organizationId}`,
       `catalog:merchant-feed:v2:${organizationId}`,
       `catalog:merchant-feed:v3:${organizationId}`,
