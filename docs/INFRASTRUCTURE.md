@@ -12,8 +12,13 @@
 - Meta portfolio DajaShop ima dopunjene poslovne podatke. WhatsApp profil je
   kreiran opcijom Use a display name only; poslednje vidjeno stanje Pending.
   Korisnik je zatim odobrio WhatsApp/Cloud API uslove i kreiran je Messaging
-  account DajaShop (2239869233236176), status Approved, bez payment method-a.
-  Odobreni predlosci i serverska integracija slanja nisu dovrseni.
+  account DajaShop (2239869233236176), status Approved. Korisnik je dodao
+  payment method; billing prikazuje EUR i dug 0,00 EUR (04.11.2026).
+  Predlosci daja_newsletter_v1 (sr, body: tekst novosti) i daja_price_drop_v1
+  (sr, body: proizvod/stara cena/nova cena/URL) poslati su kao Marketing i
+  imaju status In review. Oba sadrze odjavu odgovorom STOP; obrada odgovora
+  i serverska integracija slanja tek treba da se implementiraju. WhatsApp
+  profil je poslednji put vidjen kao Pending. Nema aktiviranog slanja.
   Firebase Phone sluzi za proveru identiteta, ne marketing slanje.
 - Postojece pretplate i njihove saglasnosti nisu menjane. Izbor kanala ne
   predstavlja saglasnost za dodatni marketing i ne prijavljuje kupca samostalno.
