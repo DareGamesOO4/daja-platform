@@ -119,6 +119,7 @@ const reviewSchema = z.object({
 });
 
 const newsletterSchema = z.object({
+  deliveryChannel: z.enum(['email', 'sms', 'whatsapp']).default('email'),
   email: z.string().email().optional(),
   managementToken: z.string().trim().min(24).max(160).optional(),
   source: z.string().trim().min(1).max(80).optional(),
@@ -132,7 +133,7 @@ const newsletterSchema = z.object({
 const productAlertSchema = z.object({
   type: z.enum(['back_in_stock', 'price_change']),
   variantId: uuidSchema,
-  deliveryChannel: z.enum(['email', 'sms']).default('email'),
+  deliveryChannel: z.enum(['email', 'sms', 'whatsapp']).default('email'),
   email: z.string().trim().email().max(240).optional(),
   phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/).optional(),
   managementToken: z.string().trim().min(24).max(160).optional(),
@@ -868,6 +869,9 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertSchema, body);
+    if (input.deliveryChannel === 'whatsapp') {
+      throw new ValidationFailedError('WhatsApp obaveštenja još nisu dostupna. Za sada izaberite Email.');
+    }
     const email = input.deliveryChannel === 'email' ? customer?.email ?? input.email : undefined;
     return this.productAlerts.subscribe({
       organizationId: publicOrganizationId(this.config),
@@ -932,6 +936,11 @@ export class StorefrontContentController {
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async subscribe(@Req() request: Request, @Body() body: unknown) {
     const input = parseWithSchema(newsletterSchema, body);
+    if (input.deliveryChannel !== 'email') {
+      throw new ValidationFailedError(input.deliveryChannel === 'whatsapp'
+        ? 'WhatsApp obaveštenja još nisu dostupna. Za sada izaberite Email.'
+        : 'SMS obaveštenja još nisu dostupna. Za sada izaberite Email.');
+    }
     const organizationId = publicOrganizationId(this.config);
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;

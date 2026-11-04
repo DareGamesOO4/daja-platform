@@ -1,5 +1,22 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: izbor kanala obavestenja, 04.11.2026.
+
+- Newsletter (prozor, footer i nova prijava u nalogu) i obavestenja o artiklima
+  prikazuju WhatsApp/SMS/Email; WhatsApp je unapred oznacen. Pre potvrde se
+  prikazuju izabrani kanal, kontakt i objasnjenje da WhatsApp nije SMS.
+- Ovo je priprema korisnickog izbora, NE aktivacija SMS/WhatsApp slanja.
+  Mobilni kanali imaju vidljivo obavestenje da jos nisu dostupni i blokiranu
+  potvrdu; email double opt-in ostaje dostupan. API odbija nepodrzane kanale
+  pre upisa, bez tihog prebacivanja newsletter zahteva na email.
+- Meta portfolio DajaShop ima dopunjene poslovne podatke. WhatsApp profil je
+  kreiran opcijom Use a display name only; poslednje vidjeno stanje Pending.
+  Messaging account, odobreni predlosci i serverska integracija slanja nisu
+  dovrseni. Firebase Phone sluzi za proveru identiteta, ne marketing slanje.
+- Postojece pretplate i njihove saglasnosti nisu menjane. Izbor kanala ne
+  predstavlja saglasnost za dodatni marketing i ne prijavljuje kupca samostalno.
+- Bez testova i provere deploy-a. Android uredjaj nije povezan.
+
 ## Dopuna: oporavak prekinutih upload-a i ograničeni noćni retry, 03.11.2026.
 
 - Brisanje artikla briše njegove `product_media` veze i u istoj transakciji
