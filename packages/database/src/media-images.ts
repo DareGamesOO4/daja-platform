@@ -102,18 +102,20 @@ async function isolatedEncode<T>(
         45_000
       );
       signal?.addEventListener('abort', abort, { once: true });
-      child.once('error', () =>
+      child.once('error', (error: NodeJS.ErrnoException) =>
         finish(
           new AppError(
             'IMAGE_PROCESSING_FAILED',
             'Image processing is temporarily unavailable',
-            503
+            503,
+            { encoderFailure: 'spawn', systemError: error.code }
           )
         )
       );
-      child.once('exit', () =>
+      child.once('exit', (exitCode, terminationSignal) =>
         finish(
-          new AppError('IMAGE_PROCESSING_FAILED', 'Image processor stopped. Please retry.', 503)
+          new AppError('IMAGE_PROCESSING_FAILED', 'Image processor stopped. Please retry.', 503,
+            { encoderFailure: 'exit', exitCode, terminationSignal })
         )
       );
       child.once('message', (message: { ok?: boolean; result?: T }) => {

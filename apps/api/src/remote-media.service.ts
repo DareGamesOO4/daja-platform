@@ -19,7 +19,7 @@ import {
   type Database,
   TransactionManager
 } from '@daja/database';
-import { ValidationFailedError } from '@daja/security';
+import { AppError, ValidationFailedError } from '@daja/security';
 import { createLogger } from '@daja/observability';
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
@@ -120,6 +120,8 @@ async function importRemoteImageNow(input: {
     productSlug: input.productSlug, imageIndex: input.imageIndex, extension: '.source'
   });
   const createdKeys = new Set<string>();
+  const startedAt = Date.now();
+  let stage = 'insert_asset';
   try {
     const inserted = await input.database.pool.query<MediaAssetRow>(
       `INSERT INTO media_assets (id, organization_id, storage_provider, storage_bucket, storage_key,
@@ -135,16 +137,30 @@ async function importRemoteImageNow(input: {
     const asset = inserted.rows[0]!;
     // Remote sources also need a durable original for the three overnight files.
     createdKeys.add(sourceKey);
+    stage = 'store_source';
     await storage.putObject({ key: sourceKey, body: downloaded.buffer,
       contentType: asset.mime_type, cacheControl: 'private, no-store' });
+    stage = 'prepare_image';
     const prepared = await repository.stageUploadedImage(
       { organizationId: input.organizationId }, mediaId, storage, createdKeys, { asset, bytes: downloaded.buffer });
+    stage = 'publish_image';
     const result = await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(client =>
       new MediaRepository(client).optimizeUploadedImage(
         { organizationId: input.organizationId }, mediaId, storage, createdKeys, undefined, prepared));
     return { id: mediaId, mediaId, publicUrl: result.publicUrl, mainImageUrl: result.mainImageUrl,
       thumbnailUrl: result.thumbnailUrl, storageKey: result.storageKey, width: result.width, height: result.height };
   } catch (error) {
+    // Correlate the admin alert with the failing operation, without logging
+    // source/signed URLs, SQL, file contents or provider exception messages.
+    const details = error instanceof AppError ? error.details : {};
+    createLogger(input.config, 'remote-media').error({
+      err: error, mediaId, productSlug: input.productSlug, imageIndex: input.imageIndex,
+      stage, elapsedMs: Date.now() - startedAt, sourceBytes: downloaded.buffer.length,
+      encoderFailure: ['spawn', 'exit'].includes(String(details.encoderFailure)) ? details.encoderFailure : undefined,
+      exitCode: typeof details.exitCode === 'number' ? details.exitCode : undefined,
+      terminationSignal: typeof details.terminationSignal === 'string' && /^SIG[A-Z]+$/.test(details.terminationSignal) ? details.terminationSignal : undefined,
+      systemError: typeof details.systemError === 'string' && /^[A-Z0-9_]{1,40}$/.test(details.systemError) ? details.systemError : undefined,
+    }, 'Remote image import failed');
     await input.database.pool.query(`UPDATE media_assets SET status='failed', updated_at=now()
       WHERE organization_id=$1 AND id=$2 AND status='uploaded'`, [input.organizationId, mediaId]).catch(() => undefined);
     await recordMediaFailure(input.database.pool,input.organizationId,mediaId,'upload',error).catch(() => undefined);

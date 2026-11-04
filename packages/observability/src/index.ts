@@ -13,9 +13,10 @@ export function createLogger(config: Pick<AppConfig, 'LOG_LEVEL' | 'NODE_ENV'>, 
       err: config.NODE_ENV === 'production'
         ? (error: unknown) => ({
             type: error instanceof Error ? error.name : 'Error',
-            // Provider error messages/details can contain SQL, PII or URLs.
-            code: error && typeof error === 'object' && 'code' in error
-              && typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : undefined
+            // Provider messages/details can contain SQL, PII or URLs. Use a
+            // distinct key for technical codes: `code` is redacted for OTPs.
+            errorCode: error && typeof error === 'object' && 'code' in error
+              && typeof error.code === 'string' && /^(?:[A-Z][A-Z0-9_]{0,39}|[0-9A-Z]{5})$/.test(error.code) ? error.code : undefined
           })
         : pino.stdSerializers.err
     },
