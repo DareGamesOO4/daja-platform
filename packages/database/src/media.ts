@@ -393,8 +393,7 @@ export class MediaRepository {
     }
     const bytes = source?.bytes ?? await storage.getObject(asset.storage_key);
     const original = await prepareAvifMainImage(bytes);
-    const mainKey = uploadedImageStorageKey(asset.storage_key)
-      .replace(/-avif65-webp75-main\.webp$/, `-${randomUUID()}-avif65-webp75-main.avif`);
+    const mainKey = productMediaVariantKeys(asset, randomUUID()).avif;
     const publicUrl = requiredPublicUrl(storage, mainKey);
     const processed = { original, mimeType: 'image/avif' as const };
     const objects = [{ key: mainKey, image: original, mimeType: 'image/avif' as const }];
@@ -624,6 +623,7 @@ export class MediaRepository {
 }
 
 export interface MediaAssetRow {
+  metadata?: Record<string, unknown>;
   id: string;
   organization_id: string;
   storage_provider: string;
@@ -708,14 +708,27 @@ export function productMediaStorageKey(input: {
     // The human-readable folder stays stable, but the object itself must be
     // unique. Otherwise an async delete of a replaced image can erase a newer
     // upload that reused the same product/index path.
-    return `${input.productSlug}/${input.productSlug}-${input.imageIndex}-${input.mediaId}${input.extension}`;
+    return `${input.productSlug}/${input.mediaId}/source/${input.productSlug}-${input.imageIndex}${input.extension}`;
   }
   return `org/${input.organizationId}/media/${input.mediaId}/original${input.extension}`;
 }
 
 function uploadedImageStorageKey(sourceKey: string): string {
+  if (sourceKey.includes('/source/')) return sourceKey.replace(/\/source\/([^/]+)\.[^/.]+$/, '/preview/$1.webp');
   // A fresh URL avoids caching the unprocessed upload as the optimized image.
   return sourceKey.replace(/(?:-avif65-webp75-main)?\.[^/.]+$/, '') + '-avif65-webp75-main.webp';
+}
+
+/** Clean filenames, immutable per-attempt folders: cleanup never targets a replacement. */
+export function productMediaVariantKeys(asset: MediaAssetRow, revision: string) {
+  const metadata = asset.metadata ?? {};
+  const slug = typeof metadata.productSlug === 'string'
+    ? metadata.productSlug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') : '';
+  const index = Number(metadata.imageIndex);
+  const name = `${slug || 'image'}-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
+  const folder = slug ? `${slug}/${asset.id}/${revision}` : `org/${asset.organization_id}/media/${asset.id}/${revision}`;
+  const base = `${folder}/${name}`;
+  return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };
 }
 
 export function productMediaThumbnailStorageKey(input: {
@@ -727,8 +740,8 @@ export function productMediaThumbnailStorageKey(input: {
   if (input.originalKey.endsWith('-avif65-webp75-main.webp')) {
     return input.originalKey.replace(/-main\.webp$/, '-thumb.webp');
   }
-  // Preserve the layout of existing objects. Newly uploaded product assets use
-  // one flat product-slug folder for both originals and thumbnails.
+  // Preserve the layout of existing org assets. Product versions keep the
+  // thumbnail beside their main file with a short -thumb suffix.
   if (input.originalKey.startsWith('org/')) {
     return `org/${input.organizationId}/media/${input.mediaId}/derivatives/${input.width}.webp`;
   }

@@ -12,6 +12,7 @@ import {
   StorefrontRepository,
   TransactionManager,
   prepareRemainingImageVariants,
+  productMediaVariantKeys,
   runMediaProcessing,
   sha256,
   type Database,
@@ -138,16 +139,18 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       if (sha256(source) !== job.source_checksum)
         throw new AppError('IMAGE_SOURCE_CHANGED', 'Deferred image source checksum mismatch', 409);
       const { webp, avifThumbnail } = await prepareRemainingImageVariants(source);
-      const mainKey = job.avif_main_key.replace(
-        /-avif65-webp75-main\.avif$/,
-        `-${token}-avif65-webp75-main.webp`
-      );
-      const thumbKey = mainKey.replace(/-main\.webp$/, '-thumb.webp');
+      const keys = productMediaVariantKeys(asset, token);
+      const mainKey = keys.webp;
+      const thumbKey = keys.webpThumb;
       const objects = [
         { key: mainKey, image: webp.original, mimeType: 'image/webp' },
         { key: thumbKey, image: webp.thumbnail, mimeType: 'image/webp' },
-        { key: thumbKey.replace(/\.webp$/, '.avif'), image: avifThumbnail, mimeType: 'image/avif' }
+        { key: keys.avifThumb, image: avifThumbnail, mimeType: 'image/avif' }
       ];
+      // AVIF is already encoded. Copy it beside WebP so format selection can
+      // replace only the extension. Keep the original URL valid for old pages.
+      created.add(keys.avif);
+      await storage.copyObject(job.avif_main_key, keys.avif);
       for (const object of objects) {
         created.add(object.key);
         await storage.putObject({
@@ -206,6 +209,13 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
           },
           replaceDerivatives: true,
           derivatives: [
+            {
+              storageKey: keys.avif,
+              publicUrl: publicUrl(keys.avif),
+              width: current.width!, height: current.height!, mimeType: 'image/avif',
+              sizeBytes: Number(current.size_bytes),
+              ...(current.checksum_sha256 ? { checksumSha256: current.checksum_sha256 } : {})
+            },
             {
               storageKey: current.storage_key,
               publicUrl: publicUrl(current.storage_key),
