@@ -25,9 +25,13 @@ process.once(
               : message.product
                 ? await prepareProductVariants(message.source)
                 : await prepareImageVariants(message.source, message.options);
-        process.send?.({ ok: true, result }, () => process.disconnect());
+        // A successful send callback does not acknowledge receipt by the
+        // parent. Keep IPC open until the parent receives the result and
+        // terminates this child in isolatedEncode.finish(). Otherwise a clean
+        // exit can race the buffered image payload and be reported as failure.
+        process.send?.({ ok: true, result });
       } catch {
-        process.send?.({ ok: false }, () => process.disconnect());
+        process.send?.({ ok: false });
       }
     })();
   }
