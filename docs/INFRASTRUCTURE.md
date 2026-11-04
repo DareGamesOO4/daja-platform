@@ -1,5 +1,31 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: WhatsApp verifikacija i Meta blokada, 04.11.2026.
+
+- Prijava telefonom i povezivanje broja u web profilu nude SMS i WhatsApp.
+  Kanal se prikazuje pre slanja i pri unosu koda. SMS ostaje podrazumevan
+  za verifikaciju; WhatsApp je podrazumevan samo u newsletter/alert izboru.
+- Backend ima odvojen WhatsApp OTP servis preko Meta Cloud API-ja. Sestocifren
+  kod vazi 5 minuta; Redis cuva samo HMAC uz nasumican challenge, vezan za
+  organizaciju/broj/svrhu/kupca i HttpOnly browser nonce. Najvise 5 pokusaja,
+  atomska jednokratna potrosnja; zajednicki SMS/WhatsApp cooldown od 60 sekundi.
+  Dodatni globalni limit je 100 WhatsApp OTP pokusaja slanja / 24 sata od
+  prve potrosnje (podesiv). Nema automatskog retry-a ili SMS fallback-a.
+- WhatsApp dostupnost zahteva ukljucenu konfiguraciju, odobrene sr/en OTP
+  predloske, tajni API token, stvarni phone-number ID i zaseban OTP HMAC kljuc.
+  Nista od toga nije aktivirano na Renderu. Tajne nisu upisane u repozitorijum.
+  Konfiguracija/aktivacija: daja-platform/docs/WHATSAPP_OTP.md.
+- Pokusaj kreiranja daja_verification_v1 (Authentication, copy code, en,
+  istek/validity 5 minuta) Meta je odbila: restricted from creating a new template.
+  Predlozak NIJE kreiran/odobren. Srpska verzija ostaje pripremljena u dokumentu.
+- Business Support Home potvrdjuje da je Messaging account 2239869233236176
+  Disabled od 04.11.2026, Duration Permanent, Terms of Acceptable Use. Omogucen
+  je Request review; zahtev nije poslat bez korisnikovog naloga za to.
+  Ovo ima prednost nad ranijim statusom Approved/Pending u istoriji ispod.
+- API/worker TypeScript i web build prolaze. Bez testova, stvarnih OTP poruka
+  ili provere deploy-a. Android uredjaj nije povezan; mobilni/desktop izvor
+  nema zaseban SMS OTP tok. Korisnicka IDE cache izmena nije dirana.
+
 ## Dopuna: izbor kanala obavestenja, 04.11.2026.
 
 - Newsletter (prozor, footer i nova prijava u nalogu) i obavestenja o artiklima

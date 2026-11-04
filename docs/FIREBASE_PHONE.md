@@ -60,13 +60,9 @@ References:
 - https://firebase.google.com/docs/auth/admin/verify-id-tokens
 - https://firebase.google.com/docs/auth/limits
 
-## WhatsApp follow-up
+## WhatsApp follow-up — 04.11.2026.
 
-User also requested WhatsApp OTP preparation. Firebase Phone has no WhatsApp
-channel. A separate Meta WhatsApp Business setup is needed. User signed in to Facebook. Creation of the DajaShop business portfolio was
-attempted, but Meta rejected it: Facebook account too new; try again in an hour.
-The user selected a business phone ending 2425, but has not yet confirmed whether
-it already uses WhatsApp or WhatsApp Business. Do not migrate it without approval.
-No Meta credentials, business phone, approved authentication template or billing
-has been supplied. No WhatsApp provider is active or implemented in this change.
-Do not invent account/phone IDs or use a personal WhatsApp session as an API.
+SMS continues through Firebase; WhatsApp now has a separate gated backend OTP
+provider and explicit channel selection in phone login/profile linking.
+See [WHATSAPP_OTP.md](WHATSAPP_OTP.md) for configuration, template drafts and the
+current Meta account restriction. WhatsApp has not been activated in production.

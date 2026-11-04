@@ -39,6 +39,7 @@ import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
 import { PromotionsService } from './promotions.service.js';
+import { WhatsAppOtpService } from './whatsapp-otp.service.js';
 import { PhoneOtpService } from './phone-otp.service.js';
 
 const registerSchema = z.object({
@@ -53,11 +54,16 @@ const loginSchema = z.object({
 });
 const phoneOtpStartSchema = z.object({
   phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Unesite broj u međunarodnom formatu.'),
-  purpose: z.enum(['login', 'link']).optional()
+  purpose: z.enum(['login', 'link']).optional(),
+  channel: z.enum(['sms', 'whatsapp']).default('sms'),
+  language: z.enum(['sr', 'en']).default('sr')
 });
 const phoneOtpVerifySchema = phoneOtpStartSchema.extend({
-  firebaseIdToken: z.string().min(100).max(16384),
+  firebaseIdToken: z.string().min(100).max(16384).optional(),
+  code: z.string().regex(/^\d{6}$/).optional(),
   challengeToken: z.string().regex(/^[a-f0-9]{64}$/)
+}).refine(value => value.channel === 'whatsapp' ? Boolean(value.code) : Boolean(value.firebaseIdToken), {
+  message: 'Kod je istekao ili nije ispravan. Zatražite novi kod.'
 });
 
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
@@ -176,12 +182,13 @@ export class CustomerAuthController {
     @Inject(AuthService) private readonly staffAuth: AuthService,
     @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService,
     @Inject(PhoneOtpService) private readonly phoneOtp: PhoneOtpService,
+    @Inject(WhatsAppOtpService) private readonly whatsappOtp: WhatsAppOtpService,
     private readonly realtime: RealtimeGateway
   ) {}
 
   @Get('security-capabilities')
   securityCapabilities() {
-    return { firebasePhone: this.phoneOtp.publicConfig(), googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true, passkeys: true };
+    return { whatsappPhone: { available: this.whatsappOtp.available() }, firebasePhone: this.phoneOtp.publicConfig(), googleOAuthBrowserState: true, browserSessions: this.config.BROWSER_SESSIONS_ENABLED, edgeGateway: true, passkeys: true };
   }
 
   @Get('browser-session')
@@ -303,13 +310,16 @@ export class CustomerAuthController {
     const customer =
       purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
     const browserNonce = beginBrowserPhone(request, response);
-    return this.phoneOtp.start({
+    const otpInput = {
       ...(browserNonce ? { browserNonce } : {}),
       organizationId: customer?.organizationId ?? publicOrganizationId(this.config),
       phone: input.phone,
       purpose,
       ...(customer ? { customerId: customer.customerId } : {})
-    });
+    };
+    return input.channel === 'whatsapp'
+      ? this.whatsappOtp.start({ ...otpInput, language: input.language })
+      : this.phoneOtp.start(otpInput);
   }
 
   @Post('phone/verify')
@@ -321,15 +331,23 @@ export class CustomerAuthController {
       purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
     const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
     const browserNonce = consumeBrowserPhone(request, response);
-    await this.phoneOtp.verify({
+    const otpInput = {
       ...(browserNonce ? { browserNonce } : {}),
       organizationId,
       phone: input.phone,
       purpose,
-      firebaseIdToken: input.firebaseIdToken,
       challengeToken: input.challengeToken,
       ...(customer ? { customerId: customer.customerId } : {})
-    });
+    };
+    try {
+      if (input.channel === 'whatsapp') await this.whatsappOtp.verify({ ...otpInput, code: input.code! });
+      else await this.phoneOtp.verify({ ...otpInput, firebaseIdToken: input.firebaseIdToken! });
+    } catch (error) {
+      // Preserve the same HttpOnly browser binding for a bounded OTP retry.
+      // The Redis challenge owns expiry, attempt limits, and one-time consumption.
+      if (input.channel === 'whatsapp') beginBrowserPhone(request, response);
+      throw error;
+    }
 
     if (customer) {
       return {
