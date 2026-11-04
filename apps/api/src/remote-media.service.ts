@@ -14,6 +14,7 @@ import {
   prepareImageVariants,
   runMediaProcessing,
   recordMediaFailure,
+  resolveMediaFailures,
   type ImageOutputOptions,
   type Database,
   TransactionManager
@@ -75,7 +76,42 @@ async function importRemoteImageNow(input: {
   sourceUrl: string;
   productSlug?: string;
   imageIndex?: number;
+  clientRequestId?: string;
 }): Promise<RemoteMediaImportResult> {
+  const repository = new MediaRepository(input.database.pool);
+  if (input.clientRequestId) {
+    const existing = (await input.database.pool.query<{ id: string; status: string; source_url: string | null }>(
+      `SELECT id,status,metadata->>'sourceUrl' AS source_url FROM media_assets
+       WHERE organization_id=$1 AND metadata->>'clientRequestId'=$2 LIMIT 1`,
+      [input.organizationId, input.clientRequestId]
+    )).rows[0];
+    if (existing && existing.source_url !== input.sourceUrl)
+      throw new ValidationFailedError('Image retry key was already used for a different source');
+    if (existing?.status === 'ready') {
+      const ready = await repository.readyUpload({ organizationId: input.organizationId }, existing.id);
+      if (ready) return {
+        id: existing.id, mediaId: existing.id, publicUrl: ready.publicUrl,
+        mainImageUrl: ready.mainImageUrl, thumbnailUrl: ready.thumbnailUrl,
+        storageKey: ready.storageKey, width: ready.width, height: ready.height
+      };
+    }
+    if (existing) await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(async client => {
+      await client.query(
+        `UPDATE media_assets SET metadata=COALESCE(metadata,'{}'::jsonb)-'clientRequestId',
+         status=CASE WHEN deleted_at IS NULL THEN 'failed' ELSE status END,updated_at=now()
+         WHERE organization_id=$1 AND id=$2`,
+        [input.organizationId, existing.id]
+      );
+      await resolveMediaFailures(client,input.organizationId,existing.id,undefined,'removed');
+      await client.query(
+        `INSERT INTO media_storage_deletions(organization_id,storage_key)
+         SELECT organization_id,storage_key FROM media_assets WHERE organization_id=$1 AND id=$2
+         AND storage_provider='r2' AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2)
+         ON CONFLICT DO NOTHING`,
+        [input.organizationId,existing.id]
+      );
+    });
+  }
   const downloaded = await downloadRemoteImage(input.sourceUrl);
   const mediaId = randomUUID();
   const storage = new R2MediaStorageAdapter(input.config);
@@ -84,7 +120,6 @@ async function importRemoteImageNow(input: {
     productSlug: input.productSlug, imageIndex: input.imageIndex, extension: '.source'
   });
   const createdKeys = new Set<string>();
-  const repository = new MediaRepository(input.database.pool);
   try {
     const inserted = await input.database.pool.query<MediaAssetRow>(
       `INSERT INTO media_assets (id, organization_id, storage_provider, storage_bucket, storage_key,
@@ -94,7 +129,8 @@ async function importRemoteImageNow(input: {
         downloaded.contentType || 'image/jpeg', downloaded.buffer.length, sha256(downloaded.buffer),
         JSON.stringify({ sourceUrl: input.sourceUrl, sourceMimeType: downloaded.contentType,
           sourceSizeBytes: downloaded.buffer.length, productSlug: input.productSlug ?? null,
-          imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString() })]
+          imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString(),
+          ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}) })]
     );
     const asset = inserted.rows[0]!;
     // Remote sources also need a durable original for the three overnight files.

@@ -2982,7 +2982,8 @@ export class MediaController {
       z.object({
         url: z.string().url().max(2_000),
         productSlug: slugSchema.optional(),
-        imageIndex: z.coerce.number().int().min(1).max(999).optional()
+        imageIndex: z.coerce.number().int().min(1).max(999).optional(),
+        clientRequestId: uuidSchema.optional()
       }),
       body
     );
@@ -2992,7 +2993,8 @@ export class MediaController {
       organizationId: ctx.organizationId,
       sourceUrl: input.url,
       ...(input.productSlug ? { productSlug: input.productSlug } : {}),
-      ...(input.imageIndex ? { imageIndex: input.imageIndex } : {})
+      ...(input.imageIndex ? { imageIndex: input.imageIndex } : {}),
+      ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {})
     });
   }
 
@@ -3087,6 +3089,16 @@ export class MediaController {
         .catch(alertError => this.logger.warn({err:alertError},'Could not persist image notification'));
       throw error;
     });
+  }
+
+  @Post('uploads/:mediaId/resume')
+  async resumeUpload(@Req() request: Request, @Param('mediaId') mediaId: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'media.upload');
+    const id = parseWithSchema(uuidSchema, mediaId);
+    return new TransactionManager(this.database.pool, this.logger).run(client =>
+      new MediaRepository(client).resumePendingUpload(ctx, id, new R2MediaStorageAdapter(this.config))
+    );
   }
 
   /** Deletes a completed or pending upload that was never attached to a product. */

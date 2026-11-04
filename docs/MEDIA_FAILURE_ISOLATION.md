@@ -2,13 +2,16 @@
 
 ## Oporavak prekinutih upload-a i konačan retry, 03.11.2026.
 
-- Odabir više fajlova i red čekanja postoje samo u memoriji aktivnog taba. Pad
-  taba/računara pre `complete` ne može nastaviti prenos automatski; korisnik mora
-  ponovo izabrati nezavršene fajlove. Server-side upload koji ostane `pending_upload`
-  uklanja reaper nakon 24 h, kada je 15-minutni potpisani PUT URL odavno istekao.
-- Ako je API već završio upload, a tab se sruši, asset ostaje spreman i njegov noćni
-  posao ostaje trajan. Lease ističe posle prekida API procesa; sledeći tick ga ponovo
-  preuzima. Draft artikla čuva završene media ID-jeve u browser storage-u.
+- Red izabranih fajlova i njihovi File blob-ovi čuvaju se u IndexedDB pregledača,
+  odvojeno po admin korisniku i ID-u artikla/nacrta. Posle restarta taba upload se
+  nastavlja istim media ID-jem; API izdaje novi kratkotrajan PUT URL. Bez mreže red
+  čeka `online` događaj. Ako IndexedDB nije dostupan, upload se ne pokreće.
+- Nezavršeni `pending_upload`, `uploaded` i `failed` image asset-i bez veze/noćnog
+  posla čiste se nakon 24 h. Link-import šalje stabilan ID zahteva, pa ponavljanje
+  posle izgubljenog odgovora vraća postojeću sliku umesto novog duplikata.
+- Ako je API već završio upload, a tab se sruši, asset ostaje spreman, a IndexedDB
+  zapis vraća ga u nacrt po media ID-ju. Njegov noćni posao ostaje trajan. Lease
+  ističe posle prekida API procesa; sledeći tick ga ponovo preuzima.
 - Brisanje artikla uklanja product-media reference i poziva `discardUnreferenced`
   u istoj SQL transakciji. Ako noćni enkoder već radi, završna transakcija zahteva
   važeći lease, postojeći ready asset i isti AVIF ključ, pa ne može oživeti obrisanu
@@ -19,7 +22,8 @@
   poruke; procesni crash se otkriva kroz istek lease-a.
 - Svaki noćni pokušaj piše WebP fajlove pod jedinstvenim ključevima. Cleanup
   ponovo proverava DB reference i neuspeh R2 brisanja stavlja u trajni red.
-  Provera je iz izvornog koda; testovi i deploy nisu pokretani.
+  Migracije 101/102 dodaju retry limit i zaštitu od duplog URL importa. Provera je
+  iz izvornog koda; testovi i deploy nisu pokretani.
 
 ## Dopuna: velika AVIF odmah, preostala tri fajla nocu, 03.11.2026.
 

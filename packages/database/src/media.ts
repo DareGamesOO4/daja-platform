@@ -298,6 +298,40 @@ export class MediaRepository {
     return { mediaId, storageKey, publicUrl, ...presign };
   }
 
+  /** Reissue a short-lived PUT URL so a browser can resume the same asset after
+   * losing its connection or being restarted. Ready assets are idempotent. */
+  async resumePendingUpload(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter) {
+    const ready = await this.readyUpload(ctx, mediaId);
+    if (ready) {
+      const { storageKey: _storageKey, obsoleteStorageKeys: _obsoleteStorageKeys, ...response } = ready;
+      return response;
+    }
+    const asset = (await this.client.query<MediaAssetRow>(
+      `SELECT * FROM media_assets WHERE organization_id=$1 AND id=$2 AND status='pending_upload'
+       AND deleted_at IS NULL AND created_at>=now()-interval '23 hours' FOR UPDATE`,
+      [ctx.organizationId, mediaId]
+    )).rows[0];
+    if (!asset) throw new ResourceNotFoundError('resumable media upload');
+    if (asset.status !== 'pending_upload') throw new ValidationFailedError('Media upload can no longer be resumed');
+    const presign = await storage.createPresignedPut({
+      key: asset.storage_key,
+      mimeType: asset.mime_type,
+      sizeBytes: Number(asset.size_bytes),
+      ...(asset.checksum_sha256 ? { checksumSha256: asset.checksum_sha256 } : {})
+    });
+    const mainKey = uploadedImageStorageKey(asset.storage_key);
+    return {
+      mediaId,
+      status: 'pending_upload',
+      storageKey: asset.storage_key,
+      publicUrl: asset.mime_type.startsWith('image/') ? requiredPublicUrl(storage, mainKey) : asset.public_url,
+      ...(asset.mime_type.startsWith('image/') ? { thumbnailUrl: requiredPublicUrl(storage,
+        productMediaThumbnailStorageKey({ originalKey: mainKey, organizationId: ctx.organizationId,
+          mediaId, width: 512 })) } : {}),
+      ...presign
+    };
+  }
+
   /** Read/validate R2 bytes without holding a database transaction or row lock. */
   async readUploadedSource(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter) {
     const asset = await this.getForUpdate(ctx, mediaId);
@@ -555,8 +589,10 @@ export class MediaRepository {
       const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key),
         ...deferred.rows.map(row => row.source_key)]);
       for (const key of keys) await this.client.query(
-        `INSERT INTO media_storage_deletions (organization_id, storage_key) VALUES ($1,$2)
-         ON CONFLICT (organization_id, storage_key) DO NOTHING`, [ctx.organizationId, key]);
+        `INSERT INTO media_storage_deletions (organization_id, storage_key, available_at) VALUES ($1,$2,
+         CASE WHEN $3::boolean THEN now()+interval '16 minutes' ELSE now() END)
+         ON CONFLICT (organization_id, storage_key) DO NOTHING`,
+        [ctx.organizationId, key, asset.status === 'pending_upload' && key === asset.storage_key]);
     }
     await this.client.query(
       `DELETE FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2`,

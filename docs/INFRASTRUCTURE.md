@@ -6,11 +6,14 @@
   tombstonuje slike koje više nisu korišćene, uklanja njihov noćni posao i trajno
   zakazuje R2 brisanje. Aktivna noćna obrada proverava lease i stanje asset-a pre
   objave; obrisana slika se ne vraća u katalog.
-- Ako tab/računar nestane pre završetka upload-a, fajl koji je ostao u
-  `pending_upload` nema automatski nastavak jer izabrani fajl i lokalni red nisu
-  sačuvani serveru. API ga čisti posle 24 h, nakon isteka 15-minutnog PUT URL-a.
-  Uspešno završene slike i noćni poslovi su server-side; lease se oporavlja posle
-  restarta. Sačuvani novi artikal vraća media ID-jeve iz svog lokalnog nacrta.
+- Web red fajlova se čuva u IndexedDB pregledača, vezan za admin korisnika i artikal/nacrt.
+  Posle restarta taba red nastavlja upload istog media ID-a; API izdaje novi
+  15-minutni PUT URL i idempotentno dovršava već gotov prenos. Bez interneta red
+  čeka browser `online` događaj. Fajlovi su lokalni tom pregledaču/računaru.
+- Zaboravljeni `pending_upload`, `uploaded` i `failed` image asset-i bez veza i
+  noćnog posla čiste se nakon 24 h. Noćni poslovi su server-side; lease se oporavlja
+  posle restarta. Link-import koristi jedinstven ID zahteva da retry ne napravi
+  duplikat ako je server već završio pre izgubljenog odgovora.
 - Noćna obrada se zaustavlja posle 8 neuspešnih pokušaja, čuva grešku u admin
   kartici i čeka ručni retry koji resetuje brojač. Svaki pokušaj koristi jedinstvene
   WebP ključeve; neuspešno neposredno brisanje ide u trajni R2 cleanup red.

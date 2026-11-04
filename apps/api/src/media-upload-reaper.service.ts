@@ -29,8 +29,9 @@ export class MediaUploadReaperService implements OnModuleInit, OnModuleDestroy {
     try {
       const candidate = (await this.db.pool.query<{ organization_id: string; id: string }>(
         `SELECT a.organization_id,a.id FROM media_assets a
-         WHERE a.status='pending_upload' AND a.deleted_at IS NULL
+         WHERE a.status IN ('pending_upload','uploaded','failed') AND a.mime_type LIKE 'image/%' AND a.deleted_at IS NULL
          AND a.created_at<now()-interval '24 hours'
+         AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs j WHERE j.organization_id=a.organization_id AND j.media_asset_id=a.id)
          AND NOT EXISTS (SELECT 1 FROM product_media pm WHERE pm.organization_id=a.organization_id AND pm.media_asset_id=a.id)
          AND NOT EXISTS (SELECT 1 FROM brands b WHERE b.organization_id=a.organization_id AND b.logo_media_id=a.id AND b.deleted_at IS NULL)
          ORDER BY a.created_at,a.id LIMIT 1`
@@ -38,7 +39,9 @@ export class MediaUploadReaperService implements OnModuleInit, OnModuleDestroy {
       if (candidate) {
         await new TransactionManager(this.db.pool, this.logger).run(async client => {
           const current = (await client.query<{ id: string }>(
-            `SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2 AND status='pending_upload'
+            `SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2
+             AND status IN ('pending_upload','uploaded','failed') AND mime_type LIKE 'image/%'
+             AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs j WHERE j.organization_id=media_assets.organization_id AND j.media_asset_id=media_assets.id)
              AND deleted_at IS NULL AND created_at<now()-interval '24 hours' FOR UPDATE`,
             [candidate.organization_id, candidate.id]
           )).rows[0];
