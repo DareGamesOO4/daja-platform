@@ -71,6 +71,7 @@ const envSchema = z.object({
   WHATSAPP_OTP_DAILY_LIMIT: z.coerce.number().int().min(1).max(10000).default(100),
   WHATSAPP_NOTIFICATIONS_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   WHATSAPP_NOTIFICATION_TEMPLATES_APPROVED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  WHATSAPP_STOCK_ALERTS_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   WHATSAPP_BUSINESS_PHONE: z.string().regex(/^(\+[1-9]\d{7,14})?$/).default(''),
   WHATSAPP_APP_SECRET: optionalPreparedSecret,
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: optionalPreparedSecret,

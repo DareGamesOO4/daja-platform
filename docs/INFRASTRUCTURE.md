@@ -1,5 +1,32 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: WhatsApp API povezan, Authentication blokiran, 05.11.2026.
+
+- Nova Meta aplikacija DajaShop Poruke, ID 1444767067083457, uspesno je Published.
+  Novi WABA 1888317035945342 ima registrovan API broj +381641262425 i potvrdjeni
+  Phone Number ID 1329253216947689. Stari/probni +1 broj nije koriscen za integraciju.
+- Meta je validirala callback https://daja-platform-api.onrender.com/api/v1/whatsapp/webhook,
+  messages v27.0 je Subscribed, a novi WABA je potvrdio Successfully subscribed to
+  webhooks. API token, App Secret, verify token i OTP HMAC kljuc sacuvani su na
+  Render API servisu; Graph slanje v25.0. Tajne nisu u dokumentaciji/Git-u.
+- Newsletter i promena cene imaju podnete sr/en Marketing predloske, sva cetiri
+  In review. OTP daja_verification_v1 NIJE kreiran: Meta vraca This WhatsApp
+  business account does not have permission to create message template.
+- Business Verification firme je In review; Meta navodi oko dva radna dana.
+  To je moguc uzrok OTP zabrane, ali Meta greska ne potvrdjuje tacan preduslov.
+  Novi WABA u Business Support Home nema prikazanu policy violation stavku.
+  Posle verifikacije ponoviti OTP zahtev, pa Meta podrska ako zabrana ostane.
+- Korisnik je odobrio WhatsApp obavestenje o privatnosti/brisanje podataka na
+  https://dajashop.rs/whatsapp-privacy (sr/en), povezano sa Meta aplikacijom.
+  Opsta politika sajta /privacy ostaje zaseban tehnicki nacrt.
+- Korisnik je zatim iskljucio WhatsApp povratak na stanje. Njegov nezavrseni
+  predlozak nije podnet. WHATSAPP_STOCK_ALERTS_ENABLED=false blokira njegov web
+  izbor, nove pretplate, skeniranje i slanje. Za newsletter/promenu cene potrebna
+  su samo njihova cetiri odobrena jezicka predloska. OTP je odvojeno ogranicen.
+- Slanje ostaje iskljuceno do Meta odobrenja (approval/enabled=false). Nema testova,
+  slanja probnih poruka iz naseg koda ili provere zavrsetka deploy-a. Svi Meta
+  koraci sa uslovima/pristupom radjeni su uz korisnikovu izricitu potvrdu.
+
 ## Dopuna: novi WhatsApp nalog i kod za obavestenja, 05.11.2026.
 
 - Korisnik je promenio nalog. U Meta konzoli je potvrdjen Daja Shop, WABA

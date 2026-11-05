@@ -10,10 +10,26 @@ and authenticated phone-link ownership checks are retained.
 
 The user replaced the messaging account. Meta Business Suite now shows **Daja Shop**,
 WABA `1888317035945342`, **Approved**, business phone `+381641262425`, phone profile
-ID `1329253216947689`, type **WhatsApp Business App**, phone status **Offline**.
-This is not confirmation that Cloud API, credentials or templates are ready.
-Confirm the sender ID in API Setup; see [WHATSAPP_SETUP.md](WHATSAPP_SETUP.md).
+ID `1329253216947689`, now **Registered** in the Cloud API production setup.
+Meta app **DajaShop Poruke** (`1444767067083457`) was successfully published.
+The callback and messages webhook were saved, and the new WABA subscription
+returned "Successfully subscribed to webhooks". Server credentials were saved
+on Render without exposing their values. No deployment-completion check was made.
+See [WHATSAPP_SETUP.md](WHATSAPP_SETUP.md).
 The earlier restriction below belongs to the old account, not the new one.
+
+Authentication template creation is currently blocked on the new WABA:
+"This WhatsApp business account does not have permission to create message template".
+The attempted `daja_verification_v1` (English, Authentication, Copy code, security
+recommendation, expiration and validity five minutes) was NOT created. Do not
+describe it as pending approval. Business Verification for the legal business is
+**In review**; Meta states approximately two business days. That is a plausible
+cause of Authentication eligibility being unavailable, but the actual error does
+not explicitly identify verification as its cause or promise resolution afterward.
+Business Support Home showed no listed policy violation on the new WABA.
+Four Marketing templates (newsletter and price-change, sr/en) were accepted for
+review. OTP enable/approval flags remain false. After verification, retry the same
+Authentication setup and escalate the exact error to Meta if it persists.
 
 ## Historical blocker — old account, 04.11.2026
 

@@ -47,6 +47,9 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
   async request(input: { phone: string; purpose: Purpose; productId?: string | undefined;
     variantId?: string | undefined; policyVersion?: string | undefined; source?: string | undefined; language: 'sr' | 'en' }) {
     if (!this.available()) throw new ValidationFailedError(unavailable);
+    if (input.purpose === 'back_in_stock' && !this.config.WHATSAPP_STOCK_ALERTS_ENABLED) {
+      throw new ValidationFailedError('WhatsApp obaveštenje o povratku na stanje nije uključeno.');
+    }
     const phone = input.phone.replace(/[\s()-]/g, '');
     if (!/^\+381[1-9]\d{6,11}$/.test(phone)) throw new ValidationFailedError('Unesite broj telefona u međunarodnom formatu, npr. +381601234567.');
     const token = randomBytes(24).toString('hex');
@@ -202,7 +205,8 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
       if (!lock.rows[0]?.locked) return;
       const targets = await client.query<Subscription>(`SELECT id,phone,purpose,language,variant_id,last_price FROM whatsapp_subscriptions
         WHERE organization_id=$1 AND active AND revoked_at IS NULL AND purpose<>'newsletter'
-        ORDER BY updated_at,id LIMIT 100 FOR UPDATE SKIP LOCKED`, [this.org()]);
+          AND (purpose='price_change' OR $2::boolean)
+        ORDER BY updated_at,id LIMIT 100 FOR UPDATE SKIP LOCKED`, [this.org(), this.config.WHATSAPP_STOCK_ALERTS_ENABLED]);
       for (const s of targets.rows) {
         const p = await this.product(client, s.variant_id!);
         if (!p) { await client.query('UPDATE whatsapp_subscriptions SET updated_at=now() WHERE id=$1', [s.id]); continue; }
@@ -243,6 +247,9 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         const owner = await client.query<Subscription>(`SELECT id,phone,purpose,language,variant_id,last_price FROM whatsapp_subscriptions WHERE id=$1 AND active AND revoked_at IS NULL`, [item.subscription_id]);
         if (!owner.rowCount) { await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',updated_at=now() WHERE id=$1`, [item.id]); return; }
         const subscription = owner.rows[0]!;
+        if (subscription.purpose === 'back_in_stock' && !this.config.WHATSAPP_STOCK_ALERTS_ENABLED) {
+          await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',error_code='stock_alerts_disabled',updated_at=now() WHERE id=$1`, [item.id]); return;
+        }
         if (subscription.variant_id && !await this.product(client, subscription.variant_id)) {
           await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',error_code='product_unavailable',updated_at=now() WHERE id=$1`, [item.id]); return;
         }

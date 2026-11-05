@@ -6,8 +6,27 @@ Korisnik radi Meta podesavanja; kod, red slanja i web priprema su u DAJA projekt
 
 - Novi nalog: Daja Shop, WABA 1888317035945342, Account status Approved.
 - Broj: +381641262425; Phone Profile ID: 1329253216947689.
-- Tip: WhatsApp Business App; broj prikazuje Offline.
-- Cloud API pristup, token, povezivanje aplikacije i odobreni predlosci nisu potvrdjeni.
+- Broj je povezan sa Cloud API i prikazuje Registered. App DajaShop Poruke
+  (1444767067083457) je uspesno objavljena. API sender ID je potvrdjen kao
+  1329253216947689. Webhook je validiran; messages v27.0 je Subscribed, a novi
+  WABA je vratio Successfully subscribed to webhooks.
+- API token, App Secret, verify token, sender broj/ID, Graph v25.0 i zasebni OTP
+  HMAC kljuc sacuvani su u Render environment tajnama. Nema tajni u ovom dokumentu.
+- Newsletter i promena cene, sr/en: sva cetiri predloska su podneta kao Marketing
+  i imaju In review. Authentication daja_verification_v1 NIJE kreiran: Meta vraca
+  This WhatsApp business account does not have permission to create message template.
+- Poslovna verifikacija firme je In review; Meta navodi oko dva radna dana.
+  To je moguc uzrok OTP zabrane, ali greška ne navodi precizniji uslov. Posle
+  verifikacije ponoviti Authentication zahtev; ako ostane zabrana, traziti Meta
+  podrsku sa app ID/WABA ID i tacnom greskom. Ne obecavati da verifikacija sama
+  sigurno resava zabranu.
+- Slanje jos nije ukljuceno: approval/enabled zastavice ostaju false dok potrebni
+  predlosci nisu odobreni. Nije proveravan zavrsetak deploy-a niti slata probna poruka.
+- WhatsApp povratak na stanje je na zahtev korisnika iskljucen; njegov predlozak
+  nije podnet i nije uslov za newsletter/promenu cene.
+- Korisnik je odobrio zasebno sr/en obavestenje o WhatsApp privatnosti i brisanju:
+  https://dajashop.rs/whatsapp-privacy. Taj URL je sacuvan u Meta app Privacy Policy
+  i User Data Deletion poljima. Opsta /privacy stranica ostaje tehnicki nacrt.
 - Ranija blokada naloga 2239869233236176 nije status ovog novog naloga.
 
 ## Sta korisnik radi u Meti
@@ -59,7 +78,7 @@ Ovaj predlozak pokriva i snizenje i povecanje cene. Stari daja_price_drop_v1
 nije zamena za ovaj tekst. Za kategoriju prihvati Metinu odluku; ne ukljucuj
 slanje pre odobrenja. Ne dodavati promocije u transakcioni predlozak.
 
-### daja_back_in_stock_v1 — prijavljen povratak na stanje
+### daja_back_in_stock_v1 — iskljuceno, ne kreirati sada
 
 sr: DajaShop: artikal {{1}} je ponovo na stanju. Cena: {{2}}. Detalji: {{3}}. Za odjavu odgovorite STOP.
 en: DajaShop: {{1}} is back in stock. Price: {{2}}. Details: {{3}}. Reply STOP to unsubscribe.
@@ -90,9 +109,11 @@ WHATSAPP_OTP_ENABLED=false
 WHATSAPP_OTP_TEMPLATES_APPROVED=false
 WHATSAPP_NOTIFICATIONS_ENABLED=false
 WHATSAPP_NOTIFICATION_TEMPLATES_APPROVED=false
+WHATSAPP_STOCK_ALERTS_ENABLED=false
 
 OTP zastavice ukljuciti nakon odobrenja oba OTP jezika. Notification zastavice
-ukljuciti nakon odobrenja sva tri notification predloska u oba jezika i webhooka.
+ukljuciti nakon odobrenja newsletter i price-change predlozaka u oba jezika i webhooka.
+Stock predlozak nije potreban dok je WHATSAPP_STOCK_ALERTS_ENABLED=false.
 Nijedna tajna nije potrebna u web projektu. Postojeci PUBLIC_ORGANIZATION_ID,
 PostgreSQL i Redis koriste se i za ovaj tok. Migracija 103 ide uz standardni API
 startup/migration postupak; nema novog posebnog placenog workera.

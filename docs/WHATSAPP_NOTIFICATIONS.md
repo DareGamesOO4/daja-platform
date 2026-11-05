@@ -3,6 +3,12 @@
 Cloud API notifications are separate from OTP and email. Existing email/SMS consent
 is never reused. Production activation remains gated by explicit flags and secrets.
 
+User scope update: WhatsApp back-in-stock alerts are disabled. The unfinished
+stock template was abandoned, not submitted. `WHATSAPP_STOCK_ALERTS_ENABLED=false`
+gates public capabilities, new subscriptions, scanning and outbound attempts.
+The notification approval flag currently requires only newsletter and price-change
+templates in sr/en; all four were submitted as Marketing and remain In review.
+
 ## Consent and unsubscribe
 
 The storefront newsletter forms and product-alert dialog use
@@ -66,8 +72,10 @@ Render callback above. No customer or staff session is needed by Meta.
 
 See `.env.example` and [WHATSAPP_SETUP.md](WHATSAPP_SETUP.md). Both OTP and
 notifications remain disabled until their own approval/enable flags are set.
-The notification approval flag means all three notification templates in both
-languages are approved. An OTP-only setup can be enabled separately.
+The notification approval flag means newsletter and price-change templates in
+both languages are approved. Stock alerts require separate explicit enablement
+and an approved stock template if the user requests them later. An OTP-only setup
+can be enabled separately, but Meta currently refuses to create its template.
 
 No tests, build, actual sending, migration execution or deployment-completion
 verification were performed for this change, per the user's instructions.
