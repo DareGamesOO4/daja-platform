@@ -280,7 +280,8 @@ export class MediaRepository {
         JSON.stringify({
           originalFilename: input.originalFilename ?? null,
           productSlug: input.productSlug ?? null,
-          imageIndex: input.imageIndex ?? null
+          imageIndex: input.imageIndex ?? null,
+          storageLayout: 'flat-v1'
         })
       ]
     );
@@ -705,10 +706,10 @@ export function productMediaStorageKey(input: {
   extension: string;
 }): string {
   if (input.productSlug && input.imageIndex) {
-    // The human-readable folder stays stable, but the object itself must be
-    // unique. Otherwise an async delete of a replaced image can erase a newer
-    // upload that reused the same product/index path.
-    return `${input.productSlug}/${input.mediaId}/source/${input.productSlug}-${input.imageIndex}${input.extension}`;
+    // Keep the picture folder readable; unique filenames prevent replacement
+    // cleanup from deleting another asset that uses the same picture index.
+    const name = `${input.productSlug}-slika-${input.imageIndex}`;
+    return `${input.productSlug}/${name}/${name}-${input.mediaId}-source${input.extension}`;
   }
   return `org/${input.organizationId}/media/${input.mediaId}/original${input.extension}`;
 }
@@ -719,13 +720,18 @@ function uploadedImageStorageKey(sourceKey: string): string {
   return sourceKey.replace(/(?:-avif65-webp75-main)?\.[^/.]+$/, '') + '-avif65-webp75-main.webp';
 }
 
-/** Clean filenames, immutable per-attempt folders: cleanup never targets a replacement. */
+/** New assets use flat picture folders with immutable per-attempt filenames. */
 export function productMediaVariantKeys(asset: MediaAssetRow, revision: string) {
   const metadata = asset.metadata ?? {};
   const slug = typeof metadata.productSlug === 'string'
     ? metadata.productSlug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') : '';
   const index = Number(metadata.imageIndex);
   const name = `${slug || 'image'}-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
+  if (slug && metadata.storageLayout === 'flat-v1') {
+    const picture = `${slug}-slika-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
+    const base = `${slug}/${picture}/${picture}-${asset.id}-${revision}`;
+    return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };
+  }
   const folder = slug ? `${slug}/${asset.id}/${revision}` : `org/${asset.organization_id}/media/${asset.id}/${revision}`;
   const base = `${folder}/${name}`;
   return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };

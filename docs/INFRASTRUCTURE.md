@@ -1,5 +1,18 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: ravni folderi novih slika, 06.11.2026.
+
+- Novi upload i uvoz slike preko linka sa slug/index metapodacima koriste
+  slug/slug-slika-N/ bez dodatnih source, media-ID ili revision podfoldera.
+- Original je privremeni fajl u istom folderu. Posle nocne obrade i ciscenja
+  ostaje pet fajlova: pocetni veliki AVIF, njegova kopija uz veliki WebP,
+  mali AVIF i mali WebP. Raspored obrade i kvalitet ostaju nepromenjeni.
+- Media ID i oznaka pokusaja nalaze se u imenima fajlova radi nepromenljivih
+  URL-ova i bezbednog brisanja/zamene. Nema brisanja celog foldera po indeksu.
+- Samo nove slike imaju metadata.storageLayout=flat-v1. Postojece slike i
+  vec zapoceti upload-i zadrzavaju stare putanje; nema migracije R2 objekata.
+- Izvor: daja-platform/packages/database/src/media.ts i
+  apps/api/src/remote-media.service.ts. Bez testova i provere zavrsetka deploy-a.
 ## Dopuna: WhatsApp API povezan, Authentication blokiran, 05.11.2026.
 
 - Nova Meta aplikacija DajaShop Poruke, ID 1444767067083457, uspesno je Published.

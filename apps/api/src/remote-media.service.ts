@@ -132,6 +132,7 @@ async function importRemoteImageNow(input: {
         JSON.stringify({ sourceUrl: input.sourceUrl, sourceMimeType: downloaded.contentType,
           sourceSizeBytes: downloaded.buffer.length, productSlug: input.productSlug ?? null,
           imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString(),
+          storageLayout: 'flat-v1',
           ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}) })]
     );
     const asset = inserted.rows[0]!;
