@@ -1,5 +1,28 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: novi WhatsApp nalog i kod za obavestenja, 05.11.2026.
+
+- Korisnik je promenio nalog. U Meta konzoli je potvrdjen Daja Shop, WABA
+  1888317035945342, status Approved, broj +381641262425, Phone Profile ID
+  1329253216947689. Tip je WhatsApp Business App; broj prikazuje Offline.
+  Stara blokada 2239869233236176 nije status ovog novog naloga. Cloud API sender
+  ID, pristupni token, aplikacija i predlosci jos nisu potvrdjeni.
+- Backend migracija 103 i WhatsAppNotificationsService dodaju odvojene WhatsApp
+  pretplate: kupac salje pripremljenu DAJA token poruku sa svog broja; tek tada
+  se aktivira izabrana saglasnost. STOP gasi WhatsApp novosti/obavestenja i red.
+  Postojece email pretplate, SMS i OTP saglasnosti nisu prebacivane.
+- API proces ima trajni red, slanje predlozaka za novosti/promenu cene/povratak
+  na stanje, sr/en, dnevni limit, evidenciju prihvatanja/isporuke i potpisan webhook.
+  Nepoznati ishodi se ne ponavljaju automatski. Web ima WhatsApp potvrdu pretplate
+  i admin karticu za pregled/slanje newsletter kampanja (promotions.write).
+- Meta callback je direktno https://daja-platform-api.onrender.com/api/v1/whatsapp/webhook
+  (GET verify token, POST HMAC-SHA256 originalnih bajtova). Samo ovaj callback je
+  izuzet iz edge kljuca; ostale rute zadrzavaju gateway/CSRF/autentikaciju.
+- OTP i obavestenja ostaju iskljuceni do Meta konfiguracije/odobrenja. Nije vrseno
+  stvarno slanje, aktivacija tajni, testovi, build, migracija ili provera deploy-a.
+  Android nije povezan. Vodic: daja-platform/docs/WHATSAPP_SETUP.md i
+  docs/WHATSAPP_NOTIFICATIONS.md. Korisnik radi Meta podesavanja.
+
 ## Dopuna: WhatsApp verifikacija i Meta blokada, 04.11.2026.
 
 - Prijava telefonom i povezivanje broja u web profilu nude SMS i WhatsApp.

@@ -6,7 +6,16 @@ WhatsApp uses server-generated codes, not Firebase. It never falls back to SMS.
 No customer accounts are created by the WhatsApp provider: existing DAJA login
 and authenticated phone-link ownership checks are retained.
 
-## Current external blocker
+## Current account — 05.11.2026
+
+The user replaced the messaging account. Meta Business Suite now shows **Daja Shop**,
+WABA `1888317035945342`, **Approved**, business phone `+381641262425`, phone profile
+ID `1329253216947689`, type **WhatsApp Business App**, phone status **Offline**.
+This is not confirmation that Cloud API, credentials or templates are ready.
+Confirm the sender ID in API Setup; see [WHATSAPP_SETUP.md](WHATSAPP_SETUP.md).
+The earlier restriction below belongs to the old account, not the new one.
+
+## Historical blocker — old account, 04.11.2026
 
 Messaging account `2239869233236176` was initially Approved; Business Support Home
 now reports **Disabled**, **Permanent**, Terms of Acceptable Use (04.11.2026).
@@ -39,7 +48,7 @@ https://business.facebook.com/business-support-home/4451418348505153/22398692332
   never automatically retried. Raw codes and credentials are not logged or stored
   in plaintext. The UI retains the selected channel during verification.
 
-## Activation after Meta reinstates the account
+## Activation on the new Cloud API account
 
 Create Authentication templates named `daja_verification_v1` in **both** `sr`
 and `en`, with Copy code, security recommendation, five-minute expiration and

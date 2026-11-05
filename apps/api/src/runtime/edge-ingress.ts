@@ -22,8 +22,11 @@ export function edgeIngress(config: AppConfig): RequestHandler {
   return (request, response, next) => {
     const trusted = trustedEdge(request, config.EDGE_SHARED_SECRET);
     // Google's registered callback is on dajashop.rs and passes through Pages.
-    // Only bounded infrastructure health probes may bypass the gateway.
-    const exempt = /^\/health\/(live|ready)\/?$/.test(request.path);
+    // Health probes and the independently authenticated Meta callback bypass the gateway.
+    // Meta cannot supply our edge key. The exact callback verifies Meta's HMAC
+    // over raw bytes (GET uses a separate secret); no other WhatsApp route bypasses the edge.
+    const exempt = /^\/health\/(live|ready)\/?$/.test(request.path) ||
+      (['GET','POST'].includes(request.method) && /^\/api\/v1\/whatsapp\/webhook\/?$/.test(request.path));
     if (config.EDGE_ENFORCEMENT === 'enforce' && !trusted && !exempt) {
       response.setHeader('Cache-Control', 'no-store');
       response.status(403).json({ error: { code: 'EDGE_REQUIRED', message: 'Use the protected API endpoint', details: {} } });

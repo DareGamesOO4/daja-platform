@@ -26,7 +26,7 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
-const app = await NestFactory.create(AppModule, { bufferLogs: true });
+const app = await NestFactory.create(AppModule, { bufferLogs: true, bodyParser: false });
 configureApiApp(app, config, logger);
 const server = app.getHttpServer() as Server;
 server.requestTimeout = 30_000;

@@ -45,6 +45,8 @@ import { DevicePluginsService } from './device-plugins.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import { CustomerPasskeysService } from './customer-passkeys.service.js';
 import { WhatsAppOtpService } from './whatsapp-otp.service.js';
+import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
+import { WhatsAppController } from './whatsapp.controller.js';
 import { PhoneOtpService } from './phone-otp.service.js';
 import { SmsDeliveryService } from './sms-delivery.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
@@ -91,6 +93,7 @@ const rateStorage = new SharedRateStorage(config);
     })
   ],
   controllers: [
+    WhatsAppController,
     MediaProcessingController,
     CatalogBulkController,
     ContactController,
@@ -121,6 +124,7 @@ const rateStorage = new SharedRateStorage(config);
     ,ReaderStationController
   ],
   providers: [
+    WhatsAppNotificationsService,
     MediaCleanupService,
     MediaDerivativesService,
     MediaUploadReaperService,

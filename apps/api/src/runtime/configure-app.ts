@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { json, urlencoded } from 'express';
+import { json, raw, urlencoded } from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import { ValidationPipe, type INestApplication } from '@nestjs/common';
@@ -34,6 +34,8 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
   });
   // Must precede body parsing and AuthMiddleware (which queries PostgreSQL).
   app.use(admissionMiddleware(app.get(SharedRateStorage)));
+  // Meta signs the original bytes. Parse only this exact callback as a Buffer.
+  app.use('/api/v1/whatsapp/webhook', raw({ type: 'application/json', limit: '1mb' }));
   // A bounded bulk plan can contain many individual descriptions. Other routes retain 1 MB.
   app.use('/api/v1/admin/catalog/jobs', json({ limit: '8mb' }));
   app.use(json({ limit: '1mb' }));
