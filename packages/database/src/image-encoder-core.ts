@@ -64,7 +64,11 @@ async function encodeRaster(raster: Raster, width: number, options: ImageOutputO
   return { data, width: info.width, height: info.height };
 }
 
-async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) {
+async function encodeVariants(
+  raster: Raster,
+  options: ImageOutputOptions = {},
+  mainQuality = options.quality
+) {
   const format = options.format ?? 'webp';
   const quality = options.quality ?? (format === 'avif' ? 65 : 84);
   if (
@@ -78,7 +82,11 @@ async function encodeVariants(raster: Raster, options: ImageOutputOptions = {}) 
     );
   }
   const encode = (width: number) => encodeRaster(raster, width, options);
-  const original = await encode(MAX_MAIN_WIDTH);
+  const original = await encodeRaster(
+    raster,
+    MAX_MAIN_WIDTH,
+    mainQuality === undefined ? options : { ...options, quality: mainQuality }
+  );
   const thumbnail = await encode(THUMBNAIL_WIDTH);
   return {
     format,
@@ -93,11 +101,11 @@ export async function prepareImageVariants(source: Buffer, options: ImageOutputO
   return encodeVariants(await decodeImage(source), options);
 }
 
-export async function prepareProductVariants(source: Buffer) {
+export async function prepareProductVariants(source: Buffer, mainAvifQuality = 65) {
   const raster = await decodeImage(source);
   return {
     webp: await encodeVariants(raster, { format: 'webp', quality: 75 }),
-    avif: await encodeVariants(raster, { format: 'avif', quality: 65 })
+    avif: await encodeVariants(raster, { format: 'avif', quality: 65 }, mainAvifQuality)
   };
 }
 
