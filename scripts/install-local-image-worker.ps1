@@ -50,8 +50,24 @@ $configPath = Join-Path $installDir 'worker.json'
     Set-Content -LiteralPath $configPath -Encoding ASCII
 $token = $null
 
+$statusDir = Join-Path $installDir 'status'
+New-Item -ItemType Directory -Path $statusDir | Out-Null
+$statusAcl = Get-Acl -LiteralPath $statusDir
+foreach ($entry in @(
+    @{ Sid = 'S-1-5-19'; Rights = 'Modify' },
+    @{ Sid = 'S-1-5-32-545'; Rights = 'ReadAndExecute' }
+)) {
+    $identity = [System.Security.Principal.SecurityIdentifier]::new($entry.Sid)
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity, $entry.Rights, $inheritance, 'None', 'Allow'
+    )
+    $statusAcl.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $statusDir -AclObject $statusAcl
+$statusPath = Join-Path $statusDir 'worker-status.json'
+
 $installedProgram = Join-Path $installDir 'worker.mjs'
-$arguments = '"{0}" run "{1}"' -f $installedProgram, $configPath
+$arguments = '"{0}" run "{1}" "{2}"' -f $installedProgram, $configPath, $statusPath
 $action = New-ScheduledTaskAction -Execute $node -Argument $arguments -WorkingDirectory $installDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settingsOptions = @{

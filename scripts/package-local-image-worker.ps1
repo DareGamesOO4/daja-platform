@@ -16,6 +16,12 @@ try {
     node .\node_modules\esbuild\bin\esbuild scripts/local-image-worker.ts --bundle --platform=node --format=esm --external:sharp --alias:@daja/security=./packages/security/src/index.ts --outfile=$program
     if ($LASTEXITCODE -ne 0) { throw 'Pakovanje workera nije uspelo.' }
 
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    $ui = Join-Path $stage 'DAJA Worker.exe'
+    $uiSource = Join-Path $PSScriptRoot 'local-image-worker-ui.cs'
+    & $compiler /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/out:$ui" $uiSource
+    if ($LASTEXITCODE -ne 0) { throw 'Pakovanje Windows prozora nije uspelo.' }
+
     foreach ($dependency in @('sharp', '@img/colour', '@img/sharp-win32-x64', 'detect-libc', 'semver')) {
         $source = Join-Path $repo "node_modules/$dependency"
         $destination = Join-Path $stage "node_modules/$dependency"

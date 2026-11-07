@@ -2,6 +2,10 @@
 
 Paket koristi instalirani Node.js 22.12 ili noviji i uključuje Sharp za Windows x64.
 
+Raspakuj paket u folder u kom će aplikacija ostati i otvori DAJA Worker.exe. Iz prozora biraš sliku, folder za rezultate i kvalitet velikog lokalnog AVIF-a. Kada zatvoriš prozor, ikonica ostaje pored sata. Desni klik otvara meni, a levi vraća prozor. Opcija za automatsko pokretanje dodaje ikonicu pri prijavi u Windows.
+
+Status u prozoru prikazuje vezu i poslednju obradu kada se pozadinski worker poveže sa serverom. Podešavanje kvaliteta u prozoru važi za slike koje obradiš ručno. Za poslove sa servera koristi se profil avif95-v1.
+
 U raspakovanom folderu otvori PowerShell i pokreni lokalnu obradu. Izlazni folder mora da bude nov.
 
 ~~~powershell
