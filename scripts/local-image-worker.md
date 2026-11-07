@@ -14,7 +14,7 @@ node .\worker.mjs local 'C:\putanja\original.jpg' 'C:\putanja\nove-verzije'
 
 Dobijaš veliki AVIF (kvalitet 95), mali AVIF (65) i dve WebP verzije (75). Velika slika ima do 2048 px, sličica do 512 px. Obrada čuva proporcije i manje originale ostavlja u njihovoj rezoluciji.
 
-Kad backend dobije rute za lokalni worker i izda ključ, iz raspakovanog foldera u PowerShell-u otvorenom kao administrator pokreni instalaciju. Unesi ključ kad se pojavi upit.
+Za pokretanje pre prijave u Windows otvori PowerShell kao administrator i pokreni instalaciju iz raspakovanog foldera. Unesi ključ kad se pojavi upit.
 
 ~~~powershell
 .\install-local-image-worker.ps1 -ApiBaseUrl 'https://api.dajashop.rs/api/v1'
@@ -24,11 +24,11 @@ Instalater registruje zadatak koji radi kao Windows Local Service od paljenja ra
 
 ## Ugovor za backend
 
-Worker poziva HTTPS rute uz Authorization Bearer sa namenskim ključem. Na serveru ove rute tek treba implementirati. Kad radnik unese URL u web admin, backend treba da preuzme izvor sa tog URL-a, sačuva ga u R2 i preda ga istom redu kao i lokalno otpremljeni fajl. Radnik koristi postojeći unos linka na svom uređaju.
+Worker poziva HTTPS rute uz Authorization Bearer sa namenskim ključem. Backend aktivira lokalni red za javnu organizaciju kada je podešen MEDIA_LOCAL_WORKER_TOKEN_HASH kao SHA-256 ključa u heksadecimalnom formatu. Kad radnik unese URL u web admin, backend preuzima izvor, čuva ga u R2 i stavlja u isti red kao i otpremljeni fajl proizvoda.
 
 - POST /media/local-worker/claim prima JSON sa poljem profile jednakim avif95-v1. Vraća 204 kad nema posla. Za posao vraća id i leaseToken kao UUID, expiresAt kao ISO UTC, source sa url i sha256, i uploads sa potpisanim R2 PUT linkovima za avif, webp, avifThumb i webpThumb.
-- Worker koristi potpisan HTTPS R2 GET za original i proverava SHA-256. PUT šalje Content-Type formata i Cache-Control public, max-age=31536000, immutable. Backend treba da izdaje jedinstvene ključeve objekata za svaki pokušaj.
-- POST /media/local-worker/complete prima id, leaseToken i files. Svaki element files ima variant, width, height, bytes i sha256. Backend treba da proveri rezultate u R2, potvrdi isti pokušaj bez dupliranja i tek onda objavi slike.
-- Ako posao ne bude potvrđen, backend ga po isteku rezervacije može vratiti u red ili kodirati na Renderu. Ključ treba da bude ograničen na ovaj red i organizaciju.
+- Worker koristi potpisan HTTPS R2 GET za original i proverava SHA-256. PUT šalje Content-Type formata, If-None-Match sa vrednošću * i Cache-Control public, max-age=31536000, immutable. Server zadržava postojeći format ključeva proizvoda sa jedinstvenom revizijom po pokušaju.
+- POST /media/local-worker/complete prima id, leaseToken i files. Svaki element files ima variant, width, height, bytes i sha256. Backend proverava rezultate u R2 i objavljuje ih zajedno.
+- Ako posao ne bude potvrđen, ostaje u redu. Posle sedam dana isti posao može da preuzme postojeća Render obrada od 03:00 do 07:00 po vremenu u Srbiji. Lokalni komp ima prednost dok se javlja i može da preuzme posao.
 
 Za pakovanje iz izvora pokreni scripts/package-local-image-worker.ps1 iz Windows x64 checkouta sa instaliranim zavisnostima.

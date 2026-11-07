@@ -43,6 +43,7 @@ const envSchema = z.object({
   R2_SECRET_ACCESS_KEY: optionalPreparedSecret,
   R2_ENDPOINT: optionalPreparedSecret,
   MEDIA_PUBLIC_BASE_URL: optionalPreparedSecret,
+  MEDIA_LOCAL_WORKER_TOKEN_HASH: z.string().regex(/^(?:[a-f0-9]{64})?$/).default(''),
   PUBLIC_ORGANIZATION_ID: optionalPreparedSecret,
   FIRESTORE_SERVICE_ACCOUNT_JSON: optionalPreparedSecret,
   FIRESTORE_PROJECT_ID: optionalPreparedSecret,

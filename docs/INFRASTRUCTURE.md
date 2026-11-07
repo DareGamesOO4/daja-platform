@@ -420,3 +420,9 @@ U kodu API upisuje `email_deliveries` kroz `EmailDeliveryService`; posebni Node 
 6. Za budući Render → Cloudflare fallback: trenutno postoji samo dogovorena ideja. Potrebni su zaseban trajan rezervni zahtev i jedinstveni request ID koji poštuju oba puta. Izostao Render odgovor nije dokaz da porudžbina nije već upisana. Ne tretirati browser cene/zalihe kao potvrđene niti zaobilaziti poslovne validacije.
 
 Identifikatori, endpointi i nalazi su snimak stanja od 28.10.2026. Pre kasnijih izmena ponovo pročitati odgovarajući resurs. Lozinke, pristupni ključevi i vrednosti tajni nisu deo ove mape.
+
+## Lokalna optimizacija slika proizvoda
+
+Kada je na Render API servisu podešen MEDIA_LOCAL_WORKER_TOKEN_HASH, novi uploadi slika proizvoda i uvozi sa URL-a za javnu organizaciju čuvaju original u R2 i otvaraju posao za DAJA Windows worker. Original je privremeni prikaz. Worker preuzima posao preko zaštićenog API domena, pravi četiri verzije iz originala i šalje ih direktno u R2. Ključeve određuje postojeći format skladištenja. Server proverava sve četiri verzije pre objavljivanja i osvežavanja kataloga.
+
+Lokalni worker ima prednost. Posao koji čeka najmanje sedam dana može da preuzme postojeća Render obrada od 03:00 do 07:00 po vremenu u Srbiji kada lokalni worker nije dostupan. Stari poslovi zadržavaju prethodni tok. Migracija 104 razlikuje lokalne od starih poslova.

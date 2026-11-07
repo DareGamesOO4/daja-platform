@@ -21,6 +21,7 @@ import {
 } from '@daja/database';
 import { AppError, ValidationFailedError } from '@daja/security';
 import { createLogger } from '@daja/observability';
+import { inspectLocalMediaSource, localMediaEnabled } from './local-media-source.js';
 
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
@@ -113,6 +114,8 @@ async function importRemoteImageNow(input: {
     });
   }
   const downloaded = await downloadRemoteImage(input.sourceUrl);
+  const localSource = localMediaEnabled(input.config, input.organizationId, input.productSlug)
+    ? await inspectLocalMediaSource(downloaded.buffer) : undefined;
   const mediaId = randomUUID();
   const storage = new R2MediaStorageAdapter(input.config);
   const sourceKey = productMediaStorageKey({
@@ -128,7 +131,8 @@ async function importRemoteImageNow(input: {
         public_url, mime_type, size_bytes, checksum_sha256, status, metadata)
        VALUES ($1,$2,'r2',$3,$4,$5,$6,$7,$8,'uploaded',$9::jsonb) RETURNING *`,
       [mediaId, input.organizationId, storage.bucket(), sourceKey, requiredPublicUrl(storage, sourceKey),
-        downloaded.contentType || 'image/jpeg', downloaded.buffer.length, sha256(downloaded.buffer),
+        localSource?.mimeType ?? (downloaded.contentType || 'image/jpeg'), downloaded.buffer.length,
+        localSource?.checksumSha256 ?? sha256(downloaded.buffer),
         JSON.stringify({ sourceUrl: input.sourceUrl, sourceMimeType: downloaded.contentType,
           sourceSizeBytes: downloaded.buffer.length, productSlug: input.productSlug ?? null,
           imageIndex: input.imageIndex ?? null, importedAt: new Date().toISOString(),
@@ -141,6 +145,15 @@ async function importRemoteImageNow(input: {
     stage = 'store_source';
     await storage.putObject({ key: sourceKey, body: downloaded.buffer,
       contentType: asset.mime_type, cacheControl: 'private, no-store' });
+    if (localSource) {
+      stage = 'queue_local_image';
+      const result = await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(client =>
+        new MediaRepository(client).queueLocalProductImage({
+          ...localSource, organizationId: input.organizationId, mediaId,
+          expectedKey: sourceKey, storageKey: sourceKey, publicUrl: requiredPublicUrl(storage, sourceKey)
+        }));
+      return { id: mediaId, ...result };
+    }
     stage = 'prepare_image';
     const prepared = await repository.stageUploadedImage(
       { organizationId: input.organizationId }, mediaId, storage, createdKeys, { asset, bytes: downloaded.buffer });

@@ -74,6 +74,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       endpoint: config.R2_ENDPOINT || `https://${config.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
       forcePathStyle: Boolean(config.R2_ENDPOINT),
       maxAttempts: 2,
+      requestChecksumCalculation: 'WHEN_REQUIRED',
       requestHandler: { connectionTimeout: 3_000, requestTimeout: 15_000 },
       credentials: {
         accessKeyId: config.R2_ACCESS_KEY_ID,
@@ -113,6 +114,15 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       { expiresIn }
     );
     return { downloadUrl, expiresAt: new Date(Date.now() + expiresIn * 1000) };
+  }
+
+  async createWorkerUpload(key: string, mimeType: string): Promise<string> {
+    return getSignedUrl(this.client, new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: key,
+      ContentType: mimeType,
+      IfNoneMatch: '*'
+    }), { expiresIn: 240, signableHeaders: new Set(['content-type', 'if-none-match']) });
   }
 
   async headObject(key: string): Promise<{
@@ -227,6 +237,37 @@ export class MediaRepository {
     return row ? { mediaId, status: 'ready', publicUrl: row.public_url, mainImageUrl: row.public_url,
       thumbnailUrl: row.thumbnail_url ?? row.public_url, storageKey: row.storage_key,
       width: row.width, height: row.height, obsoleteStorageKeys: [] as string[] } : null;
+  }
+
+  /** Publish the unchanged source as a temporary preview and queue all four local variants. */
+  async queueLocalProductImage(input: {
+    organizationId: string; mediaId: string; expectedKey: string;
+    storageKey: string; publicUrl: string; mimeType: string; sizeBytes: number;
+    checksumSha256: string; width: number; height: number;
+  }) {
+    const ctx = { organizationId: input.organizationId };
+    const current = await this.getForUpdate(ctx, input.mediaId);
+    if (current.status === 'ready') {
+      const ready = await this.readyUpload(ctx, input.mediaId);
+      if (ready) return ready;
+    }
+    if (!['pending_upload', 'uploaded'].includes(current.status) || current.storage_key !== input.expectedKey) {
+      throw new ValidationFailedError('Media upload is no longer current');
+    }
+    await this.markReady({ ...input, original: input, derivatives: [] });
+    await resolveMediaFailures(this.client, input.organizationId, input.mediaId, 'upload');
+    await this.client.query(
+      `INSERT INTO media_derivative_jobs
+        (organization_id,media_asset_id,source_key,source_checksum,avif_main_key,local_worker)
+       VALUES ($1,$2,$3,$4,$3,true)`,
+      [input.organizationId, input.mediaId, input.storageKey, input.checksumSha256]
+    );
+    if (input.expectedKey !== input.storageKey) await this.client.query(
+      `INSERT INTO media_storage_deletions(organization_id,storage_key,available_at)
+       VALUES ($1,$2,now()+interval '16 minutes') ON CONFLICT DO NOTHING`,
+      [input.organizationId, input.expectedKey]
+    );
+    return (await this.readyUpload(ctx, input.mediaId))!;
   }
 
   async createPendingUpload(

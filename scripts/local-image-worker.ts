@@ -99,7 +99,11 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) 
     const response = await fetch(r2Url(claim.uploads[variant]), {
       method: 'PUT',
       body: new Uint8Array(image.data),
-      headers: { 'content-type': image.mime, 'cache-control': 'public, max-age=31536000, immutable' },
+      headers: {
+        'content-type': image.mime,
+        'cache-control': 'public, max-age=31536000, immutable',
+        'if-none-match': '*'
+      },
       redirect: 'error',
       signal
     });

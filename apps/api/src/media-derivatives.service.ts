@@ -11,17 +11,20 @@ import {
   R2MediaStorageAdapter,
   StorefrontRepository,
   TransactionManager,
+  prepareAvifMainImage,
   prepareRemainingImageVariants,
   productMediaVariantKeys,
   runMediaProcessing,
   sha256,
   type Database,
-  type MediaAssetRow
+  type MediaAssetRow,
+  type RedisConnection
 } from '@daja/database';
 import { AppError } from '@daja/security';
-import { CONFIG, DATABASE, LOGGER } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
 import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
+import { localWorkerPresenceKey } from './local-media-source.js';
 
 type DerivativeJob = {
   organization_id: string;
@@ -31,6 +34,7 @@ type DerivativeJob = {
   avif_main_key: string;
   lease_token: string;
   attempts: number;
+  local_worker: boolean;
 };
 
 const clock = new Intl.DateTimeFormat('en-GB', {
@@ -59,7 +63,8 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(REDIS) private readonly redis: RedisConnection
   ) {}
 
   onModuleInit() {
@@ -97,19 +102,25 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
 
   private async processOne(): Promise<boolean> {
     const token = randomUUID();
+    const workerOnline = this.config.PUBLIC_ORGANIZATION_ID
+      ? Boolean(await this.redis.client.get(localWorkerPresenceKey(this.config.PUBLIC_ORGANIZATION_ID))) : false;
     // One statement claims a row; no transaction/client is held during R2 or CPU work.
     const job = (
       await this.db.pool.query<DerivativeJob>(
         `UPDATE media_derivative_jobs j SET lease_until=now()+interval '5 minutes',
          lease_token=$1, attempts=j.attempts+1
        FROM (SELECT organization_id,media_asset_id FROM media_derivative_jobs
-         WHERE available_at<=now() AND paused_at IS NULL AND attempts<8
+         WHERE available_at<=now() AND paused_at IS NULL
+         AND (NOT local_worker AND attempts<8 OR local_worker AND (NOT $2::boolean OR attempts>=8) AND attempts<16
+              AND created_at<=now()-interval '7 days'
+              AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs active
+                WHERE active.local_worker AND active.lease_until>now()))
          AND (lease_until IS NULL OR lease_until<now())
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time >= time '03:00'
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time < time '07:00'
          ORDER BY available_at,created_at,media_asset_id LIMIT 1 FOR UPDATE SKIP LOCKED) candidate
        WHERE j.organization_id=candidate.organization_id AND j.media_asset_id=candidate.media_asset_id RETURNING j.*`,
-        [token]
+        [token, workerOnline]
       )
     ).rows[0];
     if (!job) return false;
@@ -147,10 +158,13 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         { key: thumbKey, image: webp.thumbnail, mimeType: 'image/webp' },
         { key: keys.avifThumb, image: avifThumbnail, mimeType: 'image/avif' }
       ];
-      // AVIF is already encoded. Copy it beside WebP so format selection can
-      // replace only the extension. Keep the original URL valid for old pages.
-      created.add(keys.avif);
-      await storage.copyObject(job.avif_main_key, keys.avif);
+      if (job.local_worker) {
+        objects.push({ key: keys.avif, image: await prepareAvifMainImage(source), mimeType: 'image/avif' });
+      } else {
+        // Keep existing AVIF URLs and put a copy next to the WebP.
+        created.add(keys.avif);
+        await storage.copyObject(job.avif_main_key, keys.avif);
+      }
       for (const object of objects) {
         created.add(object.key);
         await storage.putObject({
@@ -209,7 +223,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
           },
           replaceDerivatives: true,
           derivatives: [
-            {
+            ...(!job.local_worker ? [{
               storageKey: keys.avif,
               publicUrl: publicUrl(keys.avif),
               width: current.width!, height: current.height!, mimeType: 'image/avif',
@@ -224,7 +238,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
               mimeType: 'image/avif',
               sizeBytes: Number(current.size_bytes),
               ...(current.checksum_sha256 ? { checksumSha256: current.checksum_sha256 } : {})
-            },
+            }] : []),
             ...objects.slice(1).map((object) => ({
               storageKey: object.key,
               publicUrl: publicUrl(object.key),
@@ -239,8 +253,9 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         if (!updated) throw new Error('Deferred image was removed');
         await resolveMediaFailures(client, job.organization_id, job.media_asset_id, 'overnight');
         await client.query(
-          `INSERT INTO media_storage_deletions(organization_id,storage_key) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-          [job.organization_id, job.source_key]
+          `INSERT INTO media_storage_deletions(organization_id,storage_key,available_at)
+           VALUES ($1,$2,CASE WHEN $3::boolean THEN now()+interval '1 day' ELSE now() END) ON CONFLICT DO NOTHING`,
+          [job.organization_id, job.source_key, job.local_worker]
         );
         await client.query(
           'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3',
@@ -270,7 +285,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         );
         const deferred = await client.query(
           `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,
-         paused_at=CASE WHEN $5::text IS NOT NULL AND attempts>=8 THEN now() ELSE paused_at END,
+         paused_at=CASE WHEN $5::text IS NOT NULL AND attempts>=CASE WHEN local_worker THEN 16 ELSE 8 END THEN now() ELSE paused_at END,
          attempts=CASE WHEN $5::text IS NULL THEN greatest(attempts-1,0) ELSE attempts END,
          last_error_code=CASE WHEN $5::text IS NOT NULL THEN $5 ELSE last_error_code END,
          last_error_at=CASE WHEN $5::text IS NOT NULL THEN now() ELSE last_error_at END,

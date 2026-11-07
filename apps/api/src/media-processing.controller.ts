@@ -64,7 +64,7 @@ const imageFields = `a.id AS "mediaId",a.metadata->>'originalFilename' AS filena
   a.metadata->>'imageIndex' AS "imageIndex",p.id AS "productId",
   coalesce(p.name,a.metadata->>'productSlug') AS "productName",p.slug AS "productSlug"`;
 const jobState = `CASE WHEN j.lease_until>now() THEN 'processing'
-  WHEN j.paused_at IS NOT NULL OR j.attempts>=8 THEN 'failed'
+  WHEN j.paused_at IS NOT NULL OR j.attempts>=CASE WHEN j.local_worker THEN 16 ELSE 8 END THEN 'failed'
   WHEN j.lease_until IS NOT NULL THEN 'interrupted'
   WHEN j.last_error_code IS NOT NULL THEN 'failed' ELSE 'queued' END`;
 
@@ -102,7 +102,7 @@ export class MediaProcessingController {
         (SELECT count(*)::int FROM media_processing_alerts al LEFT JOIN media_processing_alert_reads r
           ON r.alert_id=al.id AND r.user_id=$2 WHERE al.organization_id=$1
           AND (r.seen_event_key IS DISTINCT FROM al.event_key)) AS unread,
-        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.paused_at IS NULL AND j.attempts<8) AS pending,
+        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.paused_at IS NULL AND j.attempts<CASE WHEN j.local_worker THEN 16 ELSE 8 END) AS pending,
         (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.lease_until>now()) AS processing`,
       [ctx.organizationId, ctx.userId]
     );
@@ -118,7 +118,7 @@ export class MediaProcessingController {
       view === 'queue'
         ? `SELECT j.media_asset_id AS id,'overnight' AS phase,${imageFields},
         ${jobState} AS status,j.attempts,j.created_at AS "createdAt",j.last_error_at AS "lastFailureAt",
-        j.available_at AS "availableAt",al.message,al.error_code AS "errorCode",al.event_key AS "eventKey",
+        j.available_at AS "availableAt",j.local_worker AS "localWorker",al.message,al.error_code AS "errorCode",al.event_key AS "eventKey",
         al.retry_requested_at AS "retryRequestedAt",coalesce(r.seen_event_key=al.event_key,false) AS "isRead",
         NOT coalesce(j.lease_until>now(),false) AS "canRetry"
        FROM media_derivative_jobs j JOIN media_assets a ON a.id=j.media_asset_id AND a.organization_id=j.organization_id
@@ -133,7 +133,7 @@ export class MediaProcessingController {
           WHEN al.resolved_at IS NOT NULL THEN 'resolved' WHEN j.media_asset_id IS NULL THEN 'upload_again'
           ELSE ${jobState} END AS status,
         (al.resolved_at IS NULL AND j.media_asset_id IS NOT NULL AND a.deleted_at IS NULL
-          AND NOT coalesce(j.lease_until>now(),false)) AS "canRetry",j.attempts,j.available_at AS "availableAt"
+          AND NOT coalesce(j.lease_until>now(),false)) AS "canRetry",j.attempts,j.available_at AS "availableAt",j.local_worker AS "localWorker"
        FROM media_processing_alerts al JOIN media_assets a ON a.id=al.media_asset_id AND a.organization_id=al.organization_id
        LEFT JOIN media_processing_alert_reads r ON r.alert_id=al.id AND r.user_id=$2
        LEFT JOIN media_derivative_jobs j ON j.organization_id=al.organization_id AND j.media_asset_id=al.media_asset_id AND al.phase='overnight'

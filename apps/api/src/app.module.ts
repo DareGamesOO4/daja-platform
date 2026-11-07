@@ -7,6 +7,7 @@ import { CatalogBulkService } from './catalog-bulk.service.js';
 import { CatalogDeliveryService } from './catalog-delivery.service.js';
 import { MediaCleanupService } from './media-cleanup.service.js';
 import { MediaDerivativesService } from './media-derivatives.service.js';
+import { LocalMediaWorkerController } from './local-media-worker.controller.js';
 import { MediaUploadReaperService } from './media-upload-reaper.service.js';
 import { MediaProcessingController } from './media-processing.controller.js';
 import { clientNetwork } from './runtime/abuse-protection.js';
@@ -95,6 +96,7 @@ const rateStorage = new SharedRateStorage(config);
   controllers: [
     WhatsAppController,
     MediaProcessingController,
+    LocalMediaWorkerController,
     CatalogBulkController,
     ContactController,
     EngravingController,

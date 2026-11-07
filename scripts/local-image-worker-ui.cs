@@ -16,6 +16,11 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (Array.IndexOf(args, "--run-worker") >= 0)
+        {
+            RunWorker();
+            return;
+        }
         bool background = Array.IndexOf(args, "--background") >= 0;
         bool enableStartup = Array.IndexOf(args, "--enable-startup") >= 0;
         bool ownsInstance;
@@ -34,6 +39,27 @@ internal static class Program
             {
                 if (!background) dashboard.OpenWindow();
                 Application.Run();
+            }
+        }
+    }
+
+    private static void RunWorker()
+    {
+        bool ownsInstance;
+        using (var instance = new Mutex(true, @"Local\DAJA.ImageWorker.Process", out ownsInstance))
+        {
+            if (!ownsInstance) return;
+            var folder = AppDomain.CurrentDomain.BaseDirectory;
+            var config = Path.Combine(folder, "worker-user.json");
+            var status = Path.Combine(folder, "worker-status.json");
+            while (File.Exists(config))
+            {
+                var start = new ProcessStartInfo {
+                    FileName = "node.exe", WorkingDirectory = folder, CreateNoWindow = true, UseShellExecute = false,
+                    Arguments = "\"" + Path.Combine(folder, "worker.mjs") + "\" run \"" + config + "\" \"" + status + "\""
+                };
+                using (var process = Process.Start(start)) process.WaitForExit();
+                Thread.Sleep(TimeSpan.FromSeconds(15));
             }
         }
     }
@@ -236,7 +262,10 @@ internal sealed class Dashboard : Form
 
     private void ReadWorkerStatus()
     {
-        if (!Directory.Exists(Path.GetDirectoryName(statusFile)))
+        var userConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-user.json");
+        var activeStatusFile = File.Exists(userConfig)
+            ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-status.json") : statusFile;
+        if (!File.Exists(userConfig) && !Directory.Exists(Path.GetDirectoryName(statusFile)))
         {
             state.Text = "Čeka povezivanje sa DAJA serverom";
             detail.Text = "Lokalna obrada je dostupna iz ovog prozora.";
@@ -244,7 +273,7 @@ internal sealed class Dashboard : Form
         }
         try
         {
-            using (var file = new FileStream(statusFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var file = new FileStream(activeStatusFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (var reader = new StreamReader(file))
             {
                 var snapshot = new JavaScriptSerializer().Deserialize<WorkerStatus>(reader.ReadToEnd());

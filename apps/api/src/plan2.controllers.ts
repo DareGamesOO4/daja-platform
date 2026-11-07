@@ -22,7 +22,8 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { extname } from 'node:path';
 import type { AppConfig } from '@daja/config';
 import type { RequestContext } from '@daja/shared';
 import {
@@ -66,6 +67,8 @@ import { resolvePublicRequestContext, resolveRequestContext } from './runtime/re
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
+import { inspectLocalMediaSource, localMediaEnabled } from './local-media-source.js';
+import { productMediaStorageKey } from '@daja/database';
 import { ProductAlertService } from './product-alert.service.js';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 import { normalizeBultimeUrl, normalizeEkkaUrl, normalizeLinkelUrl, normalizeAdditionalUrl } from './supplier-links.js';
@@ -3037,6 +3040,35 @@ export class MediaController {
       const alreadyReady = await repository.readyUpload(ctx, id);
       if (alreadyReady) return alreadyReady;
       const source = await repository.readUploadedSource(ctx, id, storage);
+      if (source.asset.mime_type.startsWith('image/') && localMediaEnabled(this.config, ctx.organizationId, source.asset.metadata?.productSlug)) {
+        const localSource = await inspectLocalMediaSource(source.bytes);
+        const storageKey = source.asset.checksum_sha256 ? source.asset.storage_key : productMediaStorageKey({
+          organizationId: ctx.organizationId, mediaId: randomUUID(),
+          productSlug: String(source.asset.metadata?.productSlug),
+          imageIndex: Number(source.asset.metadata?.imageIndex), extension: extname(source.asset.storage_key)
+        });
+        const publicUrl = storage.publicUrl(storageKey);
+        if (!publicUrl) throw new ValidationFailedError('Media public URL is required');
+        try {
+          if (storageKey !== source.asset.storage_key) {
+            createdKeys.add(storageKey);
+            await storage.putObject({ key: storageKey, body: source.bytes, contentType: localSource.mimeType, cacheControl: 'private, no-store' });
+          }
+          return await new TransactionManager(this.database.pool, this.logger).run(async client => {
+            const queued = await new MediaRepository(client).queueLocalProductImage({
+              ...localSource, organizationId: ctx.organizationId, mediaId: id,
+              expectedKey: source.asset.storage_key, storageKey, publicUrl
+            });
+            await new OutboxRepository(client).append({
+              ctx, eventType: 'MediaReady', aggregateType: 'media_asset', aggregateId: id,
+              payload: { mediaId: id, publicUrl: queued.publicUrl, thumbnailUrl: queued.thumbnailUrl }
+            });
+            return queued;
+          });
+        } finally {
+          await repository.cleanupAttempt(ctx, id, storage, createdKeys).catch(() => undefined);
+        }
+      }
       const prepared = await (source.asset.mime_type.startsWith('image/')
         ? repository.stageUploadedImage(ctx, id, storage, createdKeys, source) : Promise.resolve(undefined))
         .catch(async error => {
