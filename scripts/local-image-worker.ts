@@ -6,9 +6,23 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import type { ProductImageProfile } from '../packages/database/src/image-encoder-core.js';
 
 const MAX_BYTES = 25 * 1024 * 1024;
 const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
+const outputOptions = (size: number, effort: number) => z.object({
+  quality: z.number().int().min(1).max(100),
+  effort: z.number().int().min(0).max(effort),
+  size: z.number().int().min(1).max(size),
+  lossless: z.boolean()
+});
+const avifOptions = (size: number) => outputOptions(size, 9).extend({ chromaSubsampling: z.enum(['4:4:4', '4:2:0']) });
+const webpOptions = (size: number) => outputOptions(size, 6).extend({ smartSubsample: z.boolean() });
+const profileSchema = z.object({
+  paused: z.boolean(),
+  avif: avifOptions(2048), webp: webpOptions(2048),
+  avifThumb: avifOptions(512), webpThumb: webpOptions(512)
+});
 const configSchema = z.object({
   apiBaseUrl: z.url(),
   token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/)
@@ -17,6 +31,7 @@ const claimSchema = z.object({
   id: z.uuid(),
   leaseToken: z.uuid(),
   expiresAt: z.iso.datetime(),
+  customSizes: z.boolean().optional(),
   source: z.object({ url: z.url(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }),
   uploads: z.object({ avif: z.url(), webp: z.url(), avifThumb: z.url(), webpThumb: z.url() })
 });
@@ -38,9 +53,9 @@ async function readImage(chunks: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(buffers, length);
 }
 
-async function encodeInChild(source: Buffer, quality: number) {
+async function encodeInChild(source: Buffer, quality: number, profile?: ProductImageProfile) {
   const { prepareProductVariants } = await import('../packages/database/src/image-encoder-core.js');
-  const { avif, webp } = await prepareProductVariants(source, quality);
+  const { avif, webp } = await prepareProductVariants(source, quality, profile);
   return {
     avif: { ...avif.original, mime: avif.mimeType, filename: 'slika.avif' },
     webp: { ...webp.original, mime: webp.mimeType, filename: 'slika.webp' },
@@ -51,7 +66,7 @@ async function encodeInChild(source: Buffer, quality: number) {
 
 type Encoded = Awaited<ReturnType<typeof encodeInChild>>;
 
-function encode(source: Buffer, quality = 95, jobSignal?: AbortSignal): Promise<Encoded> {
+function encode(source: Buffer, quality = 95, jobSignal?: AbortSignal, profile?: ProductImageProfile): Promise<Encoded> {
   const deadline = AbortSignal.timeout(90_000);
   const signal = jobSignal ? AbortSignal.any([jobSignal, deadline]) : deadline;
   signal.throwIfAborted();
@@ -73,14 +88,14 @@ function encode(source: Buffer, quality = 95, jobSignal?: AbortSignal): Promise<
     child.once('error', error => finish(error));
     child.once('exit', () => finish(new Error('Proces za lokalno kodiranje je prekinut.')));
     child.once('message', (message: { result?: Encoded }) => finish(undefined, message.result));
-    child.send({ source, quality }, error => { if (error) finish(error); });
+    child.send({ source, quality, profile }, error => { if (error) finish(error); });
   });
 }
 
 function runEncoderChild() {
   process.once('disconnect', () => process.exit(0));
-  process.once('message', (message: { source: Buffer; quality: number }) => {
-    void encodeInChild(message.source, message.quality).then(
+  process.once('message', (message: { source: Buffer; quality: number; profile?: ProductImageProfile }) => {
+    void encodeInChild(message.source, message.quality, message.profile).then(
       result => process.send?.({ result }),
       () => process.send?.({})
     );
@@ -138,7 +153,7 @@ async function requireR2Success(response: Response): Promise<void> {
   }
 }
 
-async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) {
+async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal, profile?: ProductImageProfile) {
   const remaining = Date.parse(claim.expiresAt) - Date.now() - 3_000;
   if (remaining <= 0) throw new Error('Rezervacija posla je istekla.');
   const leaseSignal = AbortSignal.any([shutdown, AbortSignal.timeout(Math.min(remaining, 300_000))]);
@@ -151,7 +166,11 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) 
   const bytes = await readImage(source.body);
   if (checksum(bytes) !== claim.source.sha256) throw new Error('Kontrolni zbir originala se ne poklapa.');
 
-  const outputs = await encode(bytes, 95, signal);
+  const outputProfile = profile && (claim.customSizes ? profile : {
+    avif: { ...profile.avif, size: 2048 }, webp: { ...profile.webp, size: 2048 },
+    avifThumb: { ...profile.avifThumb, size: 512 }, webpThumb: { ...profile.webpThumb, size: 512 }
+  });
+  const outputs = await encode(bytes, 95, signal, outputProfile);
   const files = [];
   for (const variant of VARIANTS) {
     signal.throwIfAborted();
@@ -177,6 +196,7 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) 
       variant,
       width: image.width,
       height: image.height,
+      maxSize: claim.customSizes ? outputProfile?.[variant].size : undefined,
       bytes: image.data.length,
       sha256: checksum(image.data)
     });
@@ -186,14 +206,18 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) 
   await response.body?.cancel();
 }
 
-async function work(configPath: string, statusPath?: string) {
+async function loadConfig(configPath: string) {
   const config = configSchema.parse(JSON.parse(await readFile(configPath, 'utf8')));
   const endpoint = new URL(config.apiBaseUrl);
   if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
     throw new Error('DAJA API mora da koristi HTTPS adresu.');
   }
   config.apiBaseUrl = endpoint.href.replace(/\/+$/, '');
+  return config;
+}
 
+async function work(configPath: string, statusPath?: string, profilePath?: string) {
+  const config = await loadConfig(configPath);
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
@@ -218,12 +242,23 @@ async function work(configPath: string, statusPath?: string) {
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     try {
+      const rawProfile = profilePath ? await readFile(profilePath, 'utf8').catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      }) : undefined;
+      const profile = rawProfile === undefined ? undefined : profileSchema.parse(JSON.parse(rawProfile));
+      if (profile?.paused) {
+        Object.assign(status, { phase: 'paused', job: '', error: '' });
+        await publishStatus();
+        await delay(pause, undefined, { signal: shutdown.signal }).catch(() => {});
+        continue;
+      }
       const response = await api(config, 'claim', { profile: 'avif95-v1' }, shutdown.signal);
       if (response.status !== 204) {
         const claim = claimSchema.parse(await response.json());
         Object.assign(status, { phase: 'working', job: claim.id, error: '' });
         await publishStatus();
-        await handleClaim(config, claim, shutdown.signal);
+        await handleClaim(config, claim, shutdown.signal, profile);
         status.completed = new Date().toISOString();
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
@@ -243,8 +278,42 @@ async function work(configPath: string, statusPath?: string) {
   }
 }
 
-async function local(inputPath: string, outputDirectory: string, quality: number) {
-  const outputs = await encode(await readImage(createReadStream(inputPath)), quality);
+async function queue(configPath: string, page: number, cachedKeys: string[]) {
+  const config = await loadConfig(configPath);
+  const response = await api(config, 'queue', { page }, AbortSignal.timeout(15_000));
+  const snapshot = z.object({
+    total: z.number().int().nonnegative(),
+    items: z.array(z.object({
+      id: z.uuid(), slug: z.string().nullable(), image: z.string().nullable(), attempts: z.number(),
+      state: z.string(), bytes: z.number().nonnegative(), key: z.string(), preview: z.url()
+    })).max(8)
+  }).parse(await response.json());
+  const { default: sharp } = await import('sharp');
+  sharp.concurrency(1);
+  sharp.cache(false);
+  async function preview(url: string) {
+    try {
+      const image = await fetch(r2Url(url), { signal: AbortSignal.timeout(5_000), redirect: 'error' });
+      await requireR2Success(image);
+      if (!image.body) return undefined;
+      const input = await readImage(image.body);
+      return (await sharp(input, { limitInputPixels: 24_000_000 })
+        .rotate().resize(96, 96, { fit: 'inside', withoutEnlargement: true }).png().toBuffer()).toString('base64');
+    } catch { return undefined; }
+  }
+  const items = [];
+  for (let i = 0; i < snapshot.items.length; i += 2) {
+    items.push(...await Promise.all(snapshot.items.slice(i, i + 2).map(async ({ preview: url, ...item }) => ({
+      ...item, thumbnail: cachedKeys.includes(item.key) ? undefined : await preview(url)
+    }))));
+  }
+  console.log(JSON.stringify({ total: snapshot.total, items }));
+}
+
+async function local(inputPath: string, outputDirectory: string, quality: number, profile?: ProductImageProfile) {
+  const started = Date.now();
+  const source = await readImage(createReadStream(inputPath));
+  const outputs = await encode(source, quality, undefined, profile);
   const target = resolve(outputDirectory);
   const stage = await mkdtemp(target + '.tmp-');
   try {
@@ -258,8 +327,10 @@ async function local(inputPath: string, outputDirectory: string, quality: number
   }
   for (const variant of VARIANTS) {
     const { filename, data, width, height } = outputs[variant];
-    console.log(filename + ' | ' + width + ' × ' + height + ' px | ' + data.length + ' B');
+    const savings = (100 * (1 - data.length / source.length)).toFixed(1);
+    console.log(filename + '  ·  ' + width + ' × ' + height + ' px  ·  ' + (data.length / 1024).toFixed(1) + ' KiB  ·  ušteda ' + savings + '%');
   }
+  console.log('Original: ' + (source.length / 1024).toFixed(1) + ' KiB  ·  Obrada: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
 }
 
 const [mode, first, second, quality] = process.argv.slice(2);
@@ -267,7 +338,12 @@ try {
   if (mode === 'encode-child') runEncoderChild();
   else if (mode === 'local' && first && second) {
     await local(first, second, z.number().int().min(1).max(100).parse(quality === undefined ? 95 : Number(quality)));
-  } else if (mode === 'run' && first) await work(first, second);
+  } else if (mode === 'local-profile' && first && second && quality) {
+    await local(first, second, 95, profileSchema.parse(JSON.parse(Buffer.from(quality, 'base64').toString('utf8'))));
+  } else if (mode === 'queue' && first && second) {
+    const keys = z.array(z.string()).max(8).parse(JSON.parse(Buffer.from(quality ?? 'W10=', 'base64').toString('utf8')));
+    await queue(first, z.coerce.number().int().min(0).max(10000).parse(second), keys);
+  } else if (mode === 'run' && first) await work(first, second, quality);
   else throw new Error('Upotreba: worker.mjs local <original> <novi-folder> | worker.mjs run <config.json>');
 } catch (error) {
   console.error(mode === 'run' ? 'Worker nije pokrenut. Proveri konfiguraciju.' : error instanceof Error ? error.message : error);

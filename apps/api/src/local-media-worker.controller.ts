@@ -26,6 +26,7 @@ const completeSchema = z.object({
     variant: z.enum(variants),
     width: z.number().int().min(1).max(2048),
     height: z.number().int().min(1).max(2048),
+    maxSize: z.number().int().min(1).max(2048).optional(),
     bytes: z.number().int().min(1).max(25 * 1024 * 1024),
     sha256: z.string().regex(/^[a-f0-9]{64}$/)
   })).length(4)
@@ -52,6 +53,36 @@ export class LocalMediaWorkerController {
       throw new AuthenticationRequiredError();
     }
     return organization;
+  }
+
+  @Post('queue')
+  async queue(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    const parsed = z.object({ page: z.number().int().min(0).max(10000) }).safeParse(body);
+    if (!parsed.success) throw new ValidationFailedError('Invalid queue page');
+    response.setHeader('Cache-Control', 'no-store');
+    const { rows } = await this.db.pool.query<{
+      id: string; slug: string | null; image: string | null; attempts: number; state: string;
+      size: string; source_key: string; source_checksum: string; total: number;
+    }>(
+      `SELECT a.id, a.metadata->>'productSlug' AS slug, a.metadata->>'imageIndex' AS image,
+        a.size_bytes AS size, j.attempts, j.source_key, j.source_checksum, count(*) OVER ()::int AS total,
+        CASE WHEN j.lease_until>now() THEN 'active' WHEN j.paused_at IS NOT NULL OR j.attempts>=16 THEN 'paused'
+          WHEN j.attempts>=8 THEN 'fallback' WHEN j.available_at>now() THEN 'retry' ELSE 'waiting' END AS state
+       FROM media_derivative_jobs j JOIN media_assets a ON a.organization_id=j.organization_id AND a.id=j.media_asset_id
+       WHERE j.organization_id=$1 AND j.local_worker AND a.status='ready' AND a.deleted_at IS NULL AND a.storage_key=j.source_key
+       ORDER BY COALESCE(j.lease_until>now(), false) DESC, j.available_at, j.created_at, a.id LIMIT 8 OFFSET $2`,
+      [organizationId, parsed.data.page * 8]
+    );
+    const storage = new R2MediaStorageAdapter(this.config);
+    return {
+      total: rows[0]?.total ?? 0,
+      items: await Promise.all(rows.map(async row => ({
+        id: row.id, slug: row.slug, image: row.image, attempts: row.attempts, state: row.state, bytes: Number(row.size),
+        key: row.id + ':' + row.source_checksum,
+        preview: (await storage.createPresignedGet({ key: row.source_key })).downloadUrl
+      })))
+    };
   }
 
   @Post('claim')
@@ -98,7 +129,7 @@ export class LocalMediaWorkerController {
     ] as const);
     response.status(200);
     return {
-      id: job.media_asset_id, leaseToken: token, expiresAt: job.lease_until.toISOString(),
+      id: job.media_asset_id, leaseToken: token, expiresAt: job.lease_until.toISOString(), customSizes: true,
       source: { url: source.downloadUrl, sha256: job.source_checksum },
       uploads: Object.fromEntries(variants.map((variant, index) => [variant, uploads[index]]))
     };
@@ -133,11 +164,12 @@ export class LocalMediaWorkerController {
     for (const file of files) {
       const storageKey = keys[file.variant];
       const mimeType = mime(file.variant);
-      const maximum = file.variant.endsWith('Thumb') ? 512 : 2048;
+      const limit = file.variant.endsWith('Thumb') ? 512 : 2048;
+      const maximum = file.maxSize ?? limit;
       const sourceWidth = asset.width ?? 0;
       const sourceHeight = asset.height ?? 0;
       const scale = Math.min(1, maximum / Math.max(sourceWidth, sourceHeight));
-      const matchesDimensions = sourceWidth > 0 && sourceHeight > 0 &&
+      const matchesDimensions = maximum <= limit && sourceWidth > 0 && sourceHeight > 0 &&
         file.width <= Math.min(sourceWidth, maximum) && file.height <= Math.min(sourceHeight, maximum) &&
         Math.abs(file.width - Math.max(1, Math.round(sourceWidth * scale))) <= 1 &&
         Math.abs(file.height - Math.max(1, Math.round(sourceHeight * scale))) <= 1;

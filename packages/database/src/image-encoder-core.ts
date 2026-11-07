@@ -11,7 +11,14 @@ const THUMBNAIL_WIDTH = 512;
 export interface ImageOutputOptions {
   format?: 'webp' | 'avif';
   quality?: number;
+  effort?: number;
+  lossless?: boolean;
+  chromaSubsampling?: '4:4:4' | '4:2:0';
+  smartSubsample?: boolean;
 }
+
+type VariantOptions = Omit<ImageOutputOptions, 'format'> & { size: number };
+export type ProductImageProfile = Record<'avif' | 'webp' | 'avifThumb' | 'webpThumb', VariantOptions>;
 
 type Raster = { data: Buffer; width: number; height: number; channels: Channels };
 
@@ -64,8 +71,14 @@ async function encodeRaster(raster: Raster, width: number, options: ImageOutputO
   }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
   const { data, info } = await (
     format === 'avif'
-      ? pipeline.avif({ quality, effort: 4 })
-      : pipeline.webp({ quality, effort: 4, smartSubsample: true })
+      ? pipeline.avif({
+          quality, effort: options.effort ?? 4, lossless: options.lossless ?? false,
+          chromaSubsampling: options.lossless ? '4:4:4' : options.chromaSubsampling ?? '4:4:4'
+        })
+      : pipeline.webp({
+          quality, effort: options.effort ?? 4, lossless: options.lossless ?? false,
+          smartSubsample: options.smartSubsample ?? true
+        })
   ).toBuffer({ resolveWithObject: true });
   return { data, width: info.width, height: info.height };
 }
@@ -107,8 +120,18 @@ export async function prepareImageVariants(source: Buffer, options: ImageOutputO
   return encodeVariants(await decodeImage(source), options);
 }
 
-export async function prepareProductVariants(source: Buffer, mainAvifQuality = 65) {
+export async function prepareProductVariants(source: Buffer, mainAvifQuality = 65, profile?: ProductImageProfile) {
   const raster = await decodeImage(source);
+  if (profile) {
+    const encode = async (format: 'webp' | 'avif', main: VariantOptions, thumb: VariantOptions) => ({
+      original: await encodeRaster(raster, main.size, { ...main, format }),
+      thumbnail: await encodeRaster(raster, thumb.size, { ...thumb, format })
+    });
+    return {
+      webp: { ...await encode('webp', profile.webp, profile.webpThumb), mimeType: 'image/webp' as const },
+      avif: { ...await encode('avif', profile.avif, profile.avifThumb), mimeType: 'image/avif' as const }
+    };
+  }
   return {
     webp: await encodeVariants(raster, { format: 'webp', quality: 75 }),
     avif: await encodeVariants(raster, { format: 'avif', quality: 65 }, mainAvifQuality)

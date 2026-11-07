@@ -44,7 +44,7 @@ function isCustomerRoute(path: string): boolean {
   const normalized = path.replace(/^\/api\/v1/, '');
   return (
     normalized.startsWith('/customer-auth') ||
-    /^\/media\/local-worker\/(claim|complete)\/?$/.test(normalized) ||
+    /^\/media\/local-worker\/(claim|complete|queue)\/?$/.test(normalized) ||
     normalized.startsWith('/whatsapp/') ||
     normalized === '/contact' ||
     normalized.startsWith('/engraving/') ||
