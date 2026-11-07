@@ -8,6 +8,7 @@ import { CatalogDeliveryService } from './catalog-delivery.service.js';
 import { MediaCleanupService } from './media-cleanup.service.js';
 import { MediaDerivativesService } from './media-derivatives.service.js';
 import { LocalMediaWorkerController } from './local-media-worker.controller.js';
+import { LocalMediaPresence } from './local-media-presence.js';
 import { MediaUploadReaperService } from './media-upload-reaper.service.js';
 import { MediaProcessingController } from './media-processing.controller.js';
 import { clientNetwork } from './runtime/abuse-protection.js';
@@ -129,6 +130,7 @@ const rateStorage = new SharedRateStorage(config);
     WhatsAppNotificationsService,
     MediaCleanupService,
     MediaDerivativesService,
+    LocalMediaPresence,
     MediaUploadReaperService,
     CatalogBulkService,
     CatalogDeliveryService,

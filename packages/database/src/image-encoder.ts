@@ -3,6 +3,7 @@ import {
   prepareProductVariants,
   prepareAvifMain,
   prepareRemainingVariants,
+  inspectImageSource,
   type ImageOutputOptions
 } from './image-encoder-core.js';
 
@@ -13,12 +14,14 @@ process.once(
   (message: {
     source: Buffer;
     options?: ImageOutputOptions;
-    product: boolean | 'avif-main' | 'remaining';
+    product: boolean | 'avif-main' | 'remaining' | 'inspect';
   }) => {
     void (async () => {
       try {
         const result =
-          message.product === 'avif-main'
+          message.product === 'inspect'
+            ? await inspectImageSource(message.source)
+            : message.product === 'avif-main'
             ? await prepareAvifMain(message.source)
             : message.product === 'remaining'
               ? await prepareRemainingVariants(message.source)

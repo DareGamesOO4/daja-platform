@@ -15,16 +15,22 @@ export interface ImageOutputOptions {
 
 type Raster = { data: Buffer; width: number; height: number; channels: Channels };
 
-async function decodeImage(source: Buffer): Promise<Raster> {
+export async function inspectImageSource(source: Buffer) {
   const metadata = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
   if (
     !metadata.width ||
     !metadata.height ||
     metadata.width > MAX_IMAGE_DIMENSION ||
-    metadata.height > MAX_IMAGE_DIMENSION ||
+    metadata.height > MAX_IMAGE_DIMENSION || metadata.width * metadata.height > MAX_INPUT_PIXELS ||
     (metadata.pages ?? 1) > 1
   )
     throw new ValidationFailedError('Image dimensions or animation are unsupported');
+  const dimensions = metadata.autoOrient ?? { width: metadata.width, height: metadata.height };
+  return { width: dimensions.width, height: dimensions.height, format: metadata.format };
+}
+
+async function decodeImage(source: Buffer): Promise<Raster> {
+  await inspectImageSource(source);
   // Decode and orient the original once. Every output reuses this bounded raster
   // (at most 2048 x 2048), not a second decode of a 24-megapixel source.
   const { data, info } = await sharp(source, { limitInputPixels: MAX_INPUT_PIXELS })

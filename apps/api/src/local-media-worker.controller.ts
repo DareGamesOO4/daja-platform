@@ -5,15 +5,16 @@ import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import {
   MediaRepository, R2MediaStorageAdapter, StorefrontRepository, TransactionManager,
-  productMediaVariantKeys, resolveMediaFailures, sha256, type Database, type MediaAssetRow, type RedisConnection
+  productMediaVariantKeys, resolveMediaFailures, sha256, type Database, type MediaAssetRow
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { AppError, AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
 import type { SystemRequestContext } from '@daja/shared';
 import { equalSecret } from './runtime/edge-ingress.js';
-import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
-import { inspectLocalMediaSource, localWorkerPresenceKey } from './local-media-source.js';
+import { inspectLocalMediaSource } from './local-media-source.js';
+import { LocalMediaPresence } from './local-media-presence.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -41,7 +42,7 @@ export class LocalMediaWorkerController {
     @Inject(DATABASE) private readonly db: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(REDIS) private readonly redis: RedisConnection
+    @Inject(LocalMediaPresence) private readonly presence: LocalMediaPresence
   ) {}
 
   private authenticate(request: Request): string {
@@ -60,7 +61,7 @@ export class LocalMediaWorkerController {
       throw new ValidationFailedError('Unsupported worker profile');
     }
     response.setHeader('Cache-Control', 'no-store');
-    await this.redis.client.set(localWorkerPresenceKey(organizationId), '1', 'EX', 20);
+    await this.presence.announce(organizationId);
     const storage = new R2MediaStorageAdapter(this.config);
     const token = randomUUID();
     const job = await new TransactionManager(this.db.pool, this.logger).run(async client => {
@@ -127,24 +128,33 @@ export class LocalMediaWorkerController {
     if (!ownsJob.rowCount) throw new AppError('IMAGE_JOB_EXPIRED', 'Image job is no longer current', 409);
 
     const storage = new R2MediaStorageAdapter(this.config);
+    const verificationDeadline = AbortSignal.timeout(45_000);
     const verified: VerifiedFile[] = [];
     for (const file of files) {
       const storageKey = keys[file.variant];
       const mimeType = mime(file.variant);
       const maximum = file.variant.endsWith('Thumb') ? 512 : 2048;
+      const sourceWidth = asset.width ?? 0;
+      const sourceHeight = asset.height ?? 0;
+      const scale = Math.min(1, maximum / Math.max(sourceWidth, sourceHeight));
+      const matchesDimensions = sourceWidth > 0 && sourceHeight > 0 &&
+        file.width <= Math.min(sourceWidth, maximum) && file.height <= Math.min(sourceHeight, maximum) &&
+        Math.abs(file.width - Math.max(1, Math.round(sourceWidth * scale))) <= 1 &&
+        Math.abs(file.height - Math.max(1, Math.round(sourceHeight * scale))) <= 1;
       const publicUrl = storage.publicUrl(storageKey);
-      const object = await storage.headObject(storageKey);
+      const object = await storage.headObject(storageKey, verificationDeadline);
       if (!publicUrl || object.mimeType !== mimeType || object.sizeBytes !== file.bytes ||
-        Math.max(file.width, file.height) > maximum) {
+        !matchesDimensions) {
         throw new ValidationFailedError('Worker object metadata does not match');
       }
-      const image = await inspectLocalMediaSource(await storage.getObject(storageKey));
+      const image = await inspectLocalMediaSource(await storage.getObject(storageKey, verificationDeadline), verificationDeadline);
       if (image.checksumSha256 !== file.sha256 || image.mimeType !== mimeType ||
         image.width !== file.width || image.height !== file.height || image.sizeBytes !== file.bytes) {
         throw new ValidationFailedError('Worker object bytes do not match');
       }
       verified.push({ variant: file.variant, ...image, storageKey, publicUrl });
     }
+    verificationDeadline.throwIfAborted();
     const original = verified.find(file => file.variant === 'webp')!;
     const ctx: SystemRequestContext = {
       organizationId, requestId: leaseToken, correlationId: leaseToken,

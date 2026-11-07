@@ -9,7 +9,7 @@ import {
   S3Client
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { Readable } from 'node:stream';
+import { addAbortSignal, Readable } from 'node:stream';
 import type { AppConfig } from '@daja/config';
 import { ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import type { RequestContext } from '@daja/shared';
@@ -125,14 +125,15 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
     }), { expiresIn: 240, signableHeaders: new Set(['content-type', 'if-none-match']) });
   }
 
-  async headObject(key: string): Promise<{
+  async headObject(key: string, deadline?: AbortSignal): Promise<{
     sizeBytes: number;
     mimeType?: string;
     checksumSha256?: string;
     metadata?: Record<string, string>;
   }> {
     const response = await this.client.send(
-      new HeadObjectCommand({ Bucket: this.bucketName, Key: key })
+      new HeadObjectCommand({ Bucket: this.bucketName, Key: key }),
+      { abortSignal: r2Deadline(12_000, deadline) }
     );
     return {
       sizeBytes: response.ContentLength ?? 0,
@@ -142,12 +143,13 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
     };
   }
 
-  async getObject(key: string): Promise<Buffer> {
-    const signal = AbortSignal.timeout(20_000);
+  async getObject(key: string, deadline?: AbortSignal): Promise<Buffer> {
+    const signal = r2Deadline(20_000, deadline);
     const response = await this.client.send(
       new GetObjectCommand({ Bucket: this.bucketName, Key: key }), { abortSignal: signal }
     );
     if (!response.Body) throw new ValidationFailedError('Media object body is empty');
+    if (response.Body instanceof Readable) addAbortSignal(signal, response.Body);
     return readObjectBody(response.Body);
   }
 
@@ -168,7 +170,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         ...(input.cacheControl ? { CacheControl: input.cacheControl } : {}),
         ...(input.sizeBytes === undefined ? {} : { ContentLength: input.sizeBytes }),
         ...(input.metadata === undefined ? {} : { Metadata: input.metadata })
-      })
+      }), { abortSignal: AbortSignal.timeout(30_000) }
     );
   }
 
@@ -181,12 +183,14 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         // CopySource is a URL path. Encode each key while keeping the path
         // separators so R2 copies an object from the same bucket safely.
         CopySource: `${this.bucketName}/${encodeURIComponent(sourceKey).replace(/%2F/g, '/')}`
-      })
+      }), { abortSignal: AbortSignal.timeout(25_000) }
     );
   }
 
   async deleteObject(key: string): Promise<void> {
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }));
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }), {
+      abortSignal: AbortSignal.timeout(12_000)
+    });
   }
 
   bucket(): string {
@@ -198,6 +202,11 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
       ? `${this.config.MEDIA_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`
       : null;
   }
+}
+
+function r2Deadline(ms: number, deadline?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  return deadline ? AbortSignal.any([timeout, deadline]) : timeout;
 }
 
 export class MediaRepository {

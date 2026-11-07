@@ -17,14 +17,13 @@ import {
   runMediaProcessing,
   sha256,
   type Database,
-  type MediaAssetRow,
-  type RedisConnection
+  type MediaAssetRow
 } from '@daja/database';
 import { AppError } from '@daja/security';
-import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
 import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
-import { localWorkerPresenceKey } from './local-media-source.js';
+import { LocalMediaPresence } from './local-media-presence.js';
 
 type DerivativeJob = {
   organization_id: string;
@@ -64,7 +63,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
     @Inject(DATABASE) private readonly db: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(REDIS) private readonly redis: RedisConnection
+    @Inject(LocalMediaPresence) private readonly presence: LocalMediaPresence
   ) {}
 
   onModuleInit() {
@@ -102,11 +101,14 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
 
   private async processOne(): Promise<boolean> {
     const token = randomUUID();
-    const workerOnline = this.config.PUBLIC_ORGANIZATION_ID
-      ? Boolean(await this.redis.client.get(localWorkerPresenceKey(this.config.PUBLIC_ORGANIZATION_ID))) : false;
-    // One statement claims a row; no transaction/client is held during R2 or CPU work.
-    const job = (
-      await this.db.pool.query<DerivativeJob>(
+    const workerOnline = this.config.MEDIA_LOCAL_WORKER_TOKEN_HASH && this.config.PUBLIC_ORGANIZATION_ID
+      ? await this.presence.isOnline(this.config.PUBLIC_ORGANIZATION_ID) : false;
+    // Use the same claim lock as the Windows worker. Release it before R2 or CPU work.
+    const job = await new TransactionManager(this.db.pool, this.logger).run(async client => {
+      if (this.config.PUBLIC_ORGANIZATION_ID) await client.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1))', ['local-media:' + this.config.PUBLIC_ORGANIZATION_ID]
+      );
+      return (await client.query<DerivativeJob>(
         `UPDATE media_derivative_jobs j SET lease_until=now()+interval '5 minutes',
          lease_token=$1, attempts=j.attempts+1
        FROM (SELECT organization_id,media_asset_id FROM media_derivative_jobs
@@ -121,8 +123,8 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
          ORDER BY available_at,created_at,media_asset_id LIMIT 1 FOR UPDATE SKIP LOCKED) candidate
        WHERE j.organization_id=candidate.organization_id AND j.media_asset_id=candidate.media_asset_id RETURNING j.*`,
         [token, workerOnline]
-      )
-    ).rows[0];
+      )).rows[0];
+    });
     if (!job) return false;
     const ctx: SystemRequestContext = {
       organizationId: job.organization_id,

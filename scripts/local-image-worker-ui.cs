@@ -1,4 +1,5 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -58,7 +59,11 @@ internal static class Program
                     FileName = "node.exe", WorkingDirectory = folder, CreateNoWindow = true, UseShellExecute = false,
                     Arguments = "\"" + Path.Combine(folder, "worker.mjs") + "\" run \"" + config + "\" \"" + status + "\""
                 };
-                using (var process = Process.Start(start)) process.WaitForExit();
+                try
+                {
+                    using (var process = Process.Start(start)) process.WaitForExit();
+                }
+                catch (Win32Exception) { }
                 Thread.Sleep(TimeSpan.FromSeconds(15));
             }
         }
@@ -248,7 +253,13 @@ internal sealed class Dashboard : Form
             {
                 var stdout = process.StandardOutput.ReadToEndAsync();
                 var stderr = process.StandardError.ReadToEndAsync();
-                await Task.WhenAll(stdout, stderr);
+                var reading = Task.WhenAll(stdout, stderr);
+                if (await Task.WhenAny(reading, Task.Delay(TimeSpan.FromSeconds(120))) != reading)
+                {
+                    if (!process.HasExited) process.Kill();
+                    throw new TimeoutException("Isteklo je vreme za lokalnu obradu.");
+                }
+                await reading;
                 process.WaitForExit();
                 if (process.ExitCode != 0) throw new InvalidOperationException(stderr.Result.Trim());
                 lastFolder = output;

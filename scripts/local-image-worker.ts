@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
+import { fork } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { prepareProductVariants } from '../packages/database/src/image-encoder-core.js';
 
 const MAX_BYTES = 25 * 1024 * 1024;
 const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
@@ -37,7 +38,8 @@ async function readImage(chunks: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(buffers, length);
 }
 
-async function encode(source: Buffer, quality = 95) {
+async function encodeInChild(source: Buffer, quality: number) {
+  const { prepareProductVariants } = await import('../packages/database/src/image-encoder-core.js');
   const { avif, webp } = await prepareProductVariants(source, quality);
   return {
     avif: { ...avif.original, mime: avif.mimeType, filename: 'slika.avif' },
@@ -45,6 +47,61 @@ async function encode(source: Buffer, quality = 95) {
     avifThumb: { ...avif.thumbnail, mime: avif.mimeType, filename: 'slika-thumb.avif' },
     webpThumb: { ...webp.thumbnail, mime: webp.mimeType, filename: 'slika-thumb.webp' }
   };
+}
+
+type Encoded = Awaited<ReturnType<typeof encodeInChild>>;
+
+function encode(source: Buffer, quality = 95, jobSignal?: AbortSignal): Promise<Encoded> {
+  const deadline = AbortSignal.timeout(90_000);
+  const signal = jobSignal ? AbortSignal.any([jobSignal, deadline]) : deadline;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const child = fork(fileURLToPath(import.meta.url), ['encode-child'], {
+      execArgv: [], serialization: 'advanced', windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+    });
+    let settled = false;
+    function finish(error?: Error, result?: Encoded) {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      child.kill();
+      if (result) resolve(result);
+      else reject(error ?? new Error('Enkoder nije napravio rezultat.'));
+    }
+    const abort = () => finish(new Error('Isteklo je vreme za lokalno kodiranje.'));
+    signal.addEventListener('abort', abort, { once: true });
+    child.once('error', error => finish(error));
+    child.once('exit', () => finish(new Error('Proces za lokalno kodiranje je prekinut.')));
+    child.once('message', (message: { result?: Encoded }) => finish(undefined, message.result));
+    child.send({ source, quality }, error => { if (error) finish(error); });
+  });
+}
+
+function runEncoderChild() {
+  process.once('disconnect', () => process.exit(0));
+  process.once('message', (message: { source: Buffer; quality: number }) => {
+    void encodeInChild(message.source, message.quality).then(
+      result => process.send?.({ result }),
+      () => process.send?.({})
+    );
+  });
+}
+
+class HttpFailure extends Error {
+  constructor(service: string, readonly status: number) {
+    super(service + ' je vratio HTTP ' + status + '.');
+  }
+}
+
+async function retryTransfer<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof HttpFailure && error.status < 500 && error.status !== 429) throw error;
+    await delay(1_000, undefined, { signal });
+    return operation();
+  }
 }
 
 function r2Url(value: string): URL {
@@ -65,11 +122,11 @@ async function api(config: Config, route: string, payload: unknown, signal: Abor
     headers: { authorization: 'Bearer ' + config.token, 'content-type': 'application/json' },
     body: JSON.stringify(payload),
     redirect: 'error',
-    signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+    signal: AbortSignal.any([signal, AbortSignal.timeout(route === 'complete' ? 65_000 : 15_000)])
   });
   if (!response.ok) {
     await response.body?.cancel();
-    throw new Error('DAJA API je vratio HTTP ' + response.status + '.');
+    throw new HttpFailure('DAJA API', response.status);
   }
   return response;
 }
@@ -77,38 +134,45 @@ async function api(config: Config, route: string, payload: unknown, signal: Abor
 async function requireR2Success(response: Response): Promise<void> {
   if (!response.ok) {
     await response.body?.cancel();
-    throw new Error('R2 je vratio HTTP ' + response.status + '.');
+    throw new HttpFailure('R2', response.status);
   }
 }
 
 async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) {
   const remaining = Date.parse(claim.expiresAt) - Date.now() - 3_000;
   if (remaining <= 0) throw new Error('Rezervacija posla je istekla.');
-  const signal = AbortSignal.any([shutdown, AbortSignal.timeout(Math.min(remaining, 300_000))]);
-  const source = await fetch(r2Url(claim.source.url), { signal, redirect: 'error' });
+  const leaseSignal = AbortSignal.any([shutdown, AbortSignal.timeout(Math.min(remaining, 300_000))]);
+  const signal = AbortSignal.any([leaseSignal, AbortSignal.timeout(220_000)]);
+  const source = await fetch(r2Url(claim.source.url), {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]), redirect: 'error'
+  });
   await requireR2Success(source);
   if (!source.body) throw new Error('Izvorna slika je prazna.');
   const bytes = await readImage(source.body);
   if (checksum(bytes) !== claim.source.sha256) throw new Error('Kontrolni zbir originala se ne poklapa.');
 
-  const outputs = await encode(bytes);
+  const outputs = await encode(bytes, 95, signal);
   const files = [];
   for (const variant of VARIANTS) {
     signal.throwIfAborted();
     const image = outputs[variant];
-    const response = await fetch(r2Url(claim.uploads[variant]), {
-      method: 'PUT',
-      body: new Uint8Array(image.data),
-      headers: {
-        'content-type': image.mime,
-        'cache-control': 'public, max-age=31536000, immutable',
-        'if-none-match': '*'
-      },
-      redirect: 'error',
-      signal
-    });
-    await requireR2Success(response);
-    await response.body?.cancel();
+    const url = r2Url(claim.uploads[variant]);
+    await retryTransfer(async () => {
+      const response = await fetch(url, {
+        method: 'PUT',
+        body: new Uint8Array(image.data),
+        headers: {
+          'content-type': image.mime,
+          'cache-control': 'public, max-age=31536000, immutable',
+          'if-none-match': '*'
+        },
+        redirect: 'error',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)])
+      });
+      // A prior PUT may have succeeded even if its response was lost.
+      if (response.status !== 412) await requireR2Success(response);
+      await response.body?.cancel();
+    }, signal);
     files.push({
       variant,
       width: image.width,
@@ -117,7 +181,8 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal) 
       sha256: checksum(image.data)
     });
   }
-  const response = await api(config, 'complete', { id: claim.id, leaseToken: claim.leaseToken, files }, signal);
+  const response = await retryTransfer(() =>
+    api(config, 'complete', { id: claim.id, leaseToken: claim.leaseToken, files }, leaseSignal), leaseSignal);
   await response.body?.cancel();
 }
 
@@ -180,17 +245,27 @@ async function work(configPath: string, statusPath?: string) {
 
 async function local(inputPath: string, outputDirectory: string, quality: number) {
   const outputs = await encode(await readImage(createReadStream(inputPath)), quality);
-  await mkdir(outputDirectory);
+  const target = resolve(outputDirectory);
+  const stage = await mkdtemp(target + '.tmp-');
+  try {
+    for (const variant of VARIANTS) {
+      const { filename, data } = outputs[variant];
+      await writeFile(join(stage, filename), data, { flag: 'wx' });
+    }
+    await rename(stage, target);
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
   for (const variant of VARIANTS) {
     const { filename, data, width, height } = outputs[variant];
-    await writeFile(join(outputDirectory, filename), data, { flag: 'wx' });
     console.log(filename + ' | ' + width + ' × ' + height + ' px | ' + data.length + ' B');
   }
 }
 
 const [mode, first, second, quality] = process.argv.slice(2);
 try {
-  if (mode === 'local' && first && second) {
+  if (mode === 'encode-child') runEncoderChild();
+  else if (mode === 'local' && first && second) {
     await local(first, second, z.number().int().min(1).max(100).parse(quality === undefined ? 95 : Number(quality)));
   } else if (mode === 'run' && first) await work(first, second);
   else throw new Error('Upotreba: worker.mjs local <original> <novi-folder> | worker.mjs run <config.json>');

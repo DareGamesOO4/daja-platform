@@ -281,12 +281,13 @@ export async function downloadRemoteImage(value: string): Promise<DownloadedRemo
     throw new ValidationFailedError('Image URL must be valid');
   }
 
+  const deadline = AbortSignal.timeout(20_000);
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const address = await resolvePublicAddress(url);
-    const response = await requestRemoteUrl(url, address.address, address.family);
+    const address = await resolvePublicAddress(url, deadline);
+    const response = await requestRemoteUrl(url, address.address, address.family, deadline);
     if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0)) {
       const location = response.headers.location;
-      response.resume();
+      response.destroy();
       if (!location || Array.isArray(location)) {
         throw new ValidationFailedError('Remote image redirect is invalid');
       }
@@ -301,7 +302,7 @@ export async function downloadRemoteImage(value: string): Promise<DownloadedRemo
       continue;
     }
     if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
-      response.resume();
+      response.destroy();
       throw new ValidationFailedError(
         `Remote image could not be downloaded (HTTP ${response.statusCode})`
       );
@@ -313,7 +314,7 @@ export async function downloadRemoteImage(value: string): Promise<DownloadedRemo
       contentType !== 'application/octet-stream' &&
       !ACCEPTED_CONTENT_TYPES.has(contentType)
     ) {
-      response.resume();
+      response.destroy();
       throw new ValidationFailedError('Remote URL did not return a supported image');
     }
     return { buffer: await readLimitedResponse(response), contentType };
@@ -322,7 +323,8 @@ export async function downloadRemoteImage(value: string): Promise<DownloadedRemo
   throw new ValidationFailedError('Remote image has too many redirects');
 }
 
-async function resolvePublicAddress(url: URL): Promise<{ address: string; family: 4 | 6 }> {
+async function resolvePublicAddress(url: URL, deadline: AbortSignal): Promise<{ address: string; family: 4 | 6 }> {
+  if (deadline.aborted) throw new ValidationFailedError('Remote image download timed out');
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new ValidationFailedError('Image URL must use a public http(s) address');
   }
@@ -340,7 +342,12 @@ async function resolvePublicAddress(url: URL): Promise<{ address: string; family
 
   let addresses: Array<{ address: string; family: number }>;
   try {
-    addresses = await lookup(url.hostname, { all: true, verbatim: true });
+    addresses = await new Promise((resolve, reject) => {
+      const abort = () => reject(deadline.reason);
+      deadline.addEventListener('abort', abort, { once: true });
+      void lookup(url.hostname, { all: true, verbatim: true })
+        .then(resolve, reject).finally(() => deadline.removeEventListener('abort', abort));
+    });
   } catch {
     throw new ValidationFailedError('Image host could not be resolved');
   }
@@ -356,13 +363,14 @@ async function resolvePublicAddress(url: URL): Promise<{ address: string; family
   return { address: first.address, family: first.family };
 }
 
-function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<IncomingMessage> {
+function requestRemoteUrl(url: URL, address: string, family: 4 | 6, signal: AbortSignal): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const options: RequestOptions & { autoSelectFamily?: boolean } = {
       // We deliberately pin one address after validating it above. Node's
       // automatic multi-address selection expects a different lookup callback
       // shape and otherwise raises ERR_INVALID_IP_ADDRESS on Render.
       family,
+      signal,
       autoSelectFamily: false,
       headers: {
         Accept: 'image/avif,image/webp,image/png,image/jpeg;q=0.9,*/*;q=0.1',
@@ -376,8 +384,6 @@ function requestRemoteUrl(url: URL, address: string, family: 4 | 6): Promise<Inc
       response.on('error', () => {});
       resolve(response);
     });
-    const deadline = setTimeout(() => request.destroy(new Error('Remote image total download time exceeded')), 20_000);
-    request.once('close', () => clearTimeout(deadline));
     request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
       request.destroy(new Error('Remote image request timed out'));
     });
@@ -400,7 +406,7 @@ async function readLimitedResponse(response: IncomingMessage): Promise<Buffer> {
   const lengthHeader = response.headers['content-length'];
   const declaredLength = Number(Array.isArray(lengthHeader) ? lengthHeader[0] : lengthHeader);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_SOURCE_BYTES) {
-    response.resume();
+    response.destroy();
     throw new ValidationFailedError('Remote image must be 25 MiB or smaller');
   }
 

@@ -14,9 +14,13 @@ const waiting: Array<() => void> = [];
 
 async function isolatedEncode<T>(
   source: Buffer,
-  product: boolean | 'avif-main' | 'remaining',
-  options?: ImageOutputOptions
+  product: boolean | 'avif-main' | 'remaining' | 'inspect',
+  options?: ImageOutputOptions,
+  deadline?: AbortSignal
 ): Promise<T> {
+  const lease = mediaProcessingSignal();
+  const signal = deadline && lease ? AbortSignal.any([deadline, lease]) : deadline ?? lease;
+  signal?.throwIfAborted();
   if (!source.length || source.length > 25 * 1024 * 1024)
     throw new ValidationFailedError('Image must be 25 MiB or smaller');
   if (active) {
@@ -24,18 +28,22 @@ async function isolatedEncode<T>(
     await new Promise<void>((resolve, reject) => {
       const resume = () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
         resolve();
       };
-      const timer = setTimeout(() => {
+      const cancel = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
         const index = waiting.indexOf(resume);
         if (index >= 0) waiting.splice(index, 1);
         reject(busy());
-      }, 15_000);
+      };
+      const timer = setTimeout(cancel, product === 'inspect' ? 5_000 : 15_000);
       waiting.push(resume);
+      signal?.addEventListener('abort', cancel, { once: true });
     });
   } else active = true;
   try {
-    const signal = mediaProcessingSignal();
     signal?.throwIfAborted();
     return await new Promise<T>((resolve, reject) => {
       // A native codec crash/abort or JS heap failure terminates only this child.
@@ -99,7 +107,7 @@ async function isolatedEncode<T>(
               503
             )
           ),
-        45_000
+        product === 'inspect' ? 8_000 : 45_000
       );
       signal?.addEventListener('abort', abort, { once: true });
       child.once('error', (error: NodeJS.ErrnoException) =>
@@ -150,6 +158,11 @@ export function prepareImageVariants(
 }
 export function prepareProductImageVariants(source: Buffer): Promise<ProductVariants> {
   return isolatedEncode(source, true);
+}
+
+export function inspectImageSourceMetadata(source: Buffer, deadline?: AbortSignal):
+  Promise<Awaited<ReturnType<typeof import('./image-encoder-core.js').inspectImageSource>>> {
+  return isolatedEncode(source, 'inspect', undefined, deadline);
 }
 
 export function prepareAvifMainImage(
