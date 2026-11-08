@@ -145,11 +145,13 @@ async function requireR2Success(response: Response): Promise<void> {
   }
 }
 
-async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal, profile?: ProductImageProfile) {
+async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal,
+  profile: ProductImageProfile | undefined, activity: (value: string) => void) {
   const remaining = Date.parse(claim.expiresAt) - Date.now() - 3_000;
   if (remaining <= 0) throw new Error('Rezervacija posla je istekla.');
   const leaseSignal = AbortSignal.any([shutdown, AbortSignal.timeout(Math.min(remaining, 300_000))]);
   const signal = AbortSignal.any([leaseSignal, AbortSignal.timeout(220_000)]);
+  activity('Preuzimanje originala');
   const source = await fetch(r2Url(claim.source.url), {
     signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]), redirect: 'error'
   });
@@ -162,9 +164,11 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal, 
     avif: { ...profile.avif, size: 2048 }, webp: { ...profile.webp, size: 2048 },
     avifThumb: { ...profile.avifThumb, size: 512 }, webpThumb: { ...profile.webpThumb, size: 512 }
   });
+  activity('Obrada četiri verzije');
   const outputs = await encode(bytes, 95, signal, outputProfile);
   const files = [];
   for (const variant of VARIANTS) {
+    activity(`Slanje u R2 (${files.length + 1}/4)`);
     signal.throwIfAborted();
     const image = outputs[variant];
     const url = r2Url(claim.uploads[variant]);
@@ -193,6 +197,7 @@ async function handleClaim(config: Config, claim: Claim, shutdown: AbortSignal, 
       sha256: checksum(image.data)
     });
   }
+  activity('Potvrda rezultata na serveru');
   const response = await retryTransfer(() =>
     api(config, 'complete', { id: claim.id, leaseToken: claim.leaseToken, files }, leaseSignal), leaseSignal);
   await response.body?.cancel();
@@ -213,10 +218,20 @@ async function work(configPath: string, statusPath?: string) {
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
-  const status = { phase: 'connecting', job: '', completed: '', error: '' };
+  const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown };
+  async function refreshRenderStatus() {
+    try {
+      const response = await api(config, 'status', {}, shutdown.signal);
+      status.render = await response.json();
+    } catch { status.render = null; }
+  }
+  void refreshRenderStatus();
+  const renderTimer = setInterval(() => void refreshRenderStatus(), 30_000);
+  renderTimer.unref();
+  shutdown.signal.addEventListener('abort', () => clearInterval(renderTimer), { once: true });
   if (basename(configPath) === 'worker-user.json') {
     if (existsSync(join(dirname(configPath), 'studio', 'index.html'))) {
-      startPanel(config, dirname(configPath), status, shutdown.signal);
+      startPanel(dirname(configPath), status, shutdown.signal);
     }
   }
   let pendingWrite = false;
@@ -242,9 +257,12 @@ async function work(configPath: string, statusPath?: string) {
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
       if (response.status !== 204) {
         const claim = claimSchema.parse(await response.json());
-        Object.assign(status, { phase: 'working', job: claim.id, error: '' });
+        Object.assign(status, { phase: 'working', job: claim.id, error: '', activity: 'Preuzimanje originala' });
         await publishStatus();
-        await handleClaim(config, claim, shutdown.signal, claim.profile);
+        await handleClaim(config, claim, shutdown.signal, claim.profile, activity => {
+          status.activity = activity;
+          void publishStatus();
+        });
         status.completed = new Date().toISOString();
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
@@ -296,13 +314,10 @@ async function queue(configPath: string, page: number, cachedKeys: string[]) {
   return { total: snapshot.total, items };
 }
 
-function startPanel(config: Config, folder: string, status: unknown, shutdown: AbortSignal) {
+function startPanel(folder: string, status: { render: unknown }, shutdown: AbortSignal) {
   const host = '127.0.0.1:41627';
   const origin = 'http://' + host;
   let encoding = false;
-  let render: unknown = null;
-  let nextStatus = 0;
-  let checking = false;
   const server = createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -325,15 +340,7 @@ function startPanel(config: Config, folder: string, status: unknown, shutdown: A
         const data = await readFile(join(folder, 'studio', asset[0]));
         res.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }).end(data);
       } else if (req.method === 'GET' && route === '/state') {
-        if (!checking && Date.now() >= nextStatus) {
-          checking = true;
-          try {
-            const response = await api(config, 'status', {}, shutdown);
-            render = await response.json();
-          } catch { render = null; }
-          finally { checking = false; nextStatus = Date.now() + 30_000; }
-        }
-        reply(200, { status, render });
+        reply(200, { status, render: status.render });
       } else if (req.method === 'POST' && route === '/convert') {
         if (encoding) return reply(409, { error: 'Lokalna proba je već u toku.' });
         if (Number(req.headers['content-length']) > MAX_BYTES) return reply(413, { error: 'Najviše 25 MiB po slici.' });
