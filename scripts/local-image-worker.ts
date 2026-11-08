@@ -259,7 +259,10 @@ async function work(configPath: string, statusPath?: string) {
     try {
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
       if (response.status !== 204) {
-        const claim = claimSchema.parse(await response.json());
+        const payload = await response.json() as { data?: unknown };
+        const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload
+          ? payload.data
+          : payload);
         Object.assign(status, { phase: 'working', job: claim.id, error: '', activity: 'Preuzimanje originala' });
         await publishStatus();
         await handleClaim(config, claim, shutdown.signal, claim.profile, activity => {
@@ -273,9 +276,12 @@ async function work(configPath: string, statusPath?: string) {
       Object.assign(status, { phase: response.headers.get('X-Daja-Worker-Paused') === '1' ? 'paused' : 'ready', job: '', error: '' });
     } catch (error) {
       if (shutdown.signal.aborted) return;
+      const detail = error instanceof Error
+        ? `${error.name}: ${error.message}`.replace(/https?:\/\/[^\s)]+/g, '[URL]').slice(0, 220)
+        : 'Nepoznata greška.';
       const reason = error instanceof Error && /^(DAJA API|R2) je vratio HTTP \d+\.$/.test(error.message)
         ? error.message
-        : 'Posao ili veza nisu dostupni.';
+        : detail;
       console.error(reason + ' Novi pokušaj za 15 sekundi.');
       Object.assign(status, { phase: 'error', job: '', error: reason });
       pause = 15_000;
@@ -288,13 +294,14 @@ async function work(configPath: string, statusPath?: string) {
 async function queue(configPath: string, page: number, cachedKeys: string[]) {
   const config = await loadConfig(configPath);
   const response = await api(config, 'queue', { page }, AbortSignal.timeout(15_000));
+  const payload = await response.json() as { data?: unknown };
   const snapshot = z.object({
     total: z.number().int().nonnegative(),
     items: z.array(z.object({
       id: z.uuid(), slug: z.string().nullable(), image: z.string().nullable(), attempts: z.number(),
       state: z.string(), bytes: z.number().nonnegative(), key: z.string(), preview: z.url()
     })).max(8)
-  }).parse(await response.json());
+  }).parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
   const { default: sharp } = await import('sharp');
   sharp.concurrency(1);
   sharp.cache(false);
