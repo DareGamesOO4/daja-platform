@@ -104,7 +104,25 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
         !body.includes('product-model')) return { status: 'error' };
     const stock = body.match(/<li\b[^>]*class=["'][^"']*\bproduct-stock\b[^"']*["'][^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1]?.trim();
     const offerPrice = body.match(/"offers"\s*:\s*\{[\s\S]{0,1200}?"priceCurrency"\s*:\s*"([A-Z]+)"[\s\S]{0,160}?"price"\s*:\s*"?([0-9.]+)/i);
-    return { status: 'available', stockStatus: stock === 'В наличност' ? 'in_stock' : stock === 'Няма наличност' ? 'out_of_stock' : null, priceAmount: offerPrice ? Number(offerPrice[2]) : null, priceCurrency: offerPrice?.[1] || null };
+    // The structured offer advertises the sale price. Use the regular price
+    // from the main product block, not the price-old tags of related products.
+    const oldPriceTag = /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-old(?=\s|["'])[^"']*["'][^>]*>/i.exec(body);
+    const oldPrice = oldPriceTag
+      ? body.slice(oldPriceTag.index + oldPriceTag[0].length).split('</div>', 1)[0]
+      : null;
+    const regular = oldPrice?.replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ')
+      .match(/([0-9]+(?:\s+[0-9]{3})*(?:[.,][0-9]+)?)\s*(€|&euro;|EUR|лв\.?|BGN)/i);
+    const hasDiscount = oldPriceTag || /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-new(?=\s|["'])/i.test(body);
+    const priceAmount = regular ? Number(regular[1]!.replace(/\s/g, '').replace(',', '.'))
+      : !hasDiscount && offerPrice ? Number(offerPrice[2]) : null;
+    const priceCurrency = regular ? (/^(лв|BGN)/i.test(regular[2]!) ? 'BGN' : 'EUR')
+      : !hasDiscount ? offerPrice?.[1] ?? null : null;
+    return {
+      status: 'available',
+      stockStatus: stock === 'В наличност' ? 'in_stock' : stock === 'Няма наличност' ? 'out_of_stock' : null,
+      priceAmount: priceAmount !== null && Number.isFinite(priceAmount) ? priceAmount : null,
+      priceCurrency
+    };
   }
   return { status: 'error', accessFailed: true };
 }
