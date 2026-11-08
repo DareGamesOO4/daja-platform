@@ -6,7 +6,9 @@ async function updateState() {
   try {
     const response = await fetch('/state');
     if (!response.ok) throw new Error();
-    const { status, render } = await response.json();
+    const payload = await response.json();
+    const { status } = payload;
+    const render = payload.render?.data ?? payload.render;
     byId('worker').textContent = 'DAJA računar · ' + (phases[status.phase] ?? 'nepoznato stanje') +
       (status.error ? ' (' + status.error + ')' : '');
     const failed = render?.renderErrorAt && (!render.renderCompletedAt ||

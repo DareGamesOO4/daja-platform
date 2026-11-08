@@ -222,7 +222,10 @@ async function work(configPath: string, statusPath?: string) {
   async function refreshRenderStatus() {
     try {
       const response = await api(config, 'status', {}, shutdown.signal);
-      status.render = await response.json();
+      const payload = await response.json() as { data?: unknown };
+      status.render = payload && typeof payload === 'object' && 'data' in payload
+        ? payload.data
+        : payload;
     } catch { status.render = null; }
   }
   void refreshRenderStatus();
