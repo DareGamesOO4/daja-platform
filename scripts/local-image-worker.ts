@@ -8,30 +8,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { ProductImageProfile } from '../packages/database/src/image-encoder-core.js';
+import {
+  defaultMediaWorkerProfile, mediaWorkerProfileSchema as profileSchema
+} from '../packages/validation/src/media-worker-profile.js';
 
 const MAX_BYTES = 25 * 1024 * 1024;
 const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
-const outputOptions = (size: number, effort: number) => z.object({
-  quality: z.number().int().min(1).max(100),
-  effort: z.number().int().min(0).max(effort),
-  size: z.number().int().min(1).max(size),
-  lossless: z.boolean()
-});
-const avifOptions = (size: number) => outputOptions(size, 9).extend({ chromaSubsampling: z.enum(['4:4:4', '4:2:0']) });
-const webpOptions = (size: number) => outputOptions(size, 6).extend({ smartSubsample: z.boolean() });
-const profileSchema = z.object({
-  paused: z.boolean(),
-  avif: avifOptions(2048), webp: webpOptions(2048),
-  avifThumb: avifOptions(512), webpThumb: webpOptions(512)
-});
-type Profile = z.infer<typeof profileSchema>;
-const standardProfile: Profile = {
-  paused: false,
-  avif: { quality: 95, effort: 4, size: 2048, lossless: false, chromaSubsampling: '4:4:4' },
-  webp: { quality: 75, effort: 4, size: 2048, lossless: false, smartSubsample: true },
-  avifThumb: { quality: 65, effort: 4, size: 512, lossless: false, chromaSubsampling: '4:4:4' },
-  webpThumb: { quality: 75, effort: 4, size: 512, lossless: false, smartSubsample: true }
-};
 const configSchema = z.object({
   apiBaseUrl: z.url(),
   token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/)
@@ -41,6 +23,7 @@ const claimSchema = z.object({
   leaseToken: z.uuid(),
   expiresAt: z.iso.datetime(),
   customSizes: z.boolean().optional(),
+  profile: profileSchema.optional(),
   source: z.object({ url: z.url(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }),
   uploads: z.object({ avif: z.url(), webp: z.url(), avifThumb: z.url(), webpThumb: z.url() })
 });
@@ -225,16 +208,15 @@ async function loadConfig(configPath: string) {
   return config;
 }
 
-async function work(configPath: string, statusPath?: string, profilePath?: string) {
+async function work(configPath: string, statusPath?: string) {
   const config = await loadConfig(configPath);
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
   const status = { phase: 'connecting', job: '', completed: '', error: '' };
   if (basename(configPath) === 'worker-user.json') {
-    profilePath ??= join(dirname(configPath), 'worker-profile.json');
     if (existsSync(join(dirname(configPath), 'studio', 'index.html'))) {
-      startPanel(configPath, profilePath, status, shutdown.signal);
+      startPanel(config, dirname(configPath), status, shutdown.signal);
     }
   }
   let pendingWrite = false;
@@ -257,24 +239,17 @@ async function work(configPath: string, statusPath?: string, profilePath?: strin
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     try {
-      const profile = profilePath ? await loadProfile(profilePath) : undefined;
-      if (profile?.paused) {
-        Object.assign(status, { phase: 'paused', job: '', error: '' });
-        await publishStatus();
-        await delay(pause, undefined, { signal: shutdown.signal }).catch(() => {});
-        continue;
-      }
-      const response = await api(config, 'claim', { profile: 'avif95-v1' }, shutdown.signal);
+      const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
       if (response.status !== 204) {
         const claim = claimSchema.parse(await response.json());
         Object.assign(status, { phase: 'working', job: claim.id, error: '' });
         await publishStatus();
-        await handleClaim(config, claim, shutdown.signal, profile);
+        await handleClaim(config, claim, shutdown.signal, claim.profile);
         status.completed = new Date().toISOString();
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
       }
-      Object.assign(status, { phase: 'ready', job: '', error: '' });
+      Object.assign(status, { phase: response.headers.get('X-Daja-Worker-Paused') === '1' ? 'paused' : 'ready', job: '', error: '' });
     } catch (error) {
       if (shutdown.signal.aborted) return;
       const reason = error instanceof Error && /^(DAJA API|R2) je vratio HTTP \d+\.$/.test(error.message)
@@ -321,20 +296,13 @@ async function queue(configPath: string, page: number, cachedKeys: string[]) {
   return { total: snapshot.total, items };
 }
 
-async function loadProfile(path: string): Promise<Profile | undefined> {
-  const raw = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return undefined;
-    throw error;
-  });
-  return raw === undefined ? undefined : profileSchema.parse(JSON.parse(raw));
-}
-
-function startPanel(configPath: string, profilePath: string, status: unknown, shutdown: AbortSignal) {
+function startPanel(config: Config, folder: string, status: unknown, shutdown: AbortSignal) {
   const host = '127.0.0.1:41627';
   const origin = 'http://' + host;
-  const folder = dirname(configPath);
   let encoding = false;
-  let listing = false;
+  let render: unknown = null;
+  let nextStatus = 0;
+  let checking = false;
   const server = createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -357,39 +325,25 @@ function startPanel(configPath: string, profilePath: string, status: unknown, sh
         const data = await readFile(join(folder, 'studio', asset[0]));
         res.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }).end(data);
       } else if (req.method === 'GET' && route === '/state') {
-        reply(200, { status, profile: await loadProfile(profilePath) ?? standardProfile });
-      } else if (req.method === 'POST' && route === '/profile') {
-        const body = await readImage(req, 8192);
-        const profile = profileSchema.parse(JSON.parse(body.toString('utf8')));
-        const temporary = profilePath + '.' + randomUUID() + '.tmp';
-        try {
-          await writeFile(temporary, JSON.stringify(profile), { flag: 'wx' });
-          await rename(temporary, profilePath);
-        } finally {
-          await rm(temporary, { force: true });
+        if (!checking && Date.now() >= nextStatus) {
+          checking = true;
+          try {
+            const response = await api(config, 'status', {}, shutdown);
+            render = await response.json();
+          } catch { render = null; }
+          finally { checking = false; nextStatus = Date.now() + 30_000; }
         }
-        reply(200, { profile });
-      } else if (req.method === 'POST' && route === '/queue') {
-        if (listing) return reply(409, { error: 'Red se već osvežava.' });
-        listing = true;
-        try {
-          const body = z.object({
-            page: z.number().int().min(0).max(10000), keys: z.array(z.string().max(110)).max(8)
-          }).parse(JSON.parse((await readImage(req, 4096)).toString('utf8')));
-          reply(200, await queue(configPath, body.page, body.keys));
-        } finally { listing = false; }
+        reply(200, { status, render });
       } else if (req.method === 'POST' && route === '/convert') {
         if (encoding) return reply(409, { error: 'Lokalna proba je već u toku.' });
         if (Number(req.headers['content-length']) > MAX_BYTES) return reply(413, { error: 'Najviše 25 MiB po slici.' });
         encoding = true;
         try {
-          const settings = z.string().max(8192).parse(req.headers['x-daja-profile']);
-          const profile = profileSchema.parse(JSON.parse(Buffer.from(settings, 'base64').toString('utf8')));
           const source = await readImage(req);
           const id = randomUUID();
           const output = join(folder, 'Rezultati', id);
           await mkdir(dirname(output), { recursive: true });
-          const result = await saveOutputs(source, output, 95, profile);
+          const result = await saveOutputs(source, output, 95, defaultMediaWorkerProfile);
           reply(200, { id, output, ...result });
         } finally { encoding = false; }
       } else {
@@ -450,7 +404,7 @@ try {
   } else if (mode === 'queue' && first && second) {
     const keys = z.array(z.string()).max(8).parse(JSON.parse(Buffer.from(quality ?? 'W10=', 'base64').toString('utf8')));
     console.log(JSON.stringify(await queue(first, z.coerce.number().int().min(0).max(10000).parse(second), keys)));
-  } else if (mode === 'run' && first) await work(first, second, quality);
+  } else if (mode === 'run' && first) await work(first, second);
   else throw new Error('Upotreba: worker.mjs local <original> <novi-folder> | worker.mjs run <config.json>');
 } catch (error) {
   console.error(mode === 'run' ? 'Worker nije pokrenut. Proveri konfiguraciju.' : error instanceof Error ? error.message : error);

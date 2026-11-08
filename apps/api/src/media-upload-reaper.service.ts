@@ -27,6 +27,11 @@ export class MediaUploadReaperService implements OnModuleInit, OnModuleDestroy {
 
   private async tick() {
     try {
+      await this.db.pool.query(
+        `DELETE FROM media_import_cancellations WHERE (organization_id,request_id) IN (
+          SELECT organization_id,request_id FROM media_import_cancellations WHERE expires_at<=now()
+          ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)`
+      );
       const candidate = (await this.db.pool.query<{ organization_id: string; id: string }>(
         `SELECT a.organization_id,a.id FROM media_assets a
          WHERE a.status IN ('pending_upload','uploaded','failed') AND a.mime_type LIKE 'image/%' AND a.deleted_at IS NULL

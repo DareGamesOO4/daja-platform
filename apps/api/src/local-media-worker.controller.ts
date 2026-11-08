@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Body, Controller, Inject, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import {
@@ -10,11 +11,13 @@ import {
 import type { Logger } from '@daja/observability';
 import { AppError, AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
 import type { SystemRequestContext } from '@daja/shared';
+import { defaultMediaWorkerProfile, mediaWorkerProfileSchema } from '@daja/validation';
 import { equalSecret } from './runtime/edge-ingress.js';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
 import { inspectLocalMediaSource } from './local-media-source.js';
 import { LocalMediaPresence } from './local-media-presence.js';
+import { apiUnderLoad } from './runtime/abuse-protection.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -39,6 +42,8 @@ type VerifiedFile = Awaited<ReturnType<typeof inspectLocalMediaSource>> & {
 
 @Controller('media/local-worker')
 export class LocalMediaWorkerController {
+  private verifying = false;
+
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
@@ -53,6 +58,14 @@ export class LocalMediaWorkerController {
       throw new AuthenticationRequiredError();
     }
     return organization;
+  }
+
+  @Post('status')
+  async status(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    response.setHeader('Cache-Control', 'no-store');
+    const { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt } = await this.presence.status(organizationId);
+    return { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt };
   }
 
   @Post('queue')
@@ -70,7 +83,7 @@ export class LocalMediaWorkerController {
         CASE WHEN j.lease_until>now() THEN 'active' WHEN j.paused_at IS NOT NULL OR j.attempts>=16 THEN 'paused'
           WHEN j.attempts>=8 THEN 'fallback' WHEN j.available_at>now() THEN 'retry' ELSE 'waiting' END AS state
        FROM media_derivative_jobs j JOIN media_assets a ON a.organization_id=j.organization_id AND a.id=j.media_asset_id
-       WHERE j.organization_id=$1 AND j.local_worker AND a.status='ready' AND a.deleted_at IS NULL AND a.storage_key=j.source_key
+       WHERE j.organization_id=$1 AND j.local_worker AND a.status='ready' AND a.deleted_at IS NULL AND a.storage_key=j.avif_main_key
        ORDER BY COALESCE(j.lease_until>now(), false) DESC, j.available_at, j.created_at, a.id LIMIT 8 OFFSET $2`,
       [organizationId, parsed.data.page * 8]
     );
@@ -88,38 +101,54 @@ export class LocalMediaWorkerController {
   @Post('claim')
   async claim(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const organizationId = this.authenticate(request);
-    if (!z.object({ profile: z.literal('avif95-v1') }).safeParse(body).success) {
+    const protocol = z.object({ profile: z.literal('avif95-v1'), managed: z.boolean().optional() }).safeParse(body);
+    if (!protocol.success) {
       throw new ValidationFailedError('Unsupported worker profile');
     }
     response.setHeader('Cache-Control', 'no-store');
-    await this.presence.announce(organizationId);
     const storage = new R2MediaStorageAdapter(this.config);
     const token = randomUUID();
     const job = await new TransactionManager(this.db.pool, this.logger).run(async client => {
       // Serialize claims per organization. Only one PC job may be outstanding.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['local-media:' + organizationId]);
+      const saved = (await client.query<{ profile: unknown }>(
+        'SELECT profile FROM media_worker_settings WHERE organization_id=$1', [organizationId]
+      )).rows[0]?.profile;
+      const profile = mediaWorkerProfileSchema.safeParse(saved).data ?? defaultMediaWorkerProfile;
+      await client.query(
+        `INSERT INTO media_worker_settings(organization_id,pc_seen_at,pc_available_at)
+         VALUES($1,now(),CASE WHEN NOT $2::boolean THEN now() END)
+         ON CONFLICT(organization_id) DO UPDATE SET pc_seen_at=now(),
+         pc_available_at=CASE WHEN NOT $2 THEN now() ELSE media_worker_settings.pc_available_at END
+         WHERE media_worker_settings.pc_seen_at IS NULL OR media_worker_settings.pc_seen_at<now()-interval '15 seconds'
+         OR (NOT $2 AND media_worker_settings.pc_available_at IS NULL)`,
+        [organizationId, profile.paused]
+      );
+      if (profile.paused) return { paused: true } as const;
       const claimed = (await client.query<Job>(
         'WITH candidate AS (' +
         ' SELECT j.media_asset_id FROM media_derivative_jobs j JOIN media_assets a ON a.id=j.media_asset_id AND a.organization_id=j.organization_id' +
         ' WHERE j.organization_id=$1 AND j.local_worker AND j.available_at<=now() AND j.paused_at IS NULL AND j.attempts<8' +
-        ' AND (j.lease_until IS NULL OR j.lease_until<=now()) AND a.status=' + "'ready'" + ' AND a.deleted_at IS NULL AND a.storage_key=j.source_key' +
+        ' AND (j.rendered_at IS NULL OR $3::boolean)' +
+        ' AND (j.lease_until IS NULL OR j.lease_until<=now()) AND a.status=' + "'ready'" + ' AND a.deleted_at IS NULL AND a.storage_key=j.avif_main_key' +
         ' AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs active WHERE active.organization_id=$1 AND active.local_worker AND active.lease_until>now())' +
         ' ORDER BY j.available_at,j.created_at,j.media_asset_id LIMIT 1 FOR UPDATE OF j SKIP LOCKED' +
-        ') UPDATE media_derivative_jobs j SET lease_until=now()+interval ' + "'5 minutes'" + ',lease_token=$2,attempts=j.attempts+1' +
+        ') UPDATE media_derivative_jobs j SET lease_until=now()+interval ' + "'5 minutes'" + ",lease_token=$2,lease_worker='pc',attempts=j.attempts+1" +
         ' FROM candidate c,media_assets a WHERE j.organization_id=$1 AND j.media_asset_id=c.media_asset_id AND a.id=j.media_asset_id' +
         ' RETURNING j.media_asset_id,j.source_key,j.source_checksum,j.lease_until,to_jsonb(a) AS asset',
-        [organizationId, token]
+        [organizationId, token, Boolean(protocol.data.managed)]
       )).rows[0];
       if (!claimed) return null;
       const keys = productMediaVariantKeys(claimed.asset, token);
       await client.query(
-        "INSERT INTO media_storage_deletions(organization_id,storage_key,available_at) " +
-        "SELECT $1,key,now()+interval '20 minutes' FROM unnest($2::text[]) AS uploads(key) ON CONFLICT DO NOTHING",
-        [organizationId, variants.map(variant => keys[variant])]
+        "INSERT INTO media_storage_deletions(organization_id,storage_key,media_asset_id,available_at) " +
+        "SELECT $1,key,$3,now()+interval '20 minutes' FROM unnest($2::text[]) AS uploads(key) ON CONFLICT DO NOTHING",
+        [organizationId, variants.map(variant => keys[variant]), claimed.media_asset_id]
       );
-      return { ...claimed, keys };
+      return { ...claimed, keys, profile };
     });
-    if (!job) {
+    if (!job || 'paused' in job) {
+      if (job) response.setHeader('X-Daja-Worker-Paused', '1');
       response.status(204);
       return;
     }
@@ -130,12 +159,14 @@ export class LocalMediaWorkerController {
     response.status(200);
     return {
       id: job.media_asset_id, leaseToken: token, expiresAt: job.lease_until.toISOString(), customSizes: true,
+      ...(protocol.data.managed ? { profile: job.profile } : {}),
       source: { url: source.downloadUrl, sha256: job.source_checksum },
       uploads: Object.fromEntries(variants.map((variant, index) => [variant, uploads[index]]))
     };
   }
 
   @Post('complete')
+  @Throttle({ default: { limit: 12, ttl: 60_000 } })
   async complete(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const organizationId = this.authenticate(request);
     const parsed = completeSchema.safeParse(body);
@@ -152,41 +183,50 @@ export class LocalMediaWorkerController {
       response.status(204);
       return;
     }
-    const ownsJob = await this.db.pool.query(
-      'SELECT 1 FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND local_worker AND lease_token=$3 AND lease_until>now() AND source_key=$4',
+    if (apiUnderLoad()) throw new AppError('IMAGE_PROCESSING_BUSY', 'Image verification is temporarily busy', 503);
+    const ownsJob = (await this.db.pool.query<{ source_key: string; source_width: number | null; source_height: number | null }>(
+      `SELECT source_key,source_width,source_height FROM media_derivative_jobs WHERE organization_id=$1
+       AND media_asset_id=$2 AND local_worker AND lease_token=$3 AND lease_until>now() AND avif_main_key=$4
+       AND coalesce(lease_worker,'pc')='pc'`,
       [organizationId, id, leaseToken, asset.storage_key]
-    );
-    if (!ownsJob.rowCount) throw new AppError('IMAGE_JOB_EXPIRED', 'Image job is no longer current', 409);
+    )).rows[0];
+    if (!ownsJob) throw new AppError('IMAGE_JOB_EXPIRED', 'Image job is no longer current', 409);
 
-    const storage = new R2MediaStorageAdapter(this.config);
-    const verificationDeadline = AbortSignal.timeout(45_000);
+    if (this.verifying) throw new AppError('IMAGE_PROCESSING_BUSY', 'Image verification is temporarily busy', 503);
+    this.verifying = true;
     const verified: VerifiedFile[] = [];
-    for (const file of files) {
-      const storageKey = keys[file.variant];
-      const mimeType = mime(file.variant);
-      const limit = file.variant.endsWith('Thumb') ? 512 : 2048;
-      const maximum = file.maxSize ?? limit;
-      const sourceWidth = asset.width ?? 0;
-      const sourceHeight = asset.height ?? 0;
-      const scale = Math.min(1, maximum / Math.max(sourceWidth, sourceHeight));
-      const matchesDimensions = maximum <= limit && sourceWidth > 0 && sourceHeight > 0 &&
-        file.width <= Math.min(sourceWidth, maximum) && file.height <= Math.min(sourceHeight, maximum) &&
-        Math.abs(file.width - Math.max(1, Math.round(sourceWidth * scale))) <= 1 &&
-        Math.abs(file.height - Math.max(1, Math.round(sourceHeight * scale))) <= 1;
-      const publicUrl = storage.publicUrl(storageKey);
-      const object = await storage.headObject(storageKey, verificationDeadline);
-      if (!publicUrl || object.mimeType !== mimeType || object.sizeBytes !== file.bytes ||
-        !matchesDimensions) {
-        throw new ValidationFailedError('Worker object metadata does not match');
+    try {
+      const storage = new R2MediaStorageAdapter(this.config);
+      const verificationDeadline = AbortSignal.timeout(45_000);
+      for (const file of files) {
+        const storageKey = keys[file.variant];
+        const mimeType = mime(file.variant);
+        const limit = file.variant.endsWith('Thumb') ? 512 : 2048;
+        const maximum = file.maxSize ?? limit;
+        const sourceWidth = ownsJob.source_width ?? asset.width ?? 0;
+        const sourceHeight = ownsJob.source_height ?? asset.height ?? 0;
+        const scale = Math.min(1, maximum / Math.max(sourceWidth, sourceHeight));
+        const matchesDimensions = maximum <= limit && sourceWidth > 0 && sourceHeight > 0 &&
+          file.width <= Math.min(sourceWidth, maximum) && file.height <= Math.min(sourceHeight, maximum) &&
+          Math.abs(file.width - Math.max(1, Math.round(sourceWidth * scale))) <= 1 &&
+          Math.abs(file.height - Math.max(1, Math.round(sourceHeight * scale))) <= 1;
+        const publicUrl = storage.publicUrl(storageKey);
+        const object = await storage.headObject(storageKey, verificationDeadline);
+        if (!publicUrl || object.mimeType !== mimeType || object.sizeBytes !== file.bytes ||
+          !matchesDimensions) {
+          throw new ValidationFailedError('Worker object metadata does not match');
+        }
+        const image = await inspectLocalMediaSource(await storage.getObject(storageKey, verificationDeadline), verificationDeadline);
+        if (image.checksumSha256 !== file.sha256 || image.mimeType !== mimeType ||
+          image.width !== file.width || image.height !== file.height || image.sizeBytes !== file.bytes) {
+          throw new ValidationFailedError('Worker object bytes do not match');
+        }
+        verified.push({ variant: file.variant, ...image, storageKey, publicUrl });
       }
-      const image = await inspectLocalMediaSource(await storage.getObject(storageKey, verificationDeadline), verificationDeadline);
-      if (image.checksumSha256 !== file.sha256 || image.mimeType !== mimeType ||
-        image.width !== file.width || image.height !== file.height || image.sizeBytes !== file.bytes) {
-        throw new ValidationFailedError('Worker object bytes do not match');
-      }
-      verified.push({ variant: file.variant, ...image, storageKey, publicUrl });
+      verificationDeadline.throwIfAborted();
+    } finally {
+      this.verifying = false;
     }
-    verificationDeadline.throwIfAborted();
     const original = verified.find(file => file.variant === 'webp')!;
     const ctx: SystemRequestContext = {
       organizationId, requestId: leaseToken, correlationId: leaseToken,
@@ -207,10 +247,22 @@ export class LocalMediaWorkerController {
         throw new AppError('IMAGE_JOB_EXPIRED', 'Image job is no longer current', 409);
       }
       const job = await client.query(
-        'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND local_worker AND lease_token=$3 AND lease_until>now() AND source_key=$4',
+        `DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND local_worker
+         AND lease_token=$3 AND lease_until>now() AND avif_main_key=$4 AND coalesce(lease_worker,'pc')='pc'`,
         [organizationId, id, leaseToken, asset.storage_key]
       );
       if (!job.rowCount) throw new AppError('IMAGE_JOB_EXPIRED', 'Image job is no longer current', 409);
+      await client.query(
+        `INSERT INTO media_storage_deletions(organization_id,storage_key,media_asset_id,available_at)
+         SELECT $1,key,$2,CASE WHEN key=$5 THEN now()+interval '1 day' ELSE now() END
+         FROM (SELECT unnest($3::text[]) AS key UNION
+          SELECT storage_key FROM media_derivatives WHERE organization_id=$1 AND media_asset_id=$2) retired
+         WHERE NOT (key=ANY($4::text[]))
+         ON CONFLICT (organization_id,storage_key) DO UPDATE
+         SET available_at=LEAST(media_storage_deletions.available_at,excluded.available_at),
+             media_asset_id=excluded.media_asset_id`,
+        [organizationId, id, [asset.storage_key, ownsJob.source_key], variants.map(variant => keys[variant]), ownsJob.source_key]
+      );
       const updated = await new MediaRepository(client).markReady({
         organizationId, mediaId: id, width: original.width, height: original.height, original,
         replaceDerivatives: true, derivatives: verified.filter(file => file.variant !== 'webp')
@@ -219,10 +271,6 @@ export class LocalMediaWorkerController {
       await client.query(
         'DELETE FROM media_storage_deletions WHERE organization_id=$1 AND storage_key=ANY($2::text[])',
         [organizationId, variants.map(variant => keys[variant])]
-      );
-      await client.query(
-        "INSERT INTO media_storage_deletions(organization_id,storage_key,available_at) VALUES ($1,$2,now()+interval '1 day') ON CONFLICT DO NOTHING",
-        [organizationId, asset.storage_key]
       );
       await resolveMediaFailures(client, organizationId, id, 'overnight');
       for (const product of products.rows) {

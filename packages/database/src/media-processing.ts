@@ -69,11 +69,15 @@ export async function runMediaProcessing<T>(
       connectTimeout: 1500,
       enableOfflineQueue: false,
       lazyConnect: true,
-      retryStrategy: () => 1000
+      retryStrategy: () => null
     });
     // This dedicated connection fails closed; it never logs URLs or credentials.
     if (connection.listenerCount('error') === 0) connection.on('error', () => {});
-    if (connection.status === 'wait' || connection.status === 'end') await connection.connect();
+    if (connection.status === 'wait' || connection.status === 'end') {
+      const timer = setTimeout(() => connection?.disconnect(), 1_500);
+      try { await connection.connect(); }
+      finally { clearTimeout(timer); }
+    }
     while (Date.now() < deadline) {
       if ((await connection.set(LOCK, token, 'PX', LEASE_MS, 'NX')) === 'OK') {
         owned = true;

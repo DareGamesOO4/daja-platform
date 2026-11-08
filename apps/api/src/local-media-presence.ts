@@ -1,54 +1,44 @@
-import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
-import { Redis } from 'ioredis';
+import { Inject, Injectable } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
-import { AppError } from '@daja/security';
-import { CONFIG } from './tokens.js';
+import type { Database } from '@daja/database';
+import { defaultMediaWorkerProfile, mediaWorkerProfileSchema } from '@daja/validation';
+import { CONFIG, DATABASE } from './tokens.js';
 
 @Injectable()
-export class LocalMediaPresence implements OnModuleDestroy {
-  private readonly client: Redis;
-  private connecting: Promise<void> | undefined;
+export class LocalMediaPresence {
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    @Inject(CONFIG) private readonly config: AppConfig
+  ) {}
 
-  constructor(@Inject(CONFIG) config: AppConfig) {
-    this.client = new Redis(config.REDIS_URL, {
-      lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0,
-      connectTimeout: 1_500, commandTimeout: 1_500, retryStrategy: () => null
-    });
-    this.client.on('error', () => {});
+  async status(organizationId: string) {
+    const row = (await this.db.pool.query<{
+      profile: unknown; pcSeenAt: Date | null; pcOnline: boolean;
+      renderSeenAt: Date | null; renderOnline: boolean; renderCompletedAt: Date | null; renderErrorAt: Date | null;
+    }>(
+      `SELECT s.profile, s.pc_seen_at AS "pcSeenAt",
+        coalesce(s.pc_seen_at>now()-interval '45 seconds',false) OR EXISTS (
+          SELECT 1 FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.lease_worker='pc' AND j.lease_until>now()
+        ) AS "pcOnline",
+        s.render_seen_at AS "renderSeenAt", coalesce(s.render_seen_at>now()-interval '6 minutes',false) AS "renderOnline",
+        s.render_completed_at AS "renderCompletedAt", s.render_error_at AS "renderErrorAt"
+       FROM (SELECT $1::uuid AS id) org LEFT JOIN media_worker_settings s ON s.organization_id=org.id`,
+      [organizationId]
+    )).rows[0]!;
+    return {
+      ...row, profile: mediaWorkerProfileSchema.safeParse(row.profile).data ?? defaultMediaWorkerProfile,
+      pcEnabled: organizationId === this.config.PUBLIC_ORGANIZATION_ID && Boolean(this.config.MEDIA_LOCAL_WORKER_TOKEN_HASH)
+    };
   }
 
-  onModuleDestroy() { this.client.disconnect(); }
-
-  private async ready(): Promise<Redis> {
-    if (this.client.status === 'wait' || this.client.status === 'end') {
-      if (!this.connecting) {
-        const deadline = setTimeout(() => this.client.disconnect(), 1_500);
-        this.connecting = this.client.connect().finally(() => {
-          clearTimeout(deadline);
-          this.connecting = undefined;
-        });
-      }
-    }
-    await this.connecting;
-    return this.client;
+  async renderHeartbeat(organizationId: string, result?: 'completed' | 'error') {
+    await this.db.pool.query(
+      `INSERT INTO media_worker_settings(organization_id,render_seen_at,render_completed_at,render_error_at)
+       VALUES ($1,now(),CASE WHEN $2='completed' THEN now() END,CASE WHEN $2='error' THEN now() END)
+       ON CONFLICT(organization_id) DO UPDATE SET render_seen_at=excluded.render_seen_at,
+       render_completed_at=coalesce(excluded.render_completed_at,media_worker_settings.render_completed_at),
+       render_error_at=coalesce(excluded.render_error_at,media_worker_settings.render_error_at)`,
+      [organizationId, result ?? null]
+    );
   }
-
-  async announce(organizationId: string): Promise<void> {
-    try {
-      await (await this.ready()).set(this.key(organizationId), '1', 'EX', 20);
-    } catch {
-      throw new AppError('IMAGE_WORKER_UNAVAILABLE', 'Image queue is temporarily unavailable', 503);
-    }
-  }
-
-  async isOnline(organizationId: string): Promise<boolean> {
-    try {
-      return Boolean(await (await this.ready()).get(this.key(organizationId)));
-    } catch {
-      // During a Redis outage, avoid starting a competing fallback.
-      return true;
-    }
-  }
-
-  private key(organizationId: string) { return 'daja:media:local-worker:' + organizationId; }
 }

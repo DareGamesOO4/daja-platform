@@ -62,6 +62,18 @@ export function importRemoteImage(input: Parameters<typeof importRemoteImageNow>
   return runMediaProcessing(input.config, () => importRemoteImageNow(input));
 }
 
+export async function lockRemoteMediaRequest(client: Pick<Database['pool'], 'query'>, organizationId: string, requestId: string) {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`remote-media:${organizationId}:${requestId}`]);
+}
+
+async function rejectCancelledRequest(client: Pick<Database['pool'], 'query'>, organizationId: string, requestId: string) {
+  const cancelled = await client.query(
+    'SELECT 1 FROM media_import_cancellations WHERE organization_id=$1 AND request_id=$2',
+    [organizationId, requestId]
+  );
+  if (cancelled.rowCount) throw new AppError('IMAGE_IMPORT_CANCELLED', 'Dodavanje slike je otkazano.', 410);
+}
+
 export function ensurePrimaryMediaThumbnail(input: Parameters<typeof ensurePrimaryMediaThumbnailNow>[0]): Promise<string> {
   return runMediaProcessing(input.config, () => ensurePrimaryMediaThumbnailNow(input));
 }
@@ -81,13 +93,16 @@ async function importRemoteImageNow(input: {
 }): Promise<RemoteMediaImportResult> {
   const repository = new MediaRepository(input.database.pool);
   if (input.clientRequestId) {
-    const existing = (await input.database.pool.query<{ id: string; status: string; source_url: string | null }>(
-      `SELECT id,status,metadata->>'sourceUrl' AS source_url FROM media_assets
+    await rejectCancelledRequest(input.database.pool, input.organizationId, input.clientRequestId);
+    const existing = (await input.database.pool.query<{ id: string; status: string; source_url: string | null; recent: boolean }>(
+      `SELECT id,status,metadata->>'sourceUrl' AS source_url,updated_at>now()-interval '3 minutes' AS recent FROM media_assets
        WHERE organization_id=$1 AND metadata->>'clientRequestId'=$2 LIMIT 1`,
       [input.organizationId, input.clientRequestId]
     )).rows[0];
     if (existing && existing.source_url !== input.sourceUrl)
       throw new ValidationFailedError('Image retry key was already used for a different source');
+    if (existing?.status === 'uploaded' && existing.recent)
+      throw new AppError('IMAGE_IMPORT_IN_PROGRESS', 'Dodavanje ove slike je u toku.', 503);
     if (existing?.status === 'ready') {
       const ready = await repository.readyUpload({ organizationId: input.organizationId }, existing.id);
       if (ready) return {
@@ -126,7 +141,7 @@ async function importRemoteImageNow(input: {
   const startedAt = Date.now();
   let stage = 'insert_asset';
   try {
-    const inserted = await input.database.pool.query<MediaAssetRow>(
+    const insertAsset = (client: Pick<Database['pool'], 'query'>) => client.query<MediaAssetRow>(
       `INSERT INTO media_assets (id, organization_id, storage_provider, storage_bucket, storage_key,
         public_url, mime_type, size_bytes, checksum_sha256, status, metadata)
        VALUES ($1,$2,'r2',$3,$4,$5,$6,$7,$8,'uploaded',$9::jsonb) RETURNING *`,
@@ -139,6 +154,14 @@ async function importRemoteImageNow(input: {
           storageLayout: 'flat-v1',
           ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}) })]
     );
+    const requestId = input.clientRequestId;
+    const inserted = requestId
+      ? await new TransactionManager(input.database.pool, createLogger(input.config, 'remote-media')).run(async client => {
+        await lockRemoteMediaRequest(client, input.organizationId, requestId);
+        await rejectCancelledRequest(client, input.organizationId, requestId);
+        return insertAsset(client);
+      })
+      : await insertAsset(input.database.pool);
     const asset = inserted.rows[0]!;
     // Remote sources also need a durable original for the three overnight files.
     createdKeys.add(sourceKey);

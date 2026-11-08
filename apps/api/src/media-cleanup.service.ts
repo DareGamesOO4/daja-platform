@@ -19,19 +19,33 @@ export class MediaCleanupService implements OnModuleInit, OnModuleDestroy {
     try {
       // One atomic SQL statement leases the item; no connection/transaction is
       // held during the network call. Another replica can recover after a crash.
-      const row = (await this.db.pool.query<{ organization_id: string; storage_key: string; attempts: number }>(
+      const { rows } = await this.db.pool.query<{ organization_id: string; storage_key: string; attempts: number }>(
         `UPDATE media_storage_deletions d SET available_at=now()+interval '90 seconds', attempts=d.attempts+1
          FROM (SELECT organization_id,storage_key FROM media_storage_deletions WHERE available_at<=now()
-           ORDER BY available_at LIMIT 1 FOR UPDATE SKIP LOCKED) candidate
-         WHERE d.organization_id=candidate.organization_id AND d.storage_key=candidate.storage_key RETURNING d.*`)).rows[0];
-      if (!row) return;
-      try {
-        await new R2MediaStorageAdapter(this.config).deleteObject(row.storage_key);
-        await this.db.pool.query('DELETE FROM media_storage_deletions WHERE organization_id=$1 AND storage_key=$2', [row.organization_id, row.storage_key]);
-      } catch {
-        await this.db.pool.query(`UPDATE media_storage_deletions SET available_at=now()+($3*interval '1 second')
-          WHERE organization_id=$1 AND storage_key=$2`, [row.organization_id, row.storage_key, Math.min(300, 2 ** Math.min(row.attempts, 8))]);
-      }
+           ORDER BY available_at LIMIT 4 FOR UPDATE SKIP LOCKED) candidate
+         WHERE d.organization_id=candidate.organization_id AND d.storage_key=candidate.storage_key RETURNING d.*`);
+      if (!rows.length) return;
+      const storage = new R2MediaStorageAdapter(this.config);
+      const results = await Promise.allSettled(rows.map(async row => {
+        try {
+          await storage.deleteObject(row.storage_key);
+          const keys = [row.organization_id, row.storage_key, row.attempts];
+          const recheck = await this.db.pool.query(
+            `UPDATE media_storage_deletions SET available_at=recheck_at,recheck_at=NULL
+             WHERE organization_id=$1 AND storage_key=$2 AND attempts=$3 AND recheck_at>now()`, keys
+          );
+          if (!recheck.rowCount) await this.db.pool.query(
+            `DELETE FROM media_storage_deletions WHERE organization_id=$1 AND storage_key=$2 AND attempts=$3
+             AND (recheck_at IS NULL OR recheck_at<=now())`, keys
+          );
+        } catch {
+          await this.db.pool.query(`UPDATE media_storage_deletions SET available_at=now()+($3*interval '1 second')
+            WHERE organization_id=$1 AND storage_key=$2 AND attempts=$4`,
+            [row.organization_id, row.storage_key, Math.min(300, 2 ** Math.min(row.attempts, 8)), row.attempts]);
+        }
+      }));
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
     } catch (error) { this.logger.warn({ err: error }, 'Media storage cleanup will retry'); }
     finally { this.schedule(); }
   }

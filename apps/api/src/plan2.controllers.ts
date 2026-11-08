@@ -66,7 +66,7 @@ import { catalogPageSchema, catalogPreparationSchema, prepareCatalogPages, publi
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
-import { ensurePrimaryMediaThumbnail, importRemoteImage } from './remote-media.service.js';
+import { ensurePrimaryMediaThumbnail, importRemoteImage, lockRemoteMediaRequest } from './remote-media.service.js';
 import { inspectLocalMediaSource, localMediaEnabled } from './local-media-source.js';
 import { productMediaStorageKey } from '@daja/database';
 import { ProductAlertService } from './product-alert.service.js';
@@ -1673,6 +1673,8 @@ export class StaffCatalogController {
     const productId = parseWithSchema(uuidSchema, id);
     const deleted = await new TransactionManager(this.database.pool, this.logger).run(
       async (client) => {
+        await client.query('SELECT id FROM products WHERE organization_id=$1 AND id=$2 FOR UPDATE',
+          [ctx.organizationId, productId]);
         const repository = new CatalogRepository(client);
         const before = await repository.getProduct(ctx, productId);
         const variants = await client.query<{ id: string }>(
@@ -2011,7 +2013,11 @@ export class StaffCatalogController {
     }
     const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       // Serialize gallery mutations across tabs, retries and RFID sync.
-      await client.query('SELECT id FROM products WHERE organization_id = $1 AND id = $2 FOR UPDATE', [ctx.organizationId, productId]);
+      const activeProduct = await client.query(
+        'SELECT id FROM products WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE',
+        [ctx.organizationId, productId]
+      );
+      if (!activeProduct.rowCount) throw new ResourceNotFoundError('product');
       const activeAsset = await client.query(
         `SELECT id FROM media_assets WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
         [ctx.organizationId, input.mediaId]
@@ -2998,6 +3004,27 @@ export class MediaController {
       ...(input.productSlug ? { productSlug: input.productSlug } : {}),
       ...(input.imageIndex ? { imageIndex: input.imageIndex } : {}),
       ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {})
+    });
+  }
+
+  @Delete('external/:requestId')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async cancelExternal(@Req() request: Request, @Param('requestId') rawId: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'media.upload');
+    const requestId = parseWithSchema(uuidSchema, rawId);
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      await lockRemoteMediaRequest(client, ctx.organizationId, requestId);
+      await client.query(
+        'INSERT INTO media_import_cancellations(organization_id,request_id) VALUES($1,$2) ON CONFLICT DO NOTHING',
+        [ctx.organizationId, requestId]
+      );
+      const asset = (await client.query<{ id: string }>(
+        `SELECT id FROM media_assets WHERE organization_id=$1 AND metadata->>'clientRequestId'=$2 AND deleted_at IS NULL LIMIT 1`,
+        [ctx.organizationId, requestId]
+      )).rows[0];
+      if (asset) await new MediaRepository(client).discardUnreferenced(ctx, asset.id, new R2MediaStorageAdapter(this.config));
+      return { cancelled: true };
     });
   }
 

@@ -15,6 +15,7 @@ import {
   prepareRemainingImageVariants,
   productMediaVariantKeys,
   runMediaProcessing,
+  mediaProcessingSignal,
   sha256,
   type Database,
   type MediaAssetRow
@@ -84,16 +85,21 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
 
   private async tick() {
     let processed = false;
+    const organizationId = this.config.PUBLIC_ORGANIZATION_ID;
     try {
+      if (organizationId) await this.presence.renderHeartbeat(organizationId);
       const stopAt = nightWindowClosesAt();
       if (!stopAt || apiUnderLoad()) return;
       processed = await runMediaProcessing(this.config, () => this.processOne(), {
         background: true,
         stopAt
       });
+      if (processed && organizationId) await this.presence.renderHeartbeat(organizationId, 'completed');
     } catch (error) {
-      if (!(error instanceof AppError && error.code === 'IMAGE_PROCESSING_BUSY'))
+      if (!(error instanceof AppError && error.code === 'IMAGE_PROCESSING_BUSY')) {
+        if (organizationId) await this.presence.renderHeartbeat(organizationId, 'error').catch(() => {});
         this.logger.warn({ err: error }, 'Overnight image queue will retry');
+      }
     } finally {
       this.schedule(processed ? 1000 : 30_000);
     }
@@ -101,8 +107,6 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
 
   private async processOne(): Promise<boolean> {
     const token = randomUUID();
-    const workerOnline = this.config.MEDIA_LOCAL_WORKER_TOKEN_HASH && this.config.PUBLIC_ORGANIZATION_ID
-      ? await this.presence.isOnline(this.config.PUBLIC_ORGANIZATION_ID) : false;
     // Use the same claim lock as the Windows worker. Release it before R2 or CPU work.
     const job = await new TransactionManager(this.db.pool, this.logger).run(async client => {
       if (this.config.PUBLIC_ORGANIZATION_ID) await client.query(
@@ -110,22 +114,29 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       );
       return (await client.query<DerivativeJob>(
         `UPDATE media_derivative_jobs j SET lease_until=now()+interval '5 minutes',
-         lease_token=$1, attempts=j.attempts+1
+         lease_token=$1,lease_worker='render',
+         attempts=j.attempts+CASE WHEN j.local_worker THEN 0 ELSE 1 END,
+         render_attempts=j.render_attempts+CASE WHEN j.local_worker THEN 1 ELSE 0 END
        FROM (SELECT organization_id,media_asset_id FROM media_derivative_jobs
-         WHERE available_at<=now() AND paused_at IS NULL
-         AND (NOT local_worker AND attempts<8 OR local_worker AND (NOT $2::boolean OR attempts>=8) AND attempts<16
-              AND created_at<=now()-interval '7 days'
+         WHERE available_at<=now()
+         AND (NOT local_worker AND attempts<8 AND paused_at IS NULL OR local_worker AND render_attempts<8
+              AND rendered_at IS NULL AND created_at<=now()-interval '7 days'
+              AND (NOT $2::boolean OR NOT EXISTS (SELECT 1 FROM media_worker_settings s
+                WHERE s.organization_id=media_derivative_jobs.organization_id
+                AND s.pc_available_at>now()-interval '7 days'))
               AND NOT EXISTS (SELECT 1 FROM media_derivative_jobs active
-                WHERE active.local_worker AND active.lease_until>now()))
+                WHERE active.organization_id=media_derivative_jobs.organization_id AND active.local_worker AND active.lease_until>now()))
          AND (lease_until IS NULL OR lease_until<now())
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time >= time '03:00'
          AND (now() AT TIME ZONE 'Europe/Belgrade')::time < time '07:00'
          ORDER BY available_at,created_at,media_asset_id LIMIT 1 FOR UPDATE SKIP LOCKED) candidate
        WHERE j.organization_id=candidate.organization_id AND j.media_asset_id=candidate.media_asset_id RETURNING j.*`,
-        [token, workerOnline]
+        [token, Boolean(this.config.MEDIA_LOCAL_WORKER_TOKEN_HASH)]
       )).rows[0];
     });
     if (!job) return false;
+    const parentDeadline = mediaProcessingSignal();
+    const deadline = AbortSignal.any([AbortSignal.timeout(210_000), ...(parentDeadline ? [parentDeadline] : [])]);
     const ctx: SystemRequestContext = {
       organizationId: job.organization_id,
       requestId: token,
@@ -148,11 +159,31 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         await this.cancelJob(job);
         return true;
       }
-      const source = await storage.getObject(job.source_key);
+      const source = await storage.getObject(job.source_key, deadline);
       if (sha256(source) !== job.source_checksum)
         throw new AppError('IMAGE_SOURCE_CHANGED', 'Deferred image source checksum mismatch', 409);
       const { webp, avifThumbnail } = await prepareRemainingImageVariants(source);
-      const keys = productMediaVariantKeys(asset, token);
+      const keys = productMediaVariantKeys(asset, token, 'render');
+      // Record every candidate key before writing to R2, even if the API restarts mid-upload.
+      const reserved = await new TransactionManager(this.db.pool, this.logger).run(async client => {
+        const current = await client.query(
+          `SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2
+           AND deleted_at IS NULL AND status='ready' AND storage_key=$3 FOR UPDATE`,
+          [job.organization_id, job.media_asset_id, job.avif_main_key]
+        );
+        if (!current.rowCount) return false;
+        await client.query(
+          `INSERT INTO media_storage_deletions(organization_id,storage_key,media_asset_id,available_at)
+           SELECT $1,key,$3,now()+interval '20 minutes' FROM unnest($2::text[]) AS files(key)
+           ON CONFLICT DO NOTHING`,
+          [job.organization_id, Object.values(keys), job.media_asset_id]
+        );
+        return true;
+      });
+      if (!reserved) {
+        await this.cancelJob(job);
+        return true;
+      }
       const mainKey = keys.webp;
       const thumbKey = keys.webpThumb;
       const objects = [
@@ -165,7 +196,7 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
       } else {
         // Keep existing AVIF URLs and put a copy next to the WebP.
         created.add(keys.avif);
-        await storage.copyObject(job.avif_main_key, keys.avif);
+        await storage.copyObject(job.avif_main_key, keys.avif, deadline);
       }
       for (const object of objects) {
         created.add(object.key);
@@ -174,8 +205,9 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
           body: object.image.data,
           contentType: object.mimeType,
           cacheControl: 'public, max-age=31536000, immutable'
-        });
+        }, deadline);
       }
+      deadline.throwIfAborted();
       await new TransactionManager(this.db.pool, this.logger).run(async (client) => {
         // Gallery saves lock product before asset. Use that order too, so an
         // employee saving a product cannot deadlock with overnight publication.
@@ -255,14 +287,28 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
         if (!updated) throw new Error('Deferred image was removed');
         await resolveMediaFailures(client, job.organization_id, job.media_asset_id, 'overnight');
         await client.query(
-          `INSERT INTO media_storage_deletions(organization_id,storage_key,available_at)
-           VALUES ($1,$2,CASE WHEN $3::boolean THEN now()+interval '1 day' ELSE now() END) ON CONFLICT DO NOTHING`,
-          [job.organization_id, job.source_key, job.local_worker]
+          'DELETE FROM media_storage_deletions WHERE organization_id=$1 AND storage_key=ANY($2::text[])',
+          [job.organization_id, Object.values(keys)]
         );
-        await client.query(
-          'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3',
-          [job.organization_id, job.media_asset_id, token]
-        );
+        if (job.local_worker) {
+          // Keep the original for the PC. The four Render files stay live until
+          // the PC publishes a complete replacement in a later transaction.
+          await client.query(
+            `UPDATE media_derivative_jobs SET rendered_at=now(),avif_main_key=$4,source_width=$5,source_height=$6,
+             lease_token=NULL,lease_until=NULL,lease_worker=NULL,available_at=now(),attempts=0,paused_at=NULL,
+             last_error_code=NULL,last_error_at=NULL WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3`,
+            [job.organization_id, job.media_asset_id, token, mainKey, current.width, current.height]
+          );
+        } else {
+          await client.query(
+            'INSERT INTO media_storage_deletions(organization_id,storage_key) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+            [job.organization_id, job.source_key]
+          );
+          await client.query(
+            'DELETE FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3',
+            [job.organization_id, job.media_asset_id, token]
+          );
+        }
         for (const product of products.rows) {
           await client.query(
             'UPDATE products SET updated_at=now() WHERE organization_id=$1 AND id=$2',
@@ -286,9 +332,10 @@ export class MediaDerivativesService implements OnModuleInit, OnModuleDestroy {
           [job.organization_id, job.media_asset_id]
         );
         const deferred = await client.query(
-          `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,
-         paused_at=CASE WHEN $5::text IS NOT NULL AND attempts>=CASE WHEN local_worker THEN 16 ELSE 8 END THEN now() ELSE paused_at END,
-         attempts=CASE WHEN $5::text IS NULL THEN greatest(attempts-1,0) ELSE attempts END,
+          `UPDATE media_derivative_jobs SET lease_until=NULL,lease_token=NULL,lease_worker=NULL,
+         paused_at=CASE WHEN $5::text IS NOT NULL AND NOT local_worker AND attempts>=8 THEN now() ELSE paused_at END,
+         attempts=CASE WHEN $5::text IS NULL AND NOT local_worker THEN greatest(attempts-1,0) ELSE attempts END,
+         render_attempts=CASE WHEN $5::text IS NULL AND local_worker THEN greatest(render_attempts-1,0) ELSE render_attempts END,
          last_error_code=CASE WHEN $5::text IS NOT NULL THEN $5 ELSE last_error_code END,
          last_error_at=CASE WHEN $5::text IS NOT NULL THEN now() ELSE last_error_at END,
          available_at=now()+($4*interval '1 second') WHERE organization_id=$1 AND media_asset_id=$2 AND lease_token=$3`,

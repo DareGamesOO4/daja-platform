@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Inject, Param, Post, Query, Req } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { z } from 'zod';
@@ -13,11 +13,13 @@ import {
   AppError,
   requirePermission,
   ResourceConflictError,
-  ResourceNotFoundError
+  ResourceNotFoundError,
+  TenantAccessDeniedError
 } from '@daja/security';
-import { parseWithSchema, uuidSchema } from '@daja/validation';
+import { mediaWorkerProfileSchema, parseWithSchema, uuidSchema } from '@daja/validation';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { DATABASE, LOGGER } from './tokens.js';
+import { LocalMediaPresence } from './local-media-presence.js';
 
 const querySchema = z.object({
   view: z.enum(['all', 'problems', 'queue', 'history']).default('problems'),
@@ -64,7 +66,7 @@ const imageFields = `a.id AS "mediaId",a.metadata->>'originalFilename' AS filena
   a.metadata->>'imageIndex' AS "imageIndex",p.id AS "productId",
   coalesce(p.name,a.metadata->>'productSlug') AS "productName",p.slug AS "productSlug"`;
 const jobState = `CASE WHEN j.lease_until>now() THEN 'processing'
-  WHEN j.paused_at IS NOT NULL OR j.attempts>=CASE WHEN j.local_worker THEN 16 ELSE 8 END THEN 'failed'
+  WHEN j.paused_at IS NOT NULL OR j.attempts>=8 OR (j.rendered_at IS NULL AND j.render_attempts>=8) THEN 'failed'
   WHEN j.lease_until IS NOT NULL THEN 'interrupted'
   WHEN j.last_error_code IS NOT NULL THEN 'failed' ELSE 'queued' END`;
 
@@ -72,8 +74,37 @@ const jobState = `CASE WHEN j.lease_until>now() THEN 'processing'
 export class MediaProcessingController {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(LocalMediaPresence) private readonly presence: LocalMediaPresence
   ) {}
+
+  @Get('worker')
+  @Header('Cache-Control', 'no-store')
+  async worker(@Req() request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    return this.presence.status(ctx.organizationId);
+  }
+
+  @Post('worker')
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 12, ttl: 60_000 } })
+  async saveWorker(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    if (!ctx.isOwner) throw new TenantAccessDeniedError();
+    const profile = parseWithSchema(mediaWorkerProfileSchema, body);
+    return new TransactionManager(this.db.pool, this.logger).run(async client => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['local-media:' + ctx.organizationId]);
+      await client.query(
+        `INSERT INTO media_worker_settings(organization_id,profile) VALUES ($1,$2::jsonb)
+         ON CONFLICT(organization_id) DO UPDATE SET profile=excluded.profile`,
+        [ctx.organizationId, JSON.stringify(profile)]
+      );
+      await new AuditRepository(client).append({ ctx, aggregateType: 'organization', aggregateId: ctx.organizationId,
+        operation: 'media.worker.profile', afterPayload: profile });
+      return { profile };
+    });
+  }
 
   @Get('summary')
   async summary(@Req() request: Request) {
@@ -102,7 +133,7 @@ export class MediaProcessingController {
         (SELECT count(*)::int FROM media_processing_alerts al LEFT JOIN media_processing_alert_reads r
           ON r.alert_id=al.id AND r.user_id=$2 WHERE al.organization_id=$1
           AND (r.seen_event_key IS DISTINCT FROM al.event_key)) AS unread,
-        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.paused_at IS NULL AND j.attempts<CASE WHEN j.local_worker THEN 16 ELSE 8 END) AS pending,
+        (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.paused_at IS NULL AND j.attempts<8) AS pending,
         (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.lease_until>now()) AS processing`,
       [ctx.organizationId, ctx.userId]
     );
@@ -118,7 +149,8 @@ export class MediaProcessingController {
       view === 'queue'
         ? `SELECT j.media_asset_id AS id,'overnight' AS phase,${imageFields},
         ${jobState} AS status,j.attempts,j.created_at AS "createdAt",j.last_error_at AS "lastFailureAt",
-        j.available_at AS "availableAt",j.local_worker AS "localWorker",al.message,al.error_code AS "errorCode",al.event_key AS "eventKey",
+        j.available_at AS "availableAt",j.local_worker AS "localWorker",j.rendered_at AS "renderedAt",
+        j.lease_worker AS "leaseWorker",al.message,al.error_code AS "errorCode",al.event_key AS "eventKey",
         al.retry_requested_at AS "retryRequestedAt",coalesce(r.seen_event_key=al.event_key,false) AS "isRead",
         NOT coalesce(j.lease_until>now(),false) AS "canRetry"
        FROM media_derivative_jobs j JOIN media_assets a ON a.id=j.media_asset_id AND a.organization_id=j.organization_id
@@ -227,7 +259,7 @@ export class MediaProcessingController {
     return new TransactionManager(this.db.pool, this.logger).run(async (client) => {
       const updated = await client.query(
         `UPDATE media_derivative_jobs j SET available_at=now(),lease_until=NULL,lease_token=NULL,
-         paused_at=NULL,attempts=0,last_error_code=NULL,last_error_at=NULL
+        paused_at=NULL,attempts=0,render_attempts=0,lease_worker=NULL,last_error_code=NULL,last_error_at=NULL
          WHERE j.organization_id=$1 AND j.media_asset_id=$2 AND NOT coalesce(j.lease_until>now(),false)
          AND EXISTS (SELECT 1 FROM media_assets a WHERE a.organization_id=$1 AND a.id=$2 AND a.status='ready' AND a.deleted_at IS NULL)
          RETURNING media_asset_id`,

@@ -131,3 +131,4 @@ function isAllowedJsonAttribute(value: unknown): boolean {
   }
   return false;
 }
+export * from './media-worker-profile.js';

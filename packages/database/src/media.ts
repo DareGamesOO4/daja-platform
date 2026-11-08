@@ -160,7 +160,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
     cacheControl?: string;
     sizeBytes?: number;
     metadata?: Record<string, string>;
-  }): Promise<void> {
+  }, deadline?: AbortSignal): Promise<void> {
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucketName,
@@ -170,11 +170,11 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         ...(input.cacheControl ? { CacheControl: input.cacheControl } : {}),
         ...(input.sizeBytes === undefined ? {} : { ContentLength: input.sizeBytes }),
         ...(input.metadata === undefined ? {} : { Metadata: input.metadata })
-      }), { abortSignal: AbortSignal.timeout(30_000) }
+      }), { abortSignal: r2Deadline(30_000, deadline) }
     );
   }
 
-  async copyObject(sourceKey: string, destinationKey: string): Promise<void> {
+  async copyObject(sourceKey: string, destinationKey: string, deadline?: AbortSignal): Promise<void> {
     if (sourceKey === destinationKey) return;
     await this.client.send(
       new CopyObjectCommand({
@@ -183,7 +183,7 @@ export class R2MediaStorageAdapter implements MediaStorageAdapter {
         // CopySource is a URL path. Encode each key while keeping the path
         // separators so R2 copies an object from the same bucket safely.
         CopySource: `${this.bucketName}/${encodeURIComponent(sourceKey).replace(/%2F/g, '/')}`
-      }), { abortSignal: AbortSignal.timeout(25_000) }
+      }), { abortSignal: r2Deadline(25_000, deadline) }
     );
   }
 
@@ -216,7 +216,7 @@ export class MediaRepository {
    * successful commit; if PostgreSQL is unavailable leave cleanup for later. */
   async cleanupAttempt(ctx: Pick<RequestContext, 'organizationId'>, mediaId: string, storage: MediaStorageAdapter, keys: Iterable<string>) {
     const referenced = await this.client.query<{ storage_key: string }>(
-      `SELECT storage_key FROM media_assets WHERE organization_id=$1 AND id=$2
+      `SELECT storage_key FROM media_assets WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL
        UNION ALL SELECT storage_key FROM media_derivatives WHERE organization_id=$1 AND media_asset_id=$2
        UNION ALL SELECT source_key AS storage_key FROM media_derivative_jobs WHERE organization_id=$1 AND media_asset_id=$2`,
       [ctx.organizationId, mediaId]);
@@ -636,13 +636,21 @@ export class MediaRepository {
     // administrator; keep its notification until it is explicitly closed.
     await resolveMediaFailures(this.client,ctx.organizationId,mediaId,asset.status === 'ready' ? undefined : 'overnight','removed');
     if (asset.storage_provider === 'r2') {
-      const keys = new Set([asset.storage_key, ...derivatives.rows.map((row) => row.storage_key),
-        ...deferred.rows.map(row => row.source_key)]);
-      for (const key of keys) await this.client.query(
-        `INSERT INTO media_storage_deletions (organization_id, storage_key, available_at) VALUES ($1,$2,
-         CASE WHEN $3::boolean THEN now()+interval '16 minutes' ELSE now() END)
-         ON CONFLICT (organization_id, storage_key) DO NOTHING`,
-        [ctx.organizationId, key, asset.status === 'pending_upload' && key === asset.storage_key]);
+      const keys = [asset.storage_key, ...derivatives.rows.map(row => row.storage_key),
+        ...deferred.rows.map(row => row.source_key)];
+      // Remove the visible object immediately and check again after any
+      // outstanding upload URL can no longer create the same object.
+      await this.client.query(
+        `INSERT INTO media_storage_deletions (organization_id,storage_key,media_asset_id,recheck_at)
+         SELECT $1,key,$2,now()+interval '16 minutes' FROM (
+           SELECT unnest($3::text[]) AS key UNION
+           SELECT storage_key FROM media_storage_deletions WHERE organization_id=$1 AND media_asset_id=$2
+         ) files
+         ON CONFLICT (organization_id,storage_key) DO UPDATE SET
+           available_at=LEAST(media_storage_deletions.available_at,excluded.available_at),
+           recheck_at=GREATEST(media_storage_deletions.recheck_at,excluded.recheck_at)`,
+        [ctx.organizationId, mediaId, keys]
+      );
     }
     await this.client.query(
       `DELETE FROM media_derivatives WHERE organization_id = $1 AND media_asset_id = $2`,
@@ -771,18 +779,19 @@ function uploadedImageStorageKey(sourceKey: string): string {
 }
 
 /** New assets use flat picture folders with immutable per-attempt filenames. */
-export function productMediaVariantKeys(asset: MediaAssetRow, revision: string) {
+export function productMediaVariantKeys(asset: MediaAssetRow, revision: string, worker: 'pc' | 'render' = 'pc') {
   const metadata = asset.metadata ?? {};
   const slug = typeof metadata.productSlug === 'string'
     ? metadata.productSlug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') : '';
   const index = Number(metadata.imageIndex);
+  const prefix = slug && worker === 'render' ? `${slug}/render` : slug;
   const name = `${slug || 'image'}-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
   if (slug && metadata.storageLayout === 'flat-v1') {
     const picture = `${slug}-slika-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
-    const base = `${slug}/${picture}/${picture}-${asset.id}-${revision}`;
+    const base = `${prefix}/${picture}/${picture}-${asset.id}-${revision}`;
     return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };
   }
-  const folder = slug ? `${slug}/${asset.id}/${revision}` : `org/${asset.organization_id}/media/${asset.id}/${revision}`;
+  const folder = slug ? `${prefix}/${asset.id}/${revision}` : `org/${asset.organization_id}/media/${asset.id}/${revision}`;
   const base = `${folder}/${name}`;
   return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };
 }
