@@ -66,9 +66,12 @@ async function encodeRaster(raster: Raster, width: number, options: ImageOutputO
       'Image output must be WebP or AVIF with quality between 1 and 100'
     );
   }
+  // Clamp the requested maximum to the decoded source dimensions. This makes
+  // the no-upscale rule explicit even when a saved profile asks for 2048 px.
+  const maxSide = Math.min(width, Math.max(raster.width, raster.height));
   const pipeline = sharp(raster.data, {
     raw: { width: raster.width, height: raster.height, channels: raster.channels }
-  }).resize({ width, height: width, fit: 'inside', withoutEnlargement: true });
+  }).resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true });
   const { data, info } = await (
     format === 'avif'
       ? pipeline.avif({
