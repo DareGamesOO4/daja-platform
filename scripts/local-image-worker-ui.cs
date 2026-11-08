@@ -85,6 +85,11 @@ internal sealed class Dashboard : Form
     private readonly Label state;
     private readonly Label detail;
     private readonly Label renderState;
+    private readonly Label pauseState;
+    private readonly ComboBox pauseDuration;
+    private readonly Button pauseButton;
+    private readonly Button resumeButton;
+    private readonly ProgressBar progress;
     private readonly TextBox input;
     private readonly TextBox destination;
     private readonly TextBox activity;
@@ -137,6 +142,20 @@ internal sealed class Dashboard : Form
         status.Controls.Add(detail);
         status.Controls.Add(renderState);
         layout.Controls.Add(status);
+
+        var controls = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, Margin = new Padding(0, 0, 0, 10) };
+        pauseDuration = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
+        pauseDuration.Items.AddRange(new object[] { "10 minuta", "30 minuta", "1 sat", "2 sata", "4 sata", "8 sati", "Dok ne nastavim" });
+        pauseDuration.SelectedIndex = 0;
+        pauseButton = new Button { Text = "Pauziraj obradu", AutoSize = true };
+        pauseButton.Click += delegate { SetPause(); };
+        resumeButton = new Button { Text = "Nastavi obradu", AutoSize = true };
+        resumeButton.Click += delegate { SetPause(false); };
+        pauseState = new Label { AutoSize = true, Margin = new Padding(4, 7, 0, 0) };
+        controls.Controls.Add(pauseDuration); controls.Controls.Add(pauseButton); controls.Controls.Add(resumeButton); controls.Controls.Add(pauseState);
+        layout.Controls.Add(controls);
+        progress = new ProgressBar { Dock = DockStyle.Top, Height = 14, Maximum = 100, Margin = new Padding(0, 0, 0, 8) };
+        layout.Controls.Add(progress);
 
         var startup = new CheckBox { Text = "Pokreni ikonicu automatski pri prijavi u Windows", AutoSize = true, Margin = new Padding(0, 0, 0, 14) };
         using (var key = Registry.CurrentUser.OpenSubKey(RunKey))
@@ -197,6 +216,19 @@ internal sealed class Dashboard : Form
         Show();
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Activate();
+    }
+
+    private void SetPause(bool paused = true)
+    {
+        var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-pause.json");
+        DateTimeOffset? until = null;
+        if (paused && pauseDuration.SelectedIndex >= 0 && pauseDuration.SelectedIndex < 6)
+        {
+            int[] minutes = { 10, 30, 60, 120, 240, 480 };
+            until = DateTimeOffset.UtcNow.AddMinutes(minutes[pauseDuration.SelectedIndex]);
+        }
+        File.WriteAllText(path, new JavaScriptSerializer().Serialize(new { paused, until = until.HasValue ? until.Value.ToString("o") : null }));
+        pauseState.Text = paused ? (until.HasValue ? "Pauzirano do " + until.Value.ToLocalTime().ToString("t") : "Pauzirano dok ne nastaviš") : "Obrada nastavljena";
     }
 
     private static Control PathRow(TextBox field, string caption, EventHandler action)
@@ -300,13 +332,16 @@ internal sealed class Dashboard : Form
                     return;
                 }
                 state.Text = snapshot.phase == "working" ? "Obrada je u toku" :
+                    snapshot.phase == "local-paused" ? "Obrada pauzirana" :
                     snapshot.phase == "ready" ? "Povezan · čeka slike" :
                     snapshot.phase == "paused" ? "Povezan · pauziran iz admina" :
                     snapshot.phase == "error" ? "Veza ili obrada imaju problem" : "Povezivanje…";
                 DateTimeOffset completed;
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
-                detail.Text = snapshot.phase == "working" ? (snapshot.activity ?? "Obrada slike") + " · " + snapshot.job :
+                detail.Text = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
+                    " · " + (snapshot.sourceWidth.HasValue ? snapshot.sourceWidth + "×" + snapshot.sourceHeight + " px · " : "") +
+                    (snapshot.activity ?? "Obrada slike") + " · " + snapshot.job :
                     snapshot.phase == "error" ? snapshot.error : last;
                 if (snapshot.render != null)
                 {
@@ -318,6 +353,8 @@ internal sealed class Dashboard : Form
                         failed ? "Render · poslednja obrada prijavila grešku" :
                         "Render · rezerva 03:00–07:00 (posle 7 dana)";
                 }
+                progress.Value = Math.Max(0, Math.Min(100, snapshot.progress));
+                pauseState.Text = snapshot.phase == "local-paused" ? (snapshot.pauseUntil == null ? "Pauzirano dok ne nastaviš" : "Pauzirano do " + DateTimeOffset.Parse(snapshot.pauseUntil).ToLocalTime().ToString("t")) : "";
             }
         }
         catch (IOException) { state.Text = "Čeka pokretanje workera"; detail.Text = "Status će se pojaviti kada worker krene."; }
@@ -336,6 +373,12 @@ internal sealed class Dashboard : Form
         public string error { get; set; }
         public string updated { get; set; }
         public string activity { get; set; }
+        public string productSlug { get; set; }
+        public int? imageIndex { get; set; }
+        public int? sourceWidth { get; set; }
+        public int? sourceHeight { get; set; }
+        public int progress { get; set; }
+        public string pauseUntil { get; set; }
         public RenderStatus render { get; set; }
     }
 

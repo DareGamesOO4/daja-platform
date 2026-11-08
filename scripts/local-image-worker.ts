@@ -20,6 +20,7 @@ const configSchema = z.object({
 });
 const claimSchema = z.object({
   id: z.uuid(),
+  productSlug: z.string().optional(), imageIndex: z.number().int().optional(), sourceWidth: z.number().optional(), sourceHeight: z.number().optional(),
   leaseToken: z.uuid(),
   expiresAt: z.iso.datetime(),
   customSizes: z.boolean().optional(),
@@ -215,6 +216,7 @@ async function loadConfig(configPath: string) {
 
 async function work(configPath: string, statusPath?: string) {
   const config = await loadConfig(configPath);
+  const pausePath = join(dirname(configPath), 'worker-pause.json');
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
@@ -257,16 +259,27 @@ async function work(configPath: string, statusPath?: string) {
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     try {
+      let pauseState: { until?: string | null; paused?: boolean } = {};
+      try { pauseState = JSON.parse(await readFile(pausePath, 'utf8')); } catch {}
+      const until = pauseState.until ? Date.parse(pauseState.until) : 0;
+      if (pauseState.paused || until > Date.now()) {
+        Object.assign(status, { phase: 'local-paused', job: '', activity: '', pauseUntil: until > Date.now() ? new Date(until).toISOString() : null });
+        await publishStatus();
+        await delay(3_000, undefined, { signal: shutdown.signal }).catch(() => {});
+        continue;
+      }
+      if (pauseState.until) await writeFile(pausePath, JSON.stringify({ paused: false, until: null }));
+      status.pauseUntil = null;
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
       if (response.status !== 204) {
         const payload = await response.json() as { data?: unknown };
-        const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload
-          ? payload.data
-          : payload);
-        Object.assign(status, { phase: 'working', job: claim.id, error: '', activity: 'Preuzimanje originala' });
+        const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
+        Object.assign(status, { phase: 'working', job: claim.id, productSlug: claim.productSlug, imageIndex: claim.imageIndex,
+          sourceWidth: claim.sourceWidth, sourceHeight: claim.sourceHeight, progress: 5, error: '', activity: 'Preuzimanje originala' });
         await publishStatus();
         await handleClaim(config, claim, shutdown.signal, claim.profile, activity => {
           status.activity = activity;
+          status.progress = activity.startsWith('Obrada') ? 35 : activity.startsWith('Slanje') ? 45 + Number(/\((\d+)/.exec(activity)?.[1] ?? 0) * 12 : 95;
           void publishStatus();
         });
         status.completed = new Date().toISOString();

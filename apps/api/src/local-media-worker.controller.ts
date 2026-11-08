@@ -159,6 +159,9 @@ export class LocalMediaWorkerController {
     response.status(200);
     return {
       id: job.media_asset_id, leaseToken: token, expiresAt: job.lease_until.toISOString(), customSizes: true,
+      productSlug: typeof job.asset.metadata?.productSlug === 'string' ? job.asset.metadata.productSlug : undefined,
+      imageIndex: Number(job.asset.metadata?.imageIndex) || undefined,
+      sourceWidth: job.asset.width ?? undefined, sourceHeight: job.asset.height ?? undefined,
       ...(protocol.data.managed ? { profile: job.profile } : {}),
       source: { url: source.downloadUrl, sha256: job.source_checksum },
       uploads: Object.fromEntries(variants.map((variant, index) => [variant, uploads[index]]))

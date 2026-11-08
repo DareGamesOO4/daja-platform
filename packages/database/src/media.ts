@@ -788,7 +788,8 @@ export function productMediaVariantKeys(asset: MediaAssetRow, revision: string, 
   const name = `${slug || 'image'}-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
   if (slug && metadata.storageLayout === 'flat-v1') {
     const picture = `${slug}-slika-${Number.isSafeInteger(index) && index > 0 ? index : 1}`;
-    const base = `${prefix}/${picture}/${picture}-${asset.id}-${revision}`;
+    const dimensions = asset.width && asset.height ? `${asset.width}x${asset.height}` : 'original';
+    const base = `${prefix}/${picture}/${picture}-${dimensions}-${revision.replace(/-/g, '').slice(0, 12)}`;
     return { avif: `${base}.avif`, webp: `${base}.webp`, avifThumb: `${base}-thumb.avif`, webpThumb: `${base}-thumb.webp` };
   }
   const folder = slug ? `${prefix}/${asset.id}/${revision}` : `org/${asset.organization_id}/media/${asset.id}/${revision}`;
