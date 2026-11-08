@@ -6,6 +6,8 @@ Raspakuj paket u folder u kom će aplikacija ostati i otvori DAJA Worker.exe. Ka
 
 DAJA Studio prikazuje status veze i red poslova sa sličicama. U profilu podešavaš kvalitet, effort, maksimalnu dimenziju, lossless i obradu boje za svaki od četiri izlaza. Lokalna proba koristi trenutna podešavanja i prikazuje dimenzije, veličinu fajla, uštedu i trajanje obrade. Dugme „Sačuvaj profil” primenjuje podešavanja na naredne poslove Windows workera pokrenutog iz aplikacije, a pauza mu dozvoljava da završi trenutni posao pre nego što prestane da preuzima nove. Zaseban Windows servis koristi podrazumevani profil.
 
+Korisnička instalacija sa postojećim `worker-user.json` može da otvori isti panel u pregledaču na `http://127.0.0.1:41627`. Za ažuriranje takve instalacije kopiraj novi `worker.mjs` i folder `studio` pored konfiguracije, pa ponovo pokreni postojeći worker. Panel radi samo na tom računaru. Rezultati lokalne probe čuvaju se u podfolderu `Rezultati` i dostupni su za preuzimanje iz panela.
+
 U raspakovanom folderu otvori PowerShell i pokreni lokalnu obradu. Izlazni folder mora da bude nov.
 
 ~~~powershell

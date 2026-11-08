@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { createReadStream, existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -23,6 +24,14 @@ const profileSchema = z.object({
   avif: avifOptions(2048), webp: webpOptions(2048),
   avifThumb: avifOptions(512), webpThumb: webpOptions(512)
 });
+type Profile = z.infer<typeof profileSchema>;
+const standardProfile: Profile = {
+  paused: false,
+  avif: { quality: 95, effort: 4, size: 2048, lossless: false, chromaSubsampling: '4:4:4' },
+  webp: { quality: 75, effort: 4, size: 2048, lossless: false, smartSubsample: true },
+  avifThumb: { quality: 65, effort: 4, size: 512, lossless: false, chromaSubsampling: '4:4:4' },
+  webpThumb: { quality: 75, effort: 4, size: 512, lossless: false, smartSubsample: true }
+};
 const configSchema = z.object({
   apiBaseUrl: z.url(),
   token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/)
@@ -42,12 +51,12 @@ function checksum(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-async function readImage(chunks: AsyncIterable<Uint8Array>): Promise<Buffer> {
+async function readImage(chunks: AsyncIterable<Uint8Array>, maximum = MAX_BYTES): Promise<Buffer> {
   const buffers: Uint8Array[] = [];
   let length = 0;
   for await (const chunk of chunks) {
     length += chunk.byteLength;
-    if (length > MAX_BYTES) throw new Error('Slika je veća od 25 MiB.');
+    if (length > maximum) throw new Error('Prekoračena je maksimalna veličina zahteva.');
     buffers.push(chunk);
   }
   return Buffer.concat(buffers, length);
@@ -222,6 +231,12 @@ async function work(configPath: string, statusPath?: string, profilePath?: strin
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
   const status = { phase: 'connecting', job: '', completed: '', error: '' };
+  if (basename(configPath) === 'worker-user.json') {
+    profilePath ??= join(dirname(configPath), 'worker-profile.json');
+    if (existsSync(join(dirname(configPath), 'studio', 'index.html'))) {
+      startPanel(configPath, profilePath, status, shutdown.signal);
+    }
+  }
   let pendingWrite = false;
   async function publishStatus() {
     if (!statusPath || pendingWrite) return;
@@ -242,11 +257,7 @@ async function work(configPath: string, statusPath?: string, profilePath?: strin
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     try {
-      const rawProfile = profilePath ? await readFile(profilePath, 'utf8').catch((error: NodeJS.ErrnoException) => {
-        if (error.code === 'ENOENT') return undefined;
-        throw error;
-      }) : undefined;
-      const profile = rawProfile === undefined ? undefined : profileSchema.parse(JSON.parse(rawProfile));
+      const profile = profilePath ? await loadProfile(profilePath) : undefined;
       if (profile?.paused) {
         Object.assign(status, { phase: 'paused', job: '', error: '' });
         await publishStatus();
@@ -307,12 +318,109 @@ async function queue(configPath: string, page: number, cachedKeys: string[]) {
       ...item, thumbnail: cachedKeys.includes(item.key) ? undefined : await preview(url)
     }))));
   }
-  console.log(JSON.stringify({ total: snapshot.total, items }));
+  return { total: snapshot.total, items };
+}
+
+async function loadProfile(path: string): Promise<Profile | undefined> {
+  const raw = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+  return raw === undefined ? undefined : profileSchema.parse(JSON.parse(raw));
+}
+
+function startPanel(configPath: string, profilePath: string, status: unknown, shutdown: AbortSignal) {
+  const host = '127.0.0.1:41627';
+  const origin = 'http://' + host;
+  const folder = dirname(configPath);
+  let encoding = false;
+  let listing = false;
+  const server = createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    const reply = (code: number, body: unknown) => {
+      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(body));
+    };
+    if (req.headers.host !== host || (req.method === 'POST' &&
+        (req.headers.origin !== origin || req.headers['x-daja-panel'] !== '1'))) {
+      reply(403, { error: 'Otvori panel direktno na ' + origin });
+      return;
+    }
+    const route = req.url ?? '';
+    const assets: Record<string, [string, string]> = {
+      '/': ['index.html', 'text/html'], '/panel.js': ['panel.js', 'text/javascript'], '/panel.css': ['panel.css', 'text/css']
+    };
+    try {
+      const asset = Object.hasOwn(assets, route) ? assets[route] : undefined;
+      if (req.method === 'GET' && asset) {
+        const data = await readFile(join(folder, 'studio', asset[0]));
+        res.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }).end(data);
+      } else if (req.method === 'GET' && route === '/state') {
+        reply(200, { status, profile: await loadProfile(profilePath) ?? standardProfile });
+      } else if (req.method === 'POST' && route === '/profile') {
+        const body = await readImage(req, 8192);
+        const profile = profileSchema.parse(JSON.parse(body.toString('utf8')));
+        const temporary = profilePath + '.' + randomUUID() + '.tmp';
+        try {
+          await writeFile(temporary, JSON.stringify(profile), { flag: 'wx' });
+          await rename(temporary, profilePath);
+        } finally {
+          await rm(temporary, { force: true });
+        }
+        reply(200, { profile });
+      } else if (req.method === 'POST' && route === '/queue') {
+        if (listing) return reply(409, { error: 'Red se već osvežava.' });
+        listing = true;
+        try {
+          const body = z.object({
+            page: z.number().int().min(0).max(10000), keys: z.array(z.string().max(110)).max(8)
+          }).parse(JSON.parse((await readImage(req, 4096)).toString('utf8')));
+          reply(200, await queue(configPath, body.page, body.keys));
+        } finally { listing = false; }
+      } else if (req.method === 'POST' && route === '/convert') {
+        if (encoding) return reply(409, { error: 'Lokalna proba je već u toku.' });
+        if (Number(req.headers['content-length']) > MAX_BYTES) return reply(413, { error: 'Najviše 25 MiB po slici.' });
+        encoding = true;
+        try {
+          const settings = z.string().max(8192).parse(req.headers['x-daja-profile']);
+          const profile = profileSchema.parse(JSON.parse(Buffer.from(settings, 'base64').toString('utf8')));
+          const source = await readImage(req);
+          const id = randomUUID();
+          const output = join(folder, 'Rezultati', id);
+          await mkdir(dirname(output), { recursive: true });
+          const result = await saveOutputs(source, output, 95, profile);
+          reply(200, { id, output, ...result });
+        } finally { encoding = false; }
+      } else {
+        const result = /^\/result\/([a-f0-9-]{36})\/(slika(?:-thumb)?\.(?:avif|webp))$/.exec(route);
+        if (req.method !== 'GET' || !result || !z.uuid().safeParse(result[1]).success) {
+          return reply(404, { error: 'Stranica nije pronađena.' });
+        }
+        const file = await readFile(join(folder, 'Rezultati', result[1], result[2]));
+        res.writeHead(200, { 'Content-Type': 'image/' + result[2].split('.').pop(),
+          'Content-Disposition': 'attachment; filename="' + result[2] + '"' }).end(file);
+      }
+    } catch (error) {
+      if (!res.headersSent && !res.destroyed) reply(400, { error:
+        error instanceof HttpFailure ? error.message : 'Zahtev nije obrađen. Proveri sliku, profil ili vezu.' });
+    }
+  });
+  server.on('error', () => console.error('Lokalni panel nije mogao da se pokrene na ' + origin));
+  server.listen(41627, '127.0.0.1');
+  shutdown.addEventListener('abort', () => server.close(), { once: true });
 }
 
 async function local(inputPath: string, outputDirectory: string, quality: number, profile?: ProductImageProfile) {
+  const result = await saveOutputs(await readImage(createReadStream(inputPath)), outputDirectory, quality, profile);
+  for (const { filename, width, height, bytes, savings } of result.files) {
+    console.log(filename + '  ·  ' + width + ' × ' + height + ' px  ·  ' + (bytes / 1024).toFixed(1) + ' KiB  ·  ušteda ' + savings.toFixed(1) + '%');
+  }
+  console.log('Original: ' + (result.original / 1024).toFixed(1) + ' KiB  ·  Obrada: ' + result.seconds.toFixed(1) + ' s');
+}
+
+async function saveOutputs(source: Buffer, outputDirectory: string, quality: number, profile?: ProductImageProfile) {
   const started = Date.now();
-  const source = await readImage(createReadStream(inputPath));
   const outputs = await encode(source, quality, undefined, profile);
   const target = resolve(outputDirectory);
   const stage = await mkdtemp(target + '.tmp-');
@@ -325,12 +433,11 @@ async function local(inputPath: string, outputDirectory: string, quality: number
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
-  for (const variant of VARIANTS) {
+  const files = VARIANTS.map(variant => {
     const { filename, data, width, height } = outputs[variant];
-    const savings = (100 * (1 - data.length / source.length)).toFixed(1);
-    console.log(filename + '  ·  ' + width + ' × ' + height + ' px  ·  ' + (data.length / 1024).toFixed(1) + ' KiB  ·  ušteda ' + savings + '%');
-  }
-  console.log('Original: ' + (source.length / 1024).toFixed(1) + ' KiB  ·  Obrada: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
+    return { filename, width, height, bytes: data.length, savings: 100 * (1 - data.length / source.length) };
+  });
+  return { files, original: source.length, seconds: (Date.now() - started) / 1000 };
 }
 
 const [mode, first, second, quality] = process.argv.slice(2);
@@ -342,7 +449,7 @@ try {
     await local(first, second, 95, profileSchema.parse(JSON.parse(Buffer.from(quality, 'base64').toString('utf8'))));
   } else if (mode === 'queue' && first && second) {
     const keys = z.array(z.string()).max(8).parse(JSON.parse(Buffer.from(quality ?? 'W10=', 'base64').toString('utf8')));
-    await queue(first, z.coerce.number().int().min(0).max(10000).parse(second), keys);
+    console.log(JSON.stringify(await queue(first, z.coerce.number().int().min(0).max(10000).parse(second), keys)));
   } else if (mode === 'run' && first) await work(first, second, quality);
   else throw new Error('Upotreba: worker.mjs local <original> <novi-folder> | worker.mjs run <config.json>');
 } catch (error) {

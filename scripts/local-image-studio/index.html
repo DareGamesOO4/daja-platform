@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="sr-Latn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DAJA Studio</title>
+  <link rel="stylesheet" href="/panel.css">
+  <script type="module" src="/panel.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>DAJA Studio</h1><p>Priprema fotografija za DAJA Shop</p></div>
+      <div class="connection"><span id="worker" role="status">Povezivanje…</span></div>
+    </header>
+    <div class="workspace">
+      <div>
+        <section>
+          <h2>Profil obrade</h2>
+          <p>Kvalitet, dimenzije i kompresija za svaki izlaz.</p>
+          <form id="profile">
+            <div class="variants" id="variants"></div>
+            <div class="actions">
+              <select id="presets" aria-label="Gotovi profili">
+                <option value="">Gotovi profili</option>
+                <option value="standard">DAJA standard</option>
+                <option value="detail">Više detalja</option>
+                <option value="small">Manji fajlovi</option>
+              </select>
+              <button class="primary">Sačuvaj profil</button>
+              <button type="button" id="pause">Pauziraj red</button>
+            </div>
+          </form>
+          <p id="profile-status" role="status"></p>
+        </section>
+        <section>
+          <h2>Lokalna proba</h2>
+          <p>Isprobaj trenutna podešavanja na slici sa računara.</p>
+          <form id="trial" class="actions">
+            <input type="file" id="source" aria-label="Originalna fotografija" accept="image/*" required>
+            <button class="primary">Obradi sliku</button>
+          </form>
+          <p id="trial-status" role="status"></p>
+          <ul id="results"></ul>
+        </section>
+      </div>
+      <section class="queue">
+        <h2>Red poslova</h2>
+        <p id="queue-status" role="status">Učitavam red…</p>
+        <ul id="queue"></ul>
+        <div class="actions">
+          <button id="back">Prethodna</button>
+          <button id="next">Sledeća</button>
+          <button id="refresh">Osveži</button>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
