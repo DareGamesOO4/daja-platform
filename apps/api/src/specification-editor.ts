@@ -8,6 +8,10 @@ const field = z.object({ specId: z.string().uuid(), groupId: z.string().max(80),
 export const specificationConfigurationSchema = z.object({ groups: z.array(z.object({ id: z.string().min(1).max(80), name: z.string().trim().min(1).max(100) })).max(40), fields: z.array(field).max(400) });
 export const specificationEditorRequestSchema = z.object({
   action: z.enum(['get', 'configure', 'option']), departmentId: z.string().uuid(), brand: z.string().max(240).optional(),
+  // Product entry only needs the configured choices. The full catalog scan is
+  // reserved for the settings screen, where the per-option usage counts help
+  // administrators organize the vocabulary.
+  includeUsage: z.boolean().optional().default(true),
   specs: z.record(z.string(), z.string()).optional(), version: z.number().int().min(0).optional(),
   configuration: specificationConfigurationSchema.optional(), specId: z.string().uuid().optional(),
   value: z.string().trim().min(1).max(160).optional(), linkType: z.string().trim().max(160).optional()
@@ -30,8 +34,13 @@ type EditorCacheEntry = { expiresAt: number; data?: EditorResult; pending?: Prom
 const editorReadCache = new Map<string, EditorCacheEntry>();
 const editorReadCacheTtlMs = 45_000;
 
-function editorCacheKey(organizationId: string, departmentId: string): string {
-  return `${organizationId}:${departmentId}`;
+function editorCacheKey(organizationId: string, departmentId: string, includeUsage: boolean): string {
+  return `${organizationId}:${departmentId}:${includeUsage ? 'usage' : 'choices'}`;
+}
+
+export function invalidateSpecificationEditorCache(organizationId: string, departmentId?: string): void {
+  const prefix = departmentId ? `${organizationId}:${departmentId}:` : `${organizationId}:`;
+  for (const key of editorReadCache.keys()) if (key.startsWith(prefix)) editorReadCache.delete(key);
 }
 
 function copyEditorResult(result: EditorResult): EditorResult {
@@ -81,10 +90,10 @@ function validateConfiguration(config: Configuration, specs: Specification[]) {
 }
 
 export async function specificationEditor(database: Database, organizationId: string, input: z.infer<typeof specificationEditorRequestSchema>): Promise<EditorResult> {
-  const key = editorCacheKey(organizationId, input.departmentId);
+  const key = editorCacheKey(organizationId, input.departmentId, input.includeUsage);
   if (input.action !== 'get') {
     const result = await specificationEditorNow(database, organizationId, input);
-    editorReadCache.delete(key);
+    invalidateSpecificationEditorCache(organizationId, input.departmentId);
     return result;
   }
 
@@ -120,11 +129,15 @@ async function specificationEditorNow(database: Database, organizationId: string
     // New taxonomy fields always remain visible, even with an older saved layout.
     configuration = { ...configuration, fields: configuration.fields.filter(f => specs.some(s => s.id === f.specId)) };
     for (const s of specs) if (!configuration.fields.some(f => f.specId === s.id)) configuration.fields.push({ specId: s.id, groupId: 'other', order: 999, visibility: [], options: [] });
-    const brands: { id: string; name: string }[] = (await client.query(
+    // A worker choosing existing values does not need a full department-wide
+    // variant scan. Keep it for settings (usage counts) and writes (where a
+    // new mechanism may be inferred from existing catalog data).
+    const needsCatalogContext = input.includeUsage || input.action !== 'get';
+    const brands: { id: string; name: string }[] = needsCatalogContext ? (await client.query(
       'SELECT id,name FROM brands WHERE organization_id=$1 AND department_id=$2 AND deleted_at IS NULL AND active=true ORDER BY name',
       [organizationId,input.departmentId]
-    )).rows;
-    const products = (await client.query(`SELECT v.attributes,b.name AS brand FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`, [organizationId,input.departmentId])).rows;
+    )).rows : [];
+    const products = needsCatalogContext ? (await client.query(`SELECT v.attributes,b.name AS brand FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`, [organizationId,input.departmentId])).rows : [];
     const typeSpec = specs.find(s => norm(s.slug) === 'tip_mehanizma');
     const caliberSpec = specs.find(s => norm(s.slug) === 'mehanizam');
     const get = (attributes: Record<string,unknown>, spec: Specification | undefined): string | undefined => {
@@ -210,14 +223,14 @@ async function specificationEditorNow(database: Database, organizationId: string
     }
     // Count current catalog variants, once each, regardless of inventory quantity,
     // brand relevance or mechanism type. Deleted products/variants are excluded above.
-    const usageCounts: Record<string, Record<string, number>> = Object.fromEntries(specs.map(s => {
+    const usageCounts: Record<string, Record<string, number>> = input.includeUsage ? Object.fromEntries(specs.map(s => {
       const counts = new Map<string, number>();
       for (const product of products) {
         const value = get(product.attributes, s);
         if (value?.trim()) counts.set(norm(value), (counts.get(norm(value)) || 0) + 1);
       }
       return [s.id, Object.fromEntries(s.optionValues.map(value => [value, counts.get(norm(value)) || 0]))];
-    }));
+    })) : {};
     await client.query('COMMIT');
     return { version: stored?.version || 0, configuration, specifications: specs, ranking: usageCounts, usageCounts, brands };
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }

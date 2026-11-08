@@ -80,7 +80,7 @@ import { currentEurRsdMiddleRate, currentNbsExchangeRates } from './exchange-rat
 import { readSearchSettings, saveSearchSettings, searchSettingsSchema, type SearchSettingsResult } from './catalog-search-settings.js';
 import { invalidateCatalogSearch, searchPublicCatalog, publicSearchQuerySchema, type CatalogSearchResponse } from './catalog-search.js';
 import { workforceSummary, workforceProducts, workforceTimelineEntries, effectiveRateSql } from './workforce-data.js';
-import { specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
+import { invalidateSpecificationEditorCache, specificationEditor, specificationEditorRequestSchema } from './specification-editor.js';
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 import { loadGroupState, loadPublicGroupMembers, groupOverview, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 import { publicBrandPaths } from './catalog-brand-pages.js';
@@ -766,6 +766,10 @@ export class StaffCatalogController {
     organizationId: string,
     collection: 'departments' | 'brands' | 'categories' | 'spec_keys'
   ): void {
+    // The editor has two in-process views of the same department: a light
+    // worker view and an administrative usage-count view. Both must disappear
+    // as soon as a relevant vocabulary change is committed.
+    if (collection === 'spec_keys' || collection === 'brands') invalidateSpecificationEditorCache(organizationId);
     this.realtime.publish({
       organizationId,
       event: 'catalog.taxonomy.updated',
