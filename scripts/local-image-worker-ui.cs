@@ -315,7 +315,8 @@ internal sealed class Dashboard : Form
                     var failed = DateTimeOffset.TryParse(snapshot.render.renderErrorAt, out failure) &&
                         (!DateTimeOffset.TryParse(snapshot.render.renderCompletedAt, out success) || failure > success);
                     renderState.Text = !snapshot.render.renderOnline ? "Render · nema svežeg signala" :
-                        failed ? "Render · poslednja obrada prijavila grešku" : "Render · raspored aktivan (03–07)";
+                        failed ? "Render · poslednja obrada prijavila grešku" :
+                        "Render · rezerva 03:00–07:00 (posle 7 dana)";
                 }
             }
         }
