@@ -19,6 +19,7 @@ import { CONFIG, DATABASE } from './tokens.js';
 import { allowedRealtimeOrigin } from './runtime/cors-policy.js';
 import { invalidateCatalogSearch } from './catalog-search.js';
 import { invalidateCatalogPages } from './catalog-page.js';
+import { invalidateSpecificationEditorCache } from './specification-editor.js';
 import { AdmissionBudget } from './runtime/abuse-protection.js';
 import { allowEdgeUpgrade, browserRequest } from './runtime/edge-ingress.js';
 import { BROWSER_COOKIES, browserStaffToken, cookieValue } from './runtime/browser-session.js';
@@ -142,7 +143,7 @@ export class RealtimeGateway {
             stringValue(socket.handshake.auth.locationId) ??
             stringValue(socket.handshake.query.locationId)
         });
-        const catalogContributor = ctx.roles.includes('Unosilac kataloga');
+        const catalogContributor = !ctx.isOwner && ctx.roles.includes('Unosilac kataloga');
         if (!ctx.permissions.includes('realtime.read') && !catalogContributor) {
           deny(socket);
           return;
@@ -152,17 +153,20 @@ export class RealtimeGateway {
         socket.data.permissions = ctx.permissions;
         socket.data.locationId = ctx.locationId;
         socket.data.deviceId = ctx.deviceId;
+        socket.data.canReadOrganization = !catalogContributor && ctx.permissions.includes('realtime.read');
         this.monitorSession(socket, token, async () => {
           const current = await this.authService.authenticateAccessToken(token, {
             ...(ctx.locationId ? { locationId: ctx.locationId } : {})
           });
           return current.policyVersion === ctx.policyVersion;
         });
-        // Contributors only need their own reader scan room. Do not put them
-        // in the organization-wide room, which contains unrelated staff
-        // events such as orders and inventory updates.
-        if (ctx.permissions.includes('realtime.read')) void socket.join(orgRoom(ctx.organizationId));
-        if (ctx.locationId && ctx.permissions.includes('realtime.read')) {
+        // Catalog contributors need taxonomy invalidations, but must not
+        // receive the organization-wide order and inventory events.
+        if (socket.data.canReadOrganization) void socket.join(orgRoom(ctx.organizationId));
+        else if (catalogContributor && ctx.permissions.includes('catalog.read')) {
+          void socket.join(taxonomyRoom(ctx.organizationId));
+        }
+        if (ctx.locationId && socket.data.canReadOrganization) {
           void socket.join(locationRoom(ctx.organizationId, ctx.locationId));
         }
         return;
@@ -220,6 +224,7 @@ export class RealtimeGateway {
     socket.data.permissions = permissions;
     socket.data.locationId = locationId;
     socket.data.deviceId = stringValue(socket.handshake.auth.deviceId) ?? stringValue(socket.handshake.query.deviceId);
+    socket.data.canReadOrganization = true;
     void socket.join(orgRoom(organizationId));
     if (locationId) {
       void socket.join(locationRoom(organizationId, locationId));
@@ -263,7 +268,7 @@ export class RealtimeGateway {
       socket.disconnect(true);
       return { ok: false };
     }
-    if (body?.locationId && body.locationId === socket.data.locationId) {
+    if (socket.data.canReadOrganization && body?.locationId && body.locationId === socket.data.locationId) {
       void socket.join(locationRoom(socket.data.organizationId, body.locationId));
     }
     return { ok: true };
@@ -278,6 +283,10 @@ export class RealtimeGateway {
     if (!allowedEvents.includes(input.event)) {
       return;
     }
+    if (input.event === 'catalog.taxonomy.updated' && Array.isArray(input.payload.collections) &&
+        input.payload.collections.some(collection => ['spec_keys', 'brands', 'departments'].includes(collection))) {
+      invalidateSpecificationEditorCache(input.organizationId);
+    }
     if (['product.updated', 'catalog.taxonomy.updated', 'catalog.variant-groups.updated', 'price.changed', 'media.ready', 'inventory.changed'].includes(input.event)) {
       invalidateCatalogSearch(input.organizationId);
       invalidateCatalogPages(input.organizationId);
@@ -290,7 +299,11 @@ export class RealtimeGateway {
     const target = input.locationId
       ? this.server.to(locationRoom(input.organizationId, input.locationId))
       : this.server.to(orgRoom(input.organizationId));
-    target.emit(input.event, envelope);
+    if (input.event === 'catalog.taxonomy.updated' && !input.locationId) {
+      target.to(taxonomyRoom(input.organizationId)).emit(input.event, envelope);
+    } else {
+      target.emit(input.event, envelope);
+    }
     if (['product.updated', 'catalog.variant-groups.updated'].includes(input.event) && !input.locationId) {
       this.server.to(publicCatalogRoom(input.organizationId)).emit(input.event, envelope);
     }
@@ -355,6 +368,10 @@ function sanitizePayload(event: RealtimeEvent, payload: Record<string, unknown>)
 
 function orgRoom(organizationId: string): string {
   return `org:${organizationId}`;
+}
+
+function taxonomyRoom(organizationId: string): string {
+  return `org:${organizationId}:catalog-taxonomy`;
 }
 
 function locationRoom(organizationId: string, locationId: string): string {

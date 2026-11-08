@@ -8,9 +8,7 @@ const field = z.object({ specId: z.string().uuid(), groupId: z.string().max(80),
 export const specificationConfigurationSchema = z.object({ groups: z.array(z.object({ id: z.string().min(1).max(80), name: z.string().trim().min(1).max(100) })).max(40), fields: z.array(field).max(400) });
 export const specificationEditorRequestSchema = z.object({
   action: z.enum(['get', 'configure', 'option']), departmentId: z.string().uuid(), brand: z.string().max(240).optional(),
-  // Product entry only needs the configured choices. The full catalog scan is
-  // reserved for the settings screen, where the per-option usage counts help
-  // administrators organize the vocabulary.
+  // Product entry omits usage statistics, but keeps all applicable rules.
   includeUsage: z.boolean().optional().default(true),
   specs: z.record(z.string(), z.string()).optional(), version: z.number().int().min(0).optional(),
   configuration: specificationConfigurationSchema.optional(), specId: z.string().uuid().optional(),
@@ -33,6 +31,7 @@ type EditorCacheEntry = { expiresAt: number; data?: EditorResult; pending?: Prom
 // reads and retain it briefly. Mutations below invalidate the entry immediately.
 const editorReadCache = new Map<string, EditorCacheEntry>();
 const editorReadCacheTtlMs = 45_000;
+const editorReadCacheMaxEntries = 32;
 
 function editorCacheKey(organizationId: string, departmentId: string, includeUsage: boolean): string {
   return `${organizationId}:${departmentId}:${includeUsage ? 'usage' : 'choices'}`;
@@ -101,6 +100,11 @@ export async function specificationEditor(database: Database, organizationId: st
   if (cached?.data && cached.expiresAt > Date.now()) return copyEditorResult(cached.data);
   if (cached?.pending) return copyEditorResult(await cached.pending);
 
+  editorReadCache.delete(key);
+  if (editorReadCache.size >= editorReadCacheMaxEntries) {
+    const oldest = editorReadCache.keys().next();
+    if (!oldest.done) editorReadCache.delete(oldest.value);
+  }
   const pending = specificationEditorNow(database, organizationId, input);
   editorReadCache.set(key, { expiresAt: 0, pending });
   try {
@@ -120,7 +124,7 @@ export async function specificationEditor(database: Database, organizationId: st
 async function specificationEditorNow(database: Database, organizationId: string, input: z.infer<typeof specificationEditorRequestSchema>): Promise<EditorResult> {
   const client = await database.pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query(input.action === 'get' ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN');
     const department = (await client.query('SELECT slug FROM departments WHERE id=$1 AND organization_id=$2 AND deleted_at IS NULL', [input.departmentId, organizationId])).rows[0];
     if (!department) throw new NotFoundException('Odeljenje nije pronađeno.');
     const specs: Specification[] = (await client.query(`SELECT id,name,slug,unit,option_values AS "optionValues" FROM spec_keys WHERE organization_id=$1 AND department_id=$2 AND deleted_at IS NULL AND active=true ORDER BY name`, [organizationId, input.departmentId])).rows;
@@ -129,31 +133,52 @@ async function specificationEditorNow(database: Database, organizationId: string
     // New taxonomy fields always remain visible, even with an older saved layout.
     configuration = { ...configuration, fields: configuration.fields.filter(f => specs.some(s => s.id === f.specId)) };
     for (const s of specs) if (!configuration.fields.some(f => f.specId === s.id)) configuration.fields.push({ specId: s.id, groupId: 'other', order: 999, visibility: [], options: [] });
-    // A worker choosing existing values does not need a full department-wide
-    // variant scan. Keep it for settings (usage counts) and writes (where a
-    // new mechanism may be inferred from existing catalog data).
-    const needsCatalogContext = input.includeUsage || input.action !== 'get';
-    const brands: { id: string; name: string }[] = needsCatalogContext ? (await client.query(
+    const typeSpec = specs.find(s => norm(s.slug) === 'tip_mehanizma');
+    const caliberSpec = specs.find(s => norm(s.slug) === 'mehanizam');
+    const caliberField = configuration.fields.find(f => f.specId === caliberSpec?.id);
+    const configuredCalibers = new Set(caliberField?.options.map(o => norm(o.value)));
+    const unconfiguredCalibers = input.action !== 'configure' && typeSpec && caliberSpec
+      ? caliberSpec.optionValues.filter(value => !configuredCalibers.has(norm(value))) : [];
+    const linkCaliber = input.action === 'option' && caliberSpec && input.specId === caliberSpec.id &&
+      Boolean(input.linkType || input.brand?.trim());
+    const brands: { id: string; name: string }[] = input.includeUsage || linkCaliber ? (await client.query(
       'SELECT id,name FROM brands WHERE organization_id=$1 AND department_id=$2 AND deleted_at IS NULL AND active=true ORDER BY name',
       [organizationId,input.departmentId]
     )).rows : [];
-    const products = needsCatalogContext ? (await client.query(`SELECT v.attributes,b.name AS brand FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`, [organizationId,input.departmentId])).rows : [];
-    const typeSpec = specs.find(s => norm(s.slug) === 'tip_mehanizma');
-    const caliberSpec = specs.find(s => norm(s.slug) === 'mehanizam');
+    const products = input.includeUsage || unconfiguredCalibers.length || linkCaliber
+      ? (await client.query<{ attributes: Record<string, unknown>; brand: string | null }>(
+        `SELECT v.attributes, ${linkCaliber ? 'b.name' : 'NULL'} AS brand
+         FROM product_variants v JOIN products p ON p.id=v.product_id AND p.organization_id=v.organization_id
+         ${linkCaliber ? 'LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id' : ''}
+         WHERE v.organization_id=$1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL AND p.department_id=$2`,
+        [organizationId, input.departmentId]
+      )).rows : [];
+    const aliases = new Map(specs.map(spec => [spec.id, new Set([norm(spec.slug), norm(spec.name)])]));
+    const asText = (value: unknown): string | undefined =>
+      typeof value === 'string' ? value : typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
     const get = (attributes: Record<string,unknown>, spec: Specification | undefined): string | undefined => {
       if (!spec) return undefined;
-      const value = Object.entries(attributes || {}).find(([k]) => norm(k) === norm(spec.slug) || norm(k) === norm(spec.name))?.[1];
-      return typeof value === 'string' ? value : typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
+      return asText(Object.entries(attributes || {}).find(([key]) => aliases.get(spec.id)?.has(norm(key)))?.[1]);
     };
-    if (caliberSpec && typeSpec) {
-      const f = configuration.fields.find(f => f.specId === caliberSpec.id)!;
-      for (const value of caliberSpec.optionValues) {
-        if (f.options.some(o => norm(o.value) === norm(value))) continue;
-        const types = [...new Set(products.filter(p => norm(String(get(p.attributes, caliberSpec) || '')) === norm(value)).map(p => String(get(p.attributes, typeSpec) || '').trim()).filter(Boolean).map(norm))];
-        if (types.length === 1) {
-          const type = typeSpec.optionValues.find(v => norm(v) === types[0]);
-          if (type) f.options.push({ value, rules: [[{ specId: typeSpec.id, operator: 'equals', value: type }]] });
-        }
+    if (caliberField && typeSpec && unconfiguredCalibers.length) {
+      const remaining = new Set(unconfiguredCalibers.map(norm));
+      const inferredTypes = new Map<string, string | null>();
+      for (const { attributes } of products) {
+        const caliber = norm(get(attributes, caliberSpec) || '');
+        if (!remaining.has(caliber)) continue;
+        const type = get(attributes, typeSpec)?.trim();
+        if (!type) continue;
+        const normalizedType = norm(type);
+        const previous = inferredTypes.get(caliber);
+        inferredTypes.set(caliber, previous === undefined || previous === normalizedType ? normalizedType : null);
+      }
+      for (const value of unconfiguredCalibers) {
+        const key = norm(value);
+        if (configuredCalibers.has(key)) continue;
+        const type = typeSpec.optionValues.find(option => norm(option) === inferredTypes.get(key));
+        if (!type) continue;
+        caliberField.options.push({ value, rules: [[{ specId: typeSpec.id, operator: 'equals', value: type }]] });
+        configuredCalibers.add(key);
       }
     }
     if (input.action !== 'get') {
@@ -175,7 +200,10 @@ async function specificationEditorNow(database: Database, organizationId: string
         }
         const spec = specs.find(s => s.id === input.specId);
         if (!spec || !input.value) throw new BadRequestException('Nedostaje specifikacija ili vrednost.');
-        const row = (await client.query('SELECT option_values FROM spec_keys WHERE id=$1 AND organization_id=$2 FOR UPDATE', [spec.id, organizationId])).rows[0];
+        const row = (await client.query(
+          'SELECT option_values FROM spec_keys WHERE id=$1 AND organization_id=$2 AND department_id=$3 AND deleted_at IS NULL AND active FOR UPDATE',
+          [spec.id, organizationId, input.departmentId]
+        )).rows[0];
         if (!row) throw new NotFoundException('Specifikacija je u međuvremenu obrisana. Ponovo učitaj.');
         const values: string[] = row.option_values || [];
         const existing = values.find(v => norm(v) === norm(input.value!));
@@ -208,14 +236,15 @@ async function specificationEditorNow(database: Database, organizationId: string
             const hasUnscopedTypeRule = Boolean(typeSpec && optionRules.some(row => !row.some(condition => condition.brand) && row.some(condition => condition.specId === typeSpec.id)));
             const hasBrandRule = optionRules.some(row => row.some(condition => condition.brand));
             if (hasUnscopedTypeRule) optionRules = optionRules.filter(row => row.some(condition => condition.brand) || !row.some(condition => condition.specId === typeSpec?.id));
-            if (!hasBrandRule || hasUnscopedTypeRule) optionRules.push(...inferred);
+            if (!hasBrandRule || hasUnscopedTypeRule) {
+              for (const rule of inferred) optionRules.push(rule);
+            }
             optionRules.push([...(input.linkType && typeSpec ? [{specId:typeSpec.id,operator:'equals' as const,value:input.linkType}] : []), {brand:true,operator:'equals' as const,value:brandName}]);
-            optionRules = optionRules.filter((row, index, all) => all.findIndex(candidate => JSON.stringify(candidate) === JSON.stringify(row)) === index);
           } else if (input.linkType && typeSpec) {
             optionRules.push([{specId:typeSpec.id,operator:'equals',value:input.linkType}]);
           }
           f.options = f.options.filter(o => norm(o.value) !== norm(value));
-          f.options.push({value,rules:optionRules});
+          f.options.push({value,rules:[...new Map(optionRules.map(row => [JSON.stringify(row), row])).values()]});
         }
         validateConfiguration(configuration,specs);
       }
@@ -223,14 +252,39 @@ async function specificationEditorNow(database: Database, organizationId: string
     }
     // Count current catalog variants, once each, regardless of inventory quantity,
     // brand relevance or mechanism type. Deleted products/variants are excluded above.
-    const usageCounts: Record<string, Record<string, number>> = input.includeUsage ? Object.fromEntries(specs.map(s => {
-      const counts = new Map<string, number>();
-      for (const product of products) {
-        const value = get(product.attributes, s);
-        if (value?.trim()) counts.set(norm(value), (counts.get(norm(value)) || 0) + 1);
+    const usageCounts: Record<string, Record<string, number>> = {};
+    if (input.includeUsage) {
+      const specsByAlias = new Map<string, string[]>();
+      const countsBySpec = new Map<string, Map<string, number>>();
+      for (const spec of specs) {
+        countsBySpec.set(spec.id, new Map());
+        for (const alias of aliases.get(spec.id) ?? []) {
+          const ids = specsByAlias.get(alias) ?? [];
+          ids.push(spec.id);
+          specsByAlias.set(alias, ids);
+        }
       }
-      return [s.id, Object.fromEntries(s.optionValues.map(value => [value, counts.get(norm(value)) || 0]))];
-    })) : {};
+      for (const product of products) {
+        const seen = new Set<string>();
+        for (const [key, rawValue] of Object.entries(product.attributes || {})) {
+          const ids = specsByAlias.get(norm(key));
+          if (!ids) continue;
+          const value = asText(rawValue);
+          const normalized = value?.trim() ? norm(value) : undefined;
+          for (const id of ids) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            if (normalized === undefined) continue;
+            const counts = countsBySpec.get(id)!;
+            counts.set(normalized, (counts.get(normalized) || 0) + 1);
+          }
+        }
+      }
+      for (const spec of specs) {
+        const counts = countsBySpec.get(spec.id)!;
+        usageCounts[spec.id] = Object.fromEntries(spec.optionValues.map(value => [value, counts.get(norm(value)) || 0]));
+      }
+    }
     await client.query('COMMIT');
     return { version: stored?.version || 0, configuration, specifications: specs, ranking: usageCounts, usageCounts, brands };
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }

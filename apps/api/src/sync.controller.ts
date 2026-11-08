@@ -79,7 +79,7 @@ export class SyncController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.write');
     const input = parseWithSchema(syncPushSchema, body);
-    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const { specificationOptionsChanged, ...result } = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       if (ctx.deviceId) {
         await new DeviceRepository(client).assertActiveDevice(ctx.organizationId, ctx.deviceId);
       }
@@ -97,14 +97,15 @@ export class SyncController {
       return {
         results,
         transactionSemantics: 'ordered-per-event',
-        staleMediaKeys: projector.takeStaleMediaKeys()
+        staleMediaKeys: projector.takeStaleMediaKeys(),
+        specificationOptionsChanged: projector.hasSpecificationOptionChanges(results)
       };
     });
     await this.cleanupRelocatedMedia(result.staleMediaKeys);
     // A desktop-originated catalog change bypasses the staff catalog HTTP
     // controller, so invalidate its public cache and notify open storefronts
     // only after the transaction has committed.
-    await this.publishCatalogChanges(ctx.organizationId, input.events, result.results);
+    await this.publishCatalogChanges(ctx.organizationId, input.events, result.results, specificationOptionsChanged);
     return result;
   }
 
@@ -132,7 +133,8 @@ export class SyncController {
       aggregateId: string;
       payload: unknown;
     }>,
-    results: ReadonlyArray<{ eventId: string; status: string }>
+    results: ReadonlyArray<{ eventId: string; status: string }>,
+    specificationOptionsChanged = false
   ): Promise<void> {
     const appliedEventIds = new Set(
       results.filter((result) => result.status === 'applied').map((result) => result.eventId)
@@ -171,6 +173,7 @@ export class SyncController {
         })
       )
     );
+    if (specificationOptionsChanged && !changedCollections.includes('spec_keys')) changedCollections.push('spec_keys');
     if (changedCollections.length > 0) {
       this.realtime.publish({
         organizationId,
@@ -286,7 +289,7 @@ export class SyncController {
     const conflictId = parseWithSchema(uuidSchema, id);
     requireScopedPermission(ctx, ['sync.conflicts']);
     const input = parseWithSchema(conflictResolveSchema, body);
-    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+    const { specificationOptionsChanged, ...result } = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const sync = new SyncRepository(client);
       const conflicts = await sync.listConflicts(ctx, { status: 'unresolved', limit: 500 });
       const conflict = conflicts.find((candidate) => candidate.id === conflictId);
@@ -294,6 +297,7 @@ export class SyncController {
 
       let appliedEvent: { eventId: string; status: string } | undefined;
       let staleMediaKeys: string[] = [];
+      let specificationOptionsChanged = false;
       if (input.strategy === 'local') {
         const eventId = randomUUID();
         const projector = new OperationalSyncProjector(
@@ -316,6 +320,7 @@ export class SyncController {
           (event) => projector.materialize(ctx, event)
         );
         staleMediaKeys = projector.takeStaleMediaKeys();
+        specificationOptionsChanged = projector.hasSpecificationOptionChanges(results);
         appliedEvent = results[0];
         if (!appliedEvent || appliedEvent.status !== 'applied') {
           throw new Error('Platform verzija se promenila. Osvežite konflikt pa pokušajte ponovo.');
@@ -341,7 +346,8 @@ export class SyncController {
         appliedEventId: appliedEvent?.eventId,
         aggregateType: conflict.aggregateType,
         aggregateId: conflict.aggregateId,
-        staleMediaKeys
+        staleMediaKeys,
+        specificationOptionsChanged
       };
     });
     await this.cleanupRelocatedMedia(result.staleMediaKeys);
@@ -351,7 +357,7 @@ export class SyncController {
         aggregateType: result.aggregateType,
         aggregateId: result.aggregateId,
         payload: {}
-      }], [{ eventId: result.appliedEventId, status: 'applied' }]);
+      }], [{ eventId: result.appliedEventId, status: 'applied' }], specificationOptionsChanged);
     }
     return result;
   }

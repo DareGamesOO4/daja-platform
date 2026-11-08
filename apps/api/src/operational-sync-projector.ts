@@ -201,6 +201,11 @@ function uuid(value: string | undefined): value is string {
  */
 export class OperationalSyncProjector {
   private readonly staleMediaKeys = new Set<string>();
+  private readonly specificationOptionChanges = new Set<string>();
+
+  hasSpecificationOptionChanges(results: readonly { eventId: string; status: string }[]): boolean {
+    return results.some(result => result.status === 'applied' && this.specificationOptionChanges.has(result.eventId));
+  }
 
   constructor(
     private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>,
@@ -2312,15 +2317,16 @@ export class OperationalSyncProjector {
         if (!/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(key) || !Array.isArray(rawValues)) continue;
         const values = [...new Set(rawValues.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter((value) => value.length > 0 && value.length <= 160))].slice(0, 100);
         if (!values.length) continue;
-        await this.client.query(
+        const updated = await this.client.query(
           `UPDATE spec_keys SET option_values = (
              SELECT COALESCE(jsonb_agg(value), '[]'::jsonb) FROM (
                SELECT DISTINCT value FROM jsonb_array_elements_text(option_values || $3::jsonb) AS values(value)
              ) merged
            ), version = version + 1, updated_at = now()
-           WHERE organization_id = $1 AND slug = $2 AND deleted_at IS NULL`,
+           WHERE organization_id = $1 AND slug = $2 AND deleted_at IS NULL AND NOT (option_values @> $3::jsonb)`,
           [ctx.organizationId, key, JSON.stringify(values)]
         );
+        if (updated.rowCount) this.specificationOptionChanges.add(event.eventId);
       }
     };
     const priceRsd = integer(input, 'salePriceMinor');

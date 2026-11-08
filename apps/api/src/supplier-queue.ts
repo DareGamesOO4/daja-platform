@@ -270,6 +270,7 @@ type SupplierStatesCacheEntry = { expiresAt: number; data?: SupplierStatesResult
 // changed state for long.
 const supplierStatesCache = new Map<string, SupplierStatesCacheEntry>();
 const supplierStatesCacheTtlMs = 5_000;
+const supplierStatesCacheMaxEntries = 32;
 
 function supplierStatesCacheKey(organizationId: string, afterRevision: number, limit: number, includeLegacy: boolean): string {
   return `${organizationId}:${afterRevision}:${limit}:${includeLegacy ? 'all' : 'numbered'}`;
@@ -287,11 +288,19 @@ export async function supplierStates(
   if (cached?.data && cached.expiresAt > Date.now()) return structuredClone(cached.data);
   if (cached?.pending) return structuredClone(await cached.pending);
 
+  supplierStatesCache.delete(key);
+  if (supplierStatesCache.size >= supplierStatesCacheMaxEntries) {
+    const oldest = supplierStatesCache.keys().next();
+    if (!oldest.done) supplierStatesCache.delete(oldest.value);
+  }
   const pending = loadSupplierStates(pool, organizationId, afterRevision, limit, includeLegacy);
-  supplierStatesCache.set(key, { expiresAt: 0, pending });
+  const entry = { expiresAt: 0, pending };
+  supplierStatesCache.set(key, entry);
   try {
     const result = await pending;
-    supplierStatesCache.set(key, { expiresAt: Date.now() + supplierStatesCacheTtlMs, data: result });
+    if (supplierStatesCache.get(key) === entry) {
+      supplierStatesCache.set(key, { expiresAt: Date.now() + supplierStatesCacheTtlMs, data: result });
+    }
     return structuredClone(result);
   } catch (error) {
     const current = supplierStatesCache.get(key);
