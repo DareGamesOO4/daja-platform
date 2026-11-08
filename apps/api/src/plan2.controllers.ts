@@ -85,6 +85,15 @@ import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuer
 import { loadGroupState, loadPublicGroupMembers, groupOverview, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 import { publicBrandPaths } from './catalog-brand-pages.js';
 
+const catalogTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/)
+  .refine(value => {
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString().slice(0, 23) === value.slice(0, 23);
+  });
+const catalogPositionSchema = z.tuple([uuidSchema, catalogTimestamp, z.enum(['0', '1']), catalogTimestamp]);
+const catalogXidSchema = z.string().regex(/^\d{1,20}$/)
+  .refine(value => value.length < 20 || value <= '18446744073709551615');
+
 const productCreateSchema = z.object({
   linkelUrl: z.string().trim().max(2048).url().nullable().optional(),
   milanoUrl: z.string().trim().max(2048).url().nullable().optional(),
@@ -676,7 +685,8 @@ export class StaffCatalogController {
   async supplierCurrentStates(@Req() request: Request, @Query() query: Record<string,string>) {
     const ctx=resolveRequestContext(request); requirePermission(ctx,'catalog.read');
     const input=z.object({afterRevision:z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),limit:z.coerce.number().int().min(1).max(500).default(100),includeLegacy:z.enum(['true','false']).default('false')}).parse(query);
-    return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit,input.includeLegacy==='true');
+    return supplierStates(this.database.pool,ctx.organizationId,input.afterRevision,input.limit,input.includeLegacy==='true',
+      this.isCatalogContributor(ctx) ? ctx.userId : undefined);
   }
 
   private async supplierManager(request: Request) {
@@ -1095,17 +1105,83 @@ export class StaffCatalogController {
     requirePermission(ctx, 'catalog.read');
     const input = parseWithSchema(z.object({
       after: uuidSchema.optional(),
+      position: z.string().max(100).optional(),
+      incremental: z.enum(['true']).optional(),
       limit: z.coerce.number().int().min(1).max(200).default(100),
       search: z.string().max(500).optional(),
       fields: z.string().max(100).optional(),
     }), query);
+    const position = input.position ? parseWithSchema(catalogPositionSchema, input.position.split(',')) : undefined;
+    // Capture a safe baseline before reading the first page. A write between
+    // these two statements can be seen twice, but cannot be missed.
+    const baseline = input.incremental && !position && !input.after
+      ? (await this.database.pool.query<{ xid: string; supplier_revision: string }>(
+        `SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS xid,
+          COALESCE((SELECT revision FROM supplier_state_revisions WHERE organization_id=$1),0)::text AS supplier_revision`,
+        [ctx.organizationId]
+      )).rows[0]
+      : undefined;
     const rows = await this.adminProductRows(ctx.organizationId, undefined,
       this.isCatalogContributor(ctx) ? ctx.userId : undefined, false,
       { after: input.after ?? null, limit: input.limit + 1,
+        ...(position ? { position } : {}),
         ...(input.search ? { search: input.search } : {}),
         ...(input.fields ? { fields: input.fields.split(',') } : {}) });
     const items = rows.slice(0, input.limit);
-    return { items, nextCursor: rows.length > input.limit ? String(items.at(-1)!.id) : null };
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: rows.length > input.limit && last ? String(input.incremental ? last.catalogPosition : last.id) : null,
+      ...(baseline ? { changeCursor: { xid: baseline.xid, id: null }, supplierRevision: Number(baseline.supplier_revision) } : {})
+    };
+  }
+
+  @Get('admin/catalog/changes')
+  async adminCatalogChanges(
+    @Req() request: Request,
+    @Query() query: Record<string, string | undefined>,
+    @Res({ passthrough: true }) response: Response
+  ) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    response.setHeader('Cache-Control', 'private, no-store');
+    const input = parseWithSchema(z.object({
+      xid: catalogXidSchema,
+      id: uuidSchema.optional(),
+      search: z.string().max(500).optional(),
+      fields: z.string().max(100).optional(),
+    }), query);
+    const contributorId = this.isCatalogContributor(ctx) ? ctx.userId : undefined;
+    const limit = 60;
+    const { rows } = await this.database.pool.query<{ fence: string; xid: string | null; id: string | null }>(
+      `WITH fence AS MATERIALIZED (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS xid)
+       SELECT fence.xid::text AS fence, changed.change_xid::text AS xid, changed.product_id AS id
+       FROM fence LEFT JOIN LATERAL (
+         SELECT change_xid, product_id FROM admin_catalog_changes
+         WHERE organization_id=$1 AND change_xid >= $2::xid8 AND change_xid < fence.xid
+           AND ($3::uuid IS NULL OR (change_xid, product_id) > ($2::xid8, $3::uuid))
+           AND ($4::uuid IS NULL OR owner_id=$4 OR previous_owner_id=$4)
+         ORDER BY change_xid, product_id LIMIT $5
+       ) changed ON true
+       ORDER BY changed.change_xid, changed.product_id`,
+      [ctx.organizationId, input.xid, input.id ?? null, contributorId ?? null, limit + 1]
+    );
+    const page = rows.slice(0, limit);
+    const productIds = [...new Set(page.flatMap(row => row.id ? [row.id] : []))];
+    const last = page.at(-1);
+    const hasMore = rows.length > limit;
+    const nextCursor = hasMore && last?.xid && last.id
+      ? { xid: last.xid, id: last.id }
+      : { xid: rows[0]?.fence ?? input.xid, id: null };
+    const items = productIds.length
+      ? await this.adminProductRows(ctx.organizationId, undefined, contributorId, false, {
+          after: null, limit: productIds.length, ids: productIds,
+          ...(input.search ? { search: input.search } : {}),
+          ...(input.fields ? { fields: input.fields.split(',') } : {})
+        })
+      : [];
+    const matching = new Set(items.map(item => String(item.id)));
+    return { items, removedIds: productIds.filter(id => !matching.has(id)), nextCursor, hasMore };
   }
 
   @Get('admin/catalog/page')
@@ -2744,7 +2820,7 @@ export class StaffCatalogController {
   }
 
   private async adminProductRows(organizationId: string, productId?: string, contributorId?: string, includeDeleted = false,
-    page?: { after: string | null; limit: number; search?: string; fields?: string[] }) {
+    page?: { after: string | null; limit: number; search?: string; fields?: string[]; ids?: string[]; position?: z.infer<typeof catalogPositionSchema> }) {
     // Page in the same order the product table displays. Resolve the cursor's
     // timestamps in PostgreSQL so sub-millisecond precision is preserved.
     const sortColumns = contributorId
@@ -2761,6 +2837,9 @@ export class StaffCatalogController {
     const searchPredicate = searchFields.map(field =>
       `strpos(lower(COALESCE(${searchColumns[field]}, '')), lower($7::text)) > 0`).join(' OR ') || 'FALSE';
     const cursorColumns = sortColumns.map(column => column.replace(/\bp\./g, 'page_cursor.'));
+    const positionPredicate = page?.position
+      ? `AND (${sortColumns.join(', ')}) < (${contributorId ? '$11::integer, $12::timestamptz, ' : ''}$10::timestamptz, $9::uuid)`
+      : '';
     const rows = (
       await this.database.pool.query(
         `WITH selected_products AS MATERIALIZED (
@@ -2780,9 +2859,14 @@ export class StaffCatalogController {
          AND ($4::boolean OR p.deleted_at IS NULL)
          AND ($5::uuid IS NULL OR (${sortColumns.join(', ')}) < (${cursorColumns.join(', ')}))
          AND ($7::text IS NULL OR (${searchPredicate}))
+         AND ($8::uuid[] IS NULL OR p.id = ANY($8))
+         ${positionPredicate}
          ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6
        )
        SELECT p.id, p.name, p.slug, p.description, p.active, p.published, p.version::float8 AS version, p.department_id AS "departmentId",
+              concat_ws(',', p.id, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                CASE WHEN p.quality_review_status = 'changes_requested' THEN 1 ELSE 0 END,
+                to_char(COALESCE(p.quality_reviewed_at, p.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) AS "catalogPosition",
               p.brand_id AS "brandId", p.primary_category_id AS "primaryCategoryId", p.item_condition AS "itemCondition", p.seo, p.features,
               p.model_3d_url AS "model3DUrl", p.marketing_flags AS "marketingFlags", p.created_by_user_id AS "createdByUserId",
               supplier.url AS "supplierUrl", supplier.external_reference AS "supplierReference",
@@ -2869,7 +2953,8 @@ export class StaffCatalogController {
        ) media ON true
 
        ORDER BY ${sortColumns.map(column => `${column} DESC`).join(', ')} LIMIT $6`,
-        [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null, page?.search || null]
+        [organizationId, productId ?? null, contributorId ?? null, includeDeleted, page?.after ?? null, page?.limit ?? null, page?.search || null,
+          page?.ids ?? null, ...(page?.position ? [page.position[0], page.position[1], ...(contributorId ? [page.position[2], page.position[3]] : [])] : [])]
       )
     ).rows;
     const states=await supplierStatesForProducts(this.database.pool,organizationId,rows.map(row=>String(row.id)));

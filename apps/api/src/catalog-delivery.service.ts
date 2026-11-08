@@ -36,6 +36,7 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
   private stopped = false;
   private readonly cache: Redis;
   private connecting: Promise<void> | undefined;
+  private nextCatalogCompactionAt = Date.now() + 60 * 60_000;
 
   constructor(
     @Inject(DATABASE) private readonly database: Database,
@@ -121,6 +122,33 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
   private async tick() {
     try {
       if (apiUnderLoad()) return;
+      if (Date.now() >= this.nextCatalogCompactionAt) {
+        this.nextCatalogCompactionAt = Date.now() + 60 * 60_000;
+        try {
+          // Keep the newest committed notification for each product/owner
+          // scope. Older entries are replaceable because readers fetch the
+          // current product, never the historical contents of an entry.
+          await this.database.pool.query(
+            `WITH fence AS MATERIALIZED (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS xid),
+             obsolete AS (
+               SELECT earlier.organization_id, earlier.change_xid, earlier.product_id
+               FROM admin_catalog_changes earlier CROSS JOIN fence
+               WHERE EXISTS (
+                 SELECT 1 FROM admin_catalog_changes newer
+                 WHERE newer.organization_id=earlier.organization_id AND newer.product_id=earlier.product_id
+                   AND newer.change_xid>earlier.change_xid AND newer.change_xid<fence.xid
+                   AND newer.owner_id IS NOT DISTINCT FROM earlier.owner_id
+                   AND newer.previous_owner_id IS NOT DISTINCT FROM earlier.previous_owner_id
+               )
+               LIMIT 2000
+             )
+             DELETE FROM admin_catalog_changes c USING obsolete o
+             WHERE (c.organization_id, c.change_xid, c.product_id)=(o.organization_id, o.change_xid, o.product_id)`
+          );
+        } catch (error) {
+          this.logger.warn({ err: error }, 'Admin catalog change compaction deferred');
+        }
+      }
       const delivered = await new TransactionManager(this.database.pool, this.logger).run(
         async (client) => {
           await client.query(`SET LOCAL statement_timeout = '10s'`);

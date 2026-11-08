@@ -236,7 +236,8 @@ async function loadSupplierStates(
   organizationId: string,
   afterRevision: number,
   limit: number,
-  includeLegacy = false
+  includeLegacy = false,
+  contributorId?: string
 ) {
   // Read counter first: a concurrent newer update will be delivered on this or the next page.
   const counter = await pool.query<{ revision: string }>(
@@ -247,8 +248,12 @@ async function loadSupplierStates(
   const result = await pool.query(
     STATE_SELECT +
       ` WHERE l.organization_id=$1 AND l.provider_code=ANY($2::text[]) AND l.state_revision>$3
+       AND ($5::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM products WHERE id=l.product_id AND organization_id=l.organization_id
+           AND created_by_user_id=$5 AND deleted_at IS NULL
+       ))
     ORDER BY l.state_revision LIMIT $4`,
-    [organizationId, includeLegacy ? ALL_PROVIDERS : NUMBERED_PROVIDERS, afterRevision, limit + 1]
+    [organizationId, includeLegacy ? ALL_PROVIDERS : NUMBERED_PROVIDERS, afterRevision, limit + 1, contributorId ?? null]
   );
   const items = result.rows.slice(0, limit);
   const hasMore = result.rows.length > limit;
@@ -272,18 +277,15 @@ const supplierStatesCache = new Map<string, SupplierStatesCacheEntry>();
 const supplierStatesCacheTtlMs = 5_000;
 const supplierStatesCacheMaxEntries = 32;
 
-function supplierStatesCacheKey(organizationId: string, afterRevision: number, limit: number, includeLegacy: boolean): string {
-  return `${organizationId}:${afterRevision}:${limit}:${includeLegacy ? 'all' : 'numbered'}`;
-}
-
 export async function supplierStates(
   pool: pg.Pool,
   organizationId: string,
   afterRevision: number,
   limit: number,
-  includeLegacy = false
+  includeLegacy = false,
+  contributorId?: string
 ): Promise<SupplierStatesResult> {
-  const key = supplierStatesCacheKey(organizationId, afterRevision, limit, includeLegacy);
+  const key = `${organizationId}:${contributorId ?? '*'}:${afterRevision}:${limit}:${includeLegacy ? 'all' : 'numbered'}`;
   const cached = supplierStatesCache.get(key);
   if (cached?.data && cached.expiresAt > Date.now()) return structuredClone(cached.data);
   if (cached?.pending) return structuredClone(await cached.pending);
@@ -293,7 +295,7 @@ export async function supplierStates(
     const oldest = supplierStatesCache.keys().next();
     if (!oldest.done) supplierStatesCache.delete(oldest.value);
   }
-  const pending = loadSupplierStates(pool, organizationId, afterRevision, limit, includeLegacy);
+  const pending = loadSupplierStates(pool, organizationId, afterRevision, limit, includeLegacy, contributorId);
   const entry = { expiresAt: 0, pending };
   supplierStatesCache.set(key, entry);
   try {
