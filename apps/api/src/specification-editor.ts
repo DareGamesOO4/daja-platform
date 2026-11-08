@@ -14,6 +14,29 @@ export const specificationEditorRequestSchema = z.object({
 });
 type Configuration = z.infer<typeof specificationConfigurationSchema>;
 type Specification = { id: string; name: string; slug: string; unit: string | null; optionValues: string[] };
+type EditorResult = {
+  version: number;
+  configuration: Configuration;
+  specifications: Specification[];
+  ranking: Record<string, Record<string, number>>;
+  usageCounts: Record<string, Record<string, number>>;
+  brands: { id: string; name: string }[];
+};
+type EditorCacheEntry = { expiresAt: number; data?: EditorResult; pending?: Promise<EditorResult> };
+
+// The editor response is shared by every product form in the same department.
+// Its ranking needs a scan of the department's variants, so coalesce concurrent
+// reads and retain it briefly. Mutations below invalidate the entry immediately.
+const editorReadCache = new Map<string, EditorCacheEntry>();
+const editorReadCacheTtlMs = 45_000;
+
+function editorCacheKey(organizationId: string, departmentId: string): string {
+  return `${organizationId}:${departmentId}`;
+}
+
+function copyEditorResult(result: EditorResult): EditorResult {
+  return structuredClone(result);
+}
 const norm = (v: string) => v.trim().toLocaleLowerCase('sr-RS').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[-\s]+/g, '_');
 const groups = [
   ['general', 'Opšti podaci', ['uzrasna_grupa', 'serija', 'garancija', 'proizvo_ac']],
@@ -57,7 +80,35 @@ function validateConfiguration(config: Configuration, specs: Specification[]) {
   for (const id of graph.keys()) visit(id);
 }
 
-export async function specificationEditor(database: Database, organizationId: string, input: z.infer<typeof specificationEditorRequestSchema>) {
+export async function specificationEditor(database: Database, organizationId: string, input: z.infer<typeof specificationEditorRequestSchema>): Promise<EditorResult> {
+  const key = editorCacheKey(organizationId, input.departmentId);
+  if (input.action !== 'get') {
+    const result = await specificationEditorNow(database, organizationId, input);
+    editorReadCache.delete(key);
+    return result;
+  }
+
+  const cached = editorReadCache.get(key);
+  if (cached?.data && cached.expiresAt > Date.now()) return copyEditorResult(cached.data);
+  if (cached?.pending) return copyEditorResult(await cached.pending);
+
+  const pending = specificationEditorNow(database, organizationId, input);
+  editorReadCache.set(key, { expiresAt: 0, pending });
+  try {
+    const result = await pending;
+    // A save may have invalidated this read while its database query was in
+    // flight. Do not put that older snapshot back into the cache.
+    if (editorReadCache.get(key)?.pending === pending)
+      editorReadCache.set(key, { expiresAt: Date.now() + editorReadCacheTtlMs, data: result });
+    return copyEditorResult(result);
+  } catch (error) {
+    const current = editorReadCache.get(key);
+    if (current?.pending === pending) editorReadCache.delete(key);
+    throw error;
+  }
+}
+
+async function specificationEditorNow(database: Database, organizationId: string, input: z.infer<typeof specificationEditorRequestSchema>): Promise<EditorResult> {
   const client = await database.pool.connect();
   try {
     await client.query('BEGIN');
@@ -159,7 +210,7 @@ export async function specificationEditor(database: Database, organizationId: st
     }
     // Count current catalog variants, once each, regardless of inventory quantity,
     // brand relevance or mechanism type. Deleted products/variants are excluded above.
-    const usageCounts = Object.fromEntries(specs.map(s => {
+    const usageCounts: Record<string, Record<string, number>> = Object.fromEntries(specs.map(s => {
       const counts = new Map<string, number>();
       for (const product of products) {
         const value = get(product.attributes, s);

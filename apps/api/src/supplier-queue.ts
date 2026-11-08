@@ -231,7 +231,7 @@ export const STATE_SELECT = `SELECT l.id, l.product_id AS "productId", l.provide
     WHEN l.manual_requested_at IS NOT NULL THEN l.manual_requested_at ELSE LEAST(CASE WHEN l.next_regular_at<l.first_problem_at+interval '24 hours' THEN NULL ELSE COALESCE(l.next_regular_at,l.next_check_at) END,l.confirmation_due_at) END AS "nextCheckAt"
   FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code`;
 
-export async function supplierStates(
+async function loadSupplierStates(
   pool: pg.Pool,
   organizationId: string,
   afterRevision: number,
@@ -259,6 +259,45 @@ export async function supplierStates(
       ? Number(items.at(-1)?.revision ?? afterRevision)
       : Math.max(highWater, Number(items.at(-1)?.revision ?? afterRevision), afterRevision)
   };
+}
+
+type SupplierStatesResult = Awaited<ReturnType<typeof loadSupplierStates>>;
+type SupplierStatesCacheEntry = { expiresAt: number; data?: SupplierStatesResult; pending?: Promise<SupplierStatesResult> };
+
+// Multiple open staff screens and connected devices often ask for the same
+// revision at once. The data is a short-lived status feed, so sharing it for a
+// few seconds avoids repeating the wide supplier state join without hiding a
+// changed state for long.
+const supplierStatesCache = new Map<string, SupplierStatesCacheEntry>();
+const supplierStatesCacheTtlMs = 5_000;
+
+function supplierStatesCacheKey(organizationId: string, afterRevision: number, limit: number, includeLegacy: boolean): string {
+  return `${organizationId}:${afterRevision}:${limit}:${includeLegacy ? 'all' : 'numbered'}`;
+}
+
+export async function supplierStates(
+  pool: pg.Pool,
+  organizationId: string,
+  afterRevision: number,
+  limit: number,
+  includeLegacy = false
+): Promise<SupplierStatesResult> {
+  const key = supplierStatesCacheKey(organizationId, afterRevision, limit, includeLegacy);
+  const cached = supplierStatesCache.get(key);
+  if (cached?.data && cached.expiresAt > Date.now()) return structuredClone(cached.data);
+  if (cached?.pending) return structuredClone(await cached.pending);
+
+  const pending = loadSupplierStates(pool, organizationId, afterRevision, limit, includeLegacy);
+  supplierStatesCache.set(key, { expiresAt: 0, pending });
+  try {
+    const result = await pending;
+    supplierStatesCache.set(key, { expiresAt: Date.now() + supplierStatesCacheTtlMs, data: result });
+    return structuredClone(result);
+  } catch (error) {
+    const current = supplierStatesCache.get(key);
+    if (current?.pending === pending) supplierStatesCache.delete(key);
+    throw error;
+  }
 }
 
 export async function supplierStatesForProducts(
