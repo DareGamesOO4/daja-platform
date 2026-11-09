@@ -223,7 +223,11 @@ internal sealed class Dashboard : Form
 
     private void SetPause(bool paused = true)
     {
-        var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-pause.json");
+        var userConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-user.json");
+        var path = File.Exists(userConfig)
+            ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-pause.json")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                @"DajaImageWorker\worker-pause.json");
         DateTimeOffset? until = null;
         if (paused && pauseDuration.SelectedIndex >= 0 && pauseDuration.SelectedIndex < 6)
         {

@@ -13,7 +13,8 @@ $installDir = Join-Path $env:ProgramData 'DajaImageWorker'
 $node = (Get-Command node.exe -CommandType Application).Source
 $program = Join-Path $PSScriptRoot 'worker.mjs'
 $dependencies = Join-Path $PSScriptRoot 'node_modules'
-if (!(Test-Path -LiteralPath $program -PathType Leaf) -or !(Test-Path -LiteralPath $dependencies -PathType Container)) {
+$studio = Join-Path $PSScriptRoot 'DAJA Studio.exe'
+if (!(Test-Path -LiteralPath $program -PathType Leaf) -or !(Test-Path -LiteralPath $dependencies -PathType Container) -or !(Test-Path -LiteralPath $studio -PathType Leaf)) {
     throw 'Pokreni instalaciju iz raspakovanog DAJA paketa.'
 }
 if ((Test-Path -LiteralPath $installDir) -or (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
@@ -65,6 +66,20 @@ foreach ($entry in @(
 }
 Set-Acl -LiteralPath $statusDir -AclObject $statusAcl
 $statusPath = Join-Path $statusDir 'worker-status.json'
+$pausePath = Join-Path $installDir 'worker-pause.json'
+Set-Content -LiteralPath $pausePath -Value '{"paused":false,"until":null}' -Encoding ASCII
+$pauseAcl = Get-Acl -LiteralPath $pausePath
+foreach ($entry in @(
+    @{ Sid = 'S-1-5-19'; Rights = 'Modify' },
+    @{ Sid = 'S-1-5-32-545'; Rights = 'Modify' }
+)) {
+    $identity = [System.Security.Principal.SecurityIdentifier]::new($entry.Sid)
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity, $entry.Rights, 'Allow'
+    )
+    $pauseAcl.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $pausePath -AclObject $pauseAcl
 
 $installedProgram = Join-Path $installDir 'worker.mjs'
 $arguments = '"{0}" run "{1}" "{2}"' -f $installedProgram, $configPath, $statusPath
@@ -84,4 +99,18 @@ $service = $serviceSid.Translate([System.Security.Principal.NTAccount]).Value
 $principal = New-ScheduledTaskPrincipal -UserId $service -LogonType ServiceAccount
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
 Start-ScheduledTask -TaskName $taskName
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'DAJA Studio.lnk'
+$startupFolder = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+$startupShortcut = Join-Path $startupFolder 'DAJA Studio.lnk'
+$null = New-Item -ItemType Directory -Path $startupFolder -Force
+$shell = New-Object -ComObject WScript.Shell
+foreach ($shortcutPath in @($desktopShortcut, $startupShortcut)) {
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $studio
+    $shortcut.WorkingDirectory = $PSScriptRoot
+    if ($shortcutPath -eq $startupShortcut) { $shortcut.Arguments = '--background' }
+    $shortcut.Save()
+}
+Start-Process -FilePath $studio -WorkingDirectory $PSScriptRoot
 Write-Host 'DAJA worker je pokrenut i Windows će ga pokretati pri paljenju.'
+Write-Host 'DAJA Studio je otvoren; prečica je na radnoj površini, a ikonica se pokreće pri prijavi.'

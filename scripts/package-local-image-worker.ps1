@@ -17,10 +17,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Pakovanje workera nije uspelo.' }
 
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    $ui = Join-Path $stage 'DAJA Worker.exe'
+    $ui = Join-Path $stage 'DAJA Studio.exe'
     $uiSource = Join-Path $PSScriptRoot 'local-image-worker-ui.cs'
     & $compiler /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/out:$ui" $uiSource
     if ($LASTEXITCODE -ne 0) { throw 'Pakovanje Windows prozora nije uspelo.' }
+    Copy-Item -LiteralPath $ui -Destination (Join-Path $stage 'DAJA Worker.exe')
 
     foreach ($dependency in @('sharp', '@img/colour', '@img/sharp-win32-x64', 'detect-libc', 'semver')) {
         $source = Join-Path $repo "node_modules/$dependency"
