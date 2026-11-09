@@ -36,6 +36,7 @@ type QueueLink = {
   confirmation_due_at: Date | null;
   checks_enabled: boolean;
   manual_requested_at: Date | null;
+  bulk_requested_at: Date | null;
   next_check_at: Date;
   last_checked_at: Date | null;
   missing_count: number;
@@ -121,6 +122,7 @@ async function expireSupplierLeases(client: QueryClient): Promise<void> {
     if (lease.link_id) {
       await client.query(
         `UPDATE supplier_product_links SET initial_requested_at=CASE WHEN $3='initial' THEN now() ELSE initial_requested_at END, manual_requested_at=CASE WHEN $3='manual' THEN now() ELSE manual_requested_at END,
+      bulk_requested_at=CASE WHEN $3='bulk' THEN now() ELSE bulk_requested_at END,
       updated_at=now() WHERE id=$1 AND generation=$2 AND NOT removed AND checks_enabled`,
         [lease.link_id, lease.generation, lease.kind]
       );
@@ -218,18 +220,18 @@ export const STATE_SELECT = `SELECT l.id, l.product_id AS "productId", l.provide
     WHEN p.manual_pause_mode IS NOT NULL AND (p.manual_pause_until IS NULL OR p.manual_pause_until>now())
       AND (p.manual_pause_mode='all' OR l.initial_requested_at IS NULL) THEN 'paused'
     WHEN p.paused_until IS NOT NULL AND (p.interval_seconds IS NOT NULL OR p.paused_until>now()) AND l.initial_requested_at IS NULL THEN 'paused'
-    WHEN l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL THEN 'checking'
+    WHEN l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL OR l.bulk_requested_at IS NOT NULL THEN 'checking'
     WHEN l.negative_count>0 OR (l.missing_count>0 AND l.check_status<>'missing') THEN 'waiting_confirmation' ELSE l.check_status END AS status,
   l.stock_status AS "stockStatus", l.price_amount AS "priceAmount", l.price_currency AS "priceCurrency",
   l.last_checked_at AS "lastCheckedAt", l.last_good_result AS "lastGoodResult", l.last_error AS "lastError",
   l.disabled_reason AS "disabledReason", l.disabled_at AS "disabledAt", l.first_problem_at AS "firstProblemAt",
   l.first_problem_reason AS "firstProblemReason", l.confirmation_due_at AS "confirmationDueAt",
   COALESCE(l.next_regular_at, CASE WHEN l.provider_code='linkel' THEN l.next_check_at END) AS "nextRegularAt", COALESCE(p.manual_pause_until,p.paused_until) AS "pausedUntil",
-  COALESCE(p.manual_pause_reason,p.pause_reason) AS "pauseReason", l.manual_requested_at AS "manualRequestedAt",
+  COALESCE(p.manual_pause_reason,p.pause_reason) AS "pauseReason", LEAST(l.manual_requested_at,l.bulk_requested_at) AS "manualRequestedAt",
   p.manual_pause_mode AS "manualPauseMode",p.manual_pause_until AS "manualPauseUntil",
   CASE WHEN p.manual_pause_mode IS NOT NULL AND (p.manual_pause_until IS NULL OR p.manual_pause_until>now()) THEN true ELSE false END AS "manualPaused",
   CASE WHEN NOT l.checks_enabled OR l.removed THEN NULL WHEN l.initial_requested_at IS NOT NULL THEN l.initial_requested_at
-    WHEN l.manual_requested_at IS NOT NULL THEN l.manual_requested_at ELSE LEAST(CASE WHEN l.next_regular_at<l.first_problem_at+interval '24 hours' THEN NULL ELSE COALESCE(l.next_regular_at,l.next_check_at) END,l.confirmation_due_at) END AS "nextCheckAt"
+    WHEN l.manual_requested_at IS NOT NULL OR l.bulk_requested_at IS NOT NULL THEN LEAST(l.manual_requested_at,l.bulk_requested_at) ELSE LEAST(CASE WHEN l.next_regular_at<l.first_problem_at+interval '24 hours' THEN NULL ELSE COALESCE(l.next_regular_at,l.next_check_at) END,l.confirmation_due_at) END AS "nextCheckAt"
   FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code`;
 
 async function loadSupplierStates(
@@ -341,7 +343,7 @@ export async function supplierProviderSummary(pool: pg.Pool, organizationId: str
     (SELECT count(*)::integer FROM supplier_check_leases WHERE expires_at>now()) AS "systemActive",
     (SELECT count(*)::integer FROM supplier_check_leases WHERE provider_code=p.provider_code AND expires_at>now()) AS "running",
     (SELECT max(l.last_checked_at) FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed) AS "lastCheckedAt",
-    (SELECT min(LEAST(l.initial_requested_at,l.manual_requested_at,CASE WHEN l.next_regular_at<l.first_problem_at+interval '24 hours' THEN NULL ELSE COALESCE(l.next_regular_at,l.next_check_at) END,l.confirmation_due_at)) FROM supplier_product_links l JOIN products product ON product.id=l.product_id
+    (SELECT min(LEAST(l.initial_requested_at,l.manual_requested_at,l.bulk_requested_at,CASE WHEN l.next_regular_at<l.first_problem_at+interval '24 hours' THEN NULL ELSE COALESCE(l.next_regular_at,l.next_check_at) END,l.confirmation_due_at)) FROM supplier_product_links l JOIN products product ON product.id=l.product_id
       WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND l.checks_enabled AND NOT l.removed AND product.deleted_at IS NULL) AS "nextCheckAt",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND l.check_status='unverified') AS "unverified",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND (l.last_error IS NOT NULL OR l.negative_count>0 OR l.missing_count>0)) AS "problems",
@@ -808,16 +810,17 @@ async function finishLegacy(
 export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
   return supplierTransaction(pool, async client => {
     await expireSupplierLeases(client);
-    const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean; manual_turn: boolean }>(
-      `SELECT (probe_requested_at IS NOT NULL OR
-          (COALESCE(paused_until<=now(), false) AND COALESCE(manual_pause_mode,'')<>'all')) AS probe,
+    const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean; manual_turn: boolean; bulk: boolean }>(
+      `SELECT (next_request_at<=now() AND (probe_requested_at IS NOT NULL OR
+          (COALESCE(paused_until<=now(), false) AND COALESCE(manual_pause_mode,'')<>'all'))) AS probe,
         (last_manual_claim_at IS NULL OR last_manual_claim_at<=now()-interval '780 seconds') AS manual_turn,
-        (manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
-        (COALESCE(manual_pause_mode,'')<>'all' AND paused_until IS NULL) AS initial
-       FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_request_at<=now()
+        (next_request_at<=now() AND manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
+        (next_request_at<=now() AND COALESCE(manual_pause_mode,'')<>'all' AND paused_until IS NULL) AS initial,
+        (manual_pause_mode IS NULL AND paused_until IS NULL AND probe_requested_at IS NULL) AS bulk
+       FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_bulk_request_at<=now()
        AND NOT EXISTS (SELECT 1 FROM supplier_check_leases WHERE provider_code=p.provider_code)`
     )).rows[0];
-    if (!provider || (!provider.probe && !provider.initial)) return null;
+    if (!provider || (!provider.probe && !provider.initial && !provider.bulk)) return null;
     if (provider.probe) {
       const lease = (await client.query<Lease>(
         "INSERT INTO supplier_check_leases(provider_code,kind) VALUES ('linkel','health') RETURNING *"
@@ -825,7 +828,7 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
       await reserveLinkelSlot(client);
       return { token: lease.token, kind: 'health' as const, url: 'https://www.linkel.rs/sr/' };
     }
-    const link = (await client.query<QueueLink & { confirmation_due: boolean }>(
+    const regular = (await client.query<QueueLink & { confirmation_due: boolean }>(
       `SELECT l.*,COALESCE(l.confirmation_due_at<=now(),false) AS confirmation_due
        FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
@@ -839,31 +842,41 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
         LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
       [organizationId, provider.automatic, provider.initial, provider.manual_turn]
     )).rows[0];
+    // Use spare time for bulk work, while due regular and confirmation jobs keep their slots.
+    const bulk = !regular && provider.bulk ? (await client.query<QueueLink>(
+      `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
+       WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
+         AND l.url IS NOT NULL AND p.deleted_at IS NULL AND l.bulk_requested_at IS NOT NULL
+         AND l.next_check_at>now() AND (l.confirmation_due_at IS NULL OR l.confirmation_due_at>now())
+       ORDER BY l.bulk_requested_at,l.id LIMIT 1`, [organizationId]
+    )).rows[0] : undefined;
+    const link = regular ?? bulk;
     if (!link) return null;
-    const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at ? 'manual'
-      : link.confirmation_due ? 'confirmation' : 'regular';
+    const kind = link.bulk_requested_at ? 'bulk' : link.initial_requested_at ? 'initial'
+      : link.manual_requested_at ? 'manual' : regular?.confirmation_due ? 'confirmation' : 'regular';
     const lease = (await client.query<Lease>(
       `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind)
        VALUES ('linkel',$1,$2,$3) RETURNING *`, [link.id, link.generation, kind]
     )).rows[0]!;
     await client.query(
-      `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
+      `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL,bulk_requested_at=NULL WHERE id=$1`, [link.id]
     );
-    await reserveLinkelSlot(client, link.manual_requested_at !== null);
+    await reserveLinkelSlot(client, link.manual_requested_at !== null, Boolean(bulk));
     return { token: lease.token, kind: 'product' as const, url: link.url };
   });
 }
 
-async function reserveLinkelSlot(client: QueryClient, manual = false) {
+async function reserveLinkelSlot(client: QueryClient, manual = false, bulk = false) {
   await client.query(`UPDATE supplier_provider_checks
-    SET next_request_at=now()+interval '390 seconds',
+    SET next_bulk_request_at=now()+interval '3 seconds',
+      next_request_at=CASE WHEN $2 THEN next_request_at ELSE now()+interval '390 seconds' END,
       last_manual_claim_at=CASE WHEN $1 THEN now() ELSE last_manual_claim_at END
-    WHERE provider_code='linkel'`, [manual]);
+    WHERE provider_code='linkel'`, [manual, bulk]);
 }
 
 export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: string) {
   const row = (await pool.query<{
-    state: 'paused' | 'protection' | 'running' | 'waiting' | 'empty';
+    state: 'paused' | 'protection' | 'running' | 'bulk' | 'waiting' | 'empty';
     next_at: Date | null;
     wait_ms: number;
   }>(`SELECT CASE
@@ -871,6 +884,7 @@ export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: stri
       WHEN p.probe_requested_at IS NOT NULL THEN 'protection'
       WHEN p.manual_pause_mode='all' THEN 'paused'
       WHEN p.paused_until IS NOT NULL THEN 'protection'
+      WHEN pending.bulk_due_at IS NOT NULL AND p.manual_pause_mode IS NULL THEN 'bulk'
       WHEN pending.due_at IS NOT NULL THEN 'waiting'
       WHEN p.manual_pause_mode IS NOT NULL THEN 'paused'
       ELSE 'empty' END AS state,
@@ -879,9 +893,13 @@ export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: stri
       WHEN p.manual_pause_mode='all' THEN p.manual_pause_until
       WHEN p.paused_until IS NOT NULL
         THEN GREATEST(p.next_request_at,CASE WHEN p.probe_requested_at IS NULL THEN p.paused_until END)
-      WHEN lease.expires_at IS NULL AND pending.due_at IS NOT NULL THEN GREATEST(p.next_request_at,pending.due_at)
+      WHEN pending.bulk_due_at IS NOT NULL AND p.manual_pause_mode IS NULL
+        THEN LEAST(GREATEST(p.next_bulk_request_at,pending.bulk_due_at),GREATEST(p.next_request_at,pending.due_at))
+      WHEN pending.due_at IS NOT NULL THEN GREATEST(p.next_request_at,pending.due_at)
       WHEN p.manual_pause_mode IS NOT NULL THEN p.manual_pause_until END AS next_at,
-    GREATEST(10000, LEAST(30000, ceil(extract(epoch FROM p.next_request_at-now())*1000)))::integer AS wait_ms
+    CASE WHEN p.manual_pause_mode IS NULL AND p.paused_until IS NULL
+        AND p.probe_requested_at IS NULL AND pending.bulk_due_at IS NOT NULL THEN 3000
+      ELSE GREATEST(10000, LEAST(30000, ceil(extract(epoch FROM p.next_request_at-now())*1000)))::integer END AS wait_ms
     FROM supplier_provider_checks p
     LEFT JOIN LATERAL (
       SELECT max(expires_at) AS expires_at FROM supplier_check_leases
@@ -889,7 +907,9 @@ export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: stri
     ) lease ON true
     LEFT JOIN LATERAL (
       SELECT min(LEAST(l.initial_requested_at, CASE WHEN p.manual_pause_mode IS NULL
-        THEN LEAST(l.manual_requested_at,l.confirmation_due_at,l.next_check_at) END)) AS due_at
+        THEN LEAST(l.manual_requested_at,l.confirmation_due_at,l.next_check_at) END)) AS due_at,
+        min(l.bulk_requested_at) FILTER (WHERE l.next_check_at>now()
+          AND (l.confirmation_due_at IS NULL OR l.confirmation_due_at>now())) AS bulk_due_at
       FROM supplier_product_links l JOIN products product ON product.id=l.product_id
         AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
       WHERE l.organization_id=$1 AND l.provider_code=p.provider_code AND l.checks_enabled AND NOT l.removed AND l.url IS NOT NULL

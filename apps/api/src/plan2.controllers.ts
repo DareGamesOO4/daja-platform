@@ -729,7 +729,7 @@ export class StaffCatalogController {
   @Post('supplier-links/actions')
   async supplierActions(@Req() request:Request,@Body() body:unknown) {
     const ctx=await this.supplierManager(request);
-    const input=z.object({ids:z.array(z.string().uuid()).min(1).max(50),action:z.enum(['check','disable','reactivate']),reason:z.string().trim().max(500).optional()}).parse(body);
+    const input=z.object({ids:z.array(z.string().uuid()).min(1).max(50),action:z.enum(['check','disable','reactivate']),bulk:z.boolean().optional(),reason:z.string().trim().max(500).optional()}).parse(body);
     return supplierLinkActions(this.database.pool,ctx.organizationId,input);
   }
 
@@ -2884,11 +2884,11 @@ export class StaffCatalogController {
               linkel.url AS "linkelUrl", linkel.stock_status AS "linkelStockStatus", linkel.price_amount AS "linkelPriceAmount", linkel.price_currency AS "linkelPriceCurrency",
               CASE WHEN linkel_provider.paused_until > now() OR linkel.last_error IS NOT NULL THEN 'deferred'
                    WHEN linkel.negative_count > 0 THEN 'waiting_confirmation'
-                   WHEN linkel.initial_requested_at IS NOT NULL OR linkel.manual_requested_at IS NOT NULL
+                   WHEN linkel.initial_requested_at IS NOT NULL OR linkel.manual_requested_at IS NOT NULL OR linkel.bulk_requested_at IS NOT NULL
                      OR EXISTS (SELECT 1 FROM supplier_check_leases lease WHERE lease.link_id=linkel.id AND lease.expires_at>now())
                      OR (linkel.missing_count > 0 AND linkel.check_status <> 'missing') THEN 'checking'
                    ELSE linkel.check_status END AS "linkelStatus",
-              linkel.last_checked_at AS "linkelLastCheckedAt", GREATEST(LEAST(linkel.next_check_at, linkel.confirmation_due_at, linkel.manual_requested_at, linkel.initial_requested_at), linkel_provider.next_request_at, linkel_provider.paused_until) AS "linkelNextCheckAt", linkel.missing_count AS "linkelMissingCount",
+              linkel.last_checked_at AS "linkelLastCheckedAt", GREATEST(LEAST(linkel.next_check_at, linkel.confirmation_due_at, linkel.manual_requested_at, linkel.bulk_requested_at, linkel.initial_requested_at), linkel_provider.next_request_at, linkel_provider.paused_until) AS "linkelNextCheckAt", linkel.missing_count AS "linkelMissingCount",
               milano.url AS "milanoUrl", milano.stock_status AS "milanoStockStatus", milano.price_amount AS "milanoPriceAmount", milano.price_currency AS "milanoPriceCurrency",
               CASE WHEN milano_provider.paused_until > now() OR milano.last_error IS NOT NULL THEN 'deferred' WHEN milano.missing_count > 0 AND milano.check_status <> 'missing' THEN 'checking' ELSE milano.check_status END AS "milanoStatus", milano.last_checked_at AS "milanoLastCheckedAt", GREATEST(milano.next_check_at, milano_provider.next_request_at, milano_provider.paused_until) AS "milanoNextCheckAt",
               timezone.url AS "timezoneUrl", timezone.stock_status AS "timezoneStockStatus", timezone.price_amount AS "timezonePriceAmount", timezone.price_currency AS "timezonePriceCurrency",

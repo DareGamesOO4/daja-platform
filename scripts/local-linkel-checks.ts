@@ -82,6 +82,7 @@ function idleStatus(response: Response) {
   switch (response.headers.get('X-Daja-Linkel-State')) {
     case 'paused': return 'Provere pauzirane u adminu' + (when ? ' do ' + when : '');
     case 'protection': return when ? 'Zaštitna pauza do ' + when : 'Čeka proveru pristupa Linkelu';
+    case 'bulk': return 'Masovna provera · čeka sledeći artikal';
     case 'running': return 'Provera je u toku na drugom DAJA računaru';
     case 'empty': return 'Nema Linkel linkova u redu';
     default: return 'Čeka sledeći termin' + (when ? ' · ' + when : '');
@@ -97,7 +98,7 @@ export async function runLocalLinkel(
     try {
       const response = await api('linkel/claim', {}, shutdown);
       const serverWait = Number(response.headers.get('X-Daja-Linkel-Wait-Ms'));
-      if (Number.isFinite(serverWait) && serverWait >= 10_000 && serverWait <= 400_000) wait = serverWait;
+      if (Number.isFinite(serverWait) && serverWait >= 3_000 && serverWait <= 400_000) wait = serverWait;
       if (response.status === 204) {
         setStatus(idleStatus(response));
       } else {
@@ -133,7 +134,7 @@ export async function runLocalLinkel(
         setStatus(result.blocked || (job.kind === 'health' && !result.homeHealthy)
           ? 'Zaštitna pauza' : 'Čeka sledeći termin', scheduleTime.format(new Date()) + ' · ' + lastResult);
         // Refresh the shared queue promptly after submitting the result.
-        wait = 10_000;
+        wait = Math.max(0, wait - (Date.now() - started));
       }
       retryDelay = 15_000;
     } catch (error) {

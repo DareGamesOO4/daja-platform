@@ -68,7 +68,7 @@ export async function resumeSuppliers(pool: pg.Pool, providers: string[]) {
 export async function supplierLinkActions(
   pool: pg.Pool,
   organizationId: string,
-  input: { ids: string[]; action: 'check' | 'disable' | 'reactivate'; reason?: string | undefined }
+  input: { ids: string[]; action: 'check' | 'disable' | 'reactivate'; reason?: string | undefined; bulk?: boolean | undefined }
 ) {
   return supplierTransaction(pool, async (client) => {
     const items = [];
@@ -89,7 +89,7 @@ export async function supplierLinkActions(
         if (!link.checks_enabled) {
           status = 'skipped';
           reason = 'Prvo vrati link u proveru';
-        } else if (link.running || link.manual_requested_at || link.initial_requested_at) {
+        } else if (link.running || link.manual_requested_at || link.bulk_requested_at || link.initial_requested_at) {
           status = 'already_queued';
           reason = 'Provera već radi ili čeka';
         } else if (link.provider_code === 'linkel' && link.recently_checked) {
@@ -97,8 +97,9 @@ export async function supplierLinkActions(
           reason = 'Linkel je već proveren u poslednjih sat vremena';
         } else
           await client.query(
-            'UPDATE supplier_product_links SET manual_requested_at=now() WHERE id=$1',
-            [id]
+            `UPDATE supplier_product_links SET manual_requested_at=CASE WHEN NOT $2 THEN now() END,
+              bulk_requested_at=CASE WHEN $2 THEN now() END WHERE id=$1`,
+            [id, link.provider_code === 'linkel' && input.bulk === true]
           );
       } else if (input.action === 'disable') {
         if (link.provider_code === 'linkel') {

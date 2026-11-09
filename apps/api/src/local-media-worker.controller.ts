@@ -84,7 +84,7 @@ export class LocalMediaWorkerController {
     const job = await claimLocalLinkel(this.db.pool, organizationId);
     // A status lookup must never prevent delivery of an already reserved lease.
     if (job) {
-      response.setHeader('X-Daja-Linkel-Wait-Ms', '10000');
+      response.setHeader('X-Daja-Linkel-Wait-Ms', '3000');
       return job;
     }
     const queue = await localLinkelQueueStatus(this.db.pool, organizationId);
