@@ -223,21 +223,20 @@ async function work(configPath: string, statusPath?: string) {
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
   const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown,
-    linkel: config.checkLinkel ? 'Povezivanje' : 'Isključeno na ovom računaru' };
-  let linkelError: string | null = null;
+    linkel: config.checkLinkel ? 'Povezivanje…' : 'Isključeno na ovom računaru', linkelLast: '' };
   let imageError: string | null = null;
   let imageJobFailed = false;
   if (config.checkLinkel) {
     void runLocalLinkel((route, payload, signal) => api(config, route, payload, signal), shutdown.signal,
-      (message, issue) => {
-        if (issue !== undefined) linkelError = issue;
-        status.linkel = linkelError ?? message;
+      (message, lastResult) => {
+        status.linkel = message;
+        if (lastResult !== undefined) status.linkelLast = lastResult;
       });
   }
   async function refreshRenderStatus() {
     try {
       const response = await api(config, 'status',
-        config.checkLinkel ? { studio: { imageError, linkelError } } : {}, shutdown.signal);
+        config.checkLinkel ? { studio: { imageError, linkelError: null } } : {}, shutdown.signal);
       const payload = await response.json() as { data?: unknown };
       status.render = payload && typeof payload === 'object' && 'data' in payload
         ? payload.data
@@ -278,7 +277,7 @@ async function work(configPath: string, statusPath?: string) {
       try { pauseState = JSON.parse(await readFile(pausePath, 'utf8')); } catch {}
       const until = pauseState.until ? Date.parse(pauseState.until) : 0;
       if (pauseState.paused || until > Date.now()) {
-        Object.assign(status, { phase: 'local-paused', job: '', activity: '', pauseUntil: until > Date.now() ? new Date(until).toISOString() : null });
+        Object.assign(status, { phase: 'local-paused', job: '', progress: 0, error: '', activity: '', pauseUntil: until > Date.now() ? new Date(until).toISOString() : null });
         await publishStatus();
         await delay(3_000, undefined, { signal: shutdown.signal }).catch(() => {});
         continue;
@@ -305,7 +304,7 @@ async function work(configPath: string, statusPath?: string) {
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
       }
-      Object.assign(status, { phase: response.headers.get('X-Daja-Worker-Paused') === '1' ? 'paused' : 'ready', job: '', error: '' });
+      Object.assign(status, { phase: response.headers.get('X-Daja-Worker-Paused') === '1' ? 'paused' : 'ready', job: '', progress: 0, activity: '', error: '' });
     } catch (error) {
       if (shutdown.signal.aborted) return;
       const detail = error instanceof Error
@@ -317,7 +316,7 @@ async function work(configPath: string, statusPath?: string) {
       console.error(reason + ' Novi pokušaj za 15 sekundi.');
       imageError = reason;
       imageJobFailed ||= jobClaimed;
-      Object.assign(status, { phase: 'error', job: '', error: reason });
+      Object.assign(status, { phase: 'error', job: '', progress: 0, activity: '', error: reason });
       pause = 15_000;
     }
     await publishStatus();

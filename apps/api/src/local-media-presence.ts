@@ -11,7 +11,7 @@ const studioOffline = "coalesce(studio_seen_at < now()-interval '3 minutes',fals
 const studioIssues = [
   { bit: 1, message: 'Donji DAJA Studio se ne javlja. Proveri računar, internet i Windows zadatak.' },
   { bit: 2, message: 'Donji DAJA Studio prijavljuje problem sa obradom slika.' },
-  { bit: 4, message: 'Donji DAJA Studio prijavljuje problem sa Linkel proverama.' }
+  { bit: 4, message: 'Linkel provere su privremeno pauzirane zbog problema sa pristupom.' }
 ];
 
 @Injectable()
@@ -71,16 +71,19 @@ export class LocalMediaPresence implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async studioHeartbeat(organizationId: string, imageError: string | null, linkelError: string | null) {
+  async studioHeartbeat(organizationId: string, imageError: string | null) {
     await this.db.pool.query(
       `INSERT INTO media_worker_settings(organization_id,studio_seen_at,studio_image_error,studio_linkel_error,
         studio_image_error_since,studio_linkel_error_since)
-       VALUES($1,now(),$2,$3,CASE WHEN $2::text IS NOT NULL THEN now() END,CASE WHEN $3::text IS NOT NULL THEN now() END)
+       SELECT $1::uuid,now(),$2,provider.pause_reason,CASE WHEN $2::text IS NOT NULL THEN now() END,
+         CASE WHEN provider.pause_reason IS NOT NULL THEN now() END
+       FROM (SELECT 1) source LEFT JOIN supplier_provider_checks provider
+         ON provider.provider_code='linkel' AND provider.paused_until>now()
        ON CONFLICT(organization_id) DO UPDATE SET studio_seen_at=now(),
         studio_image_error=excluded.studio_image_error,studio_linkel_error=excluded.studio_linkel_error,
         studio_image_error_since=CASE WHEN $2 IS NOT NULL THEN coalesce(media_worker_settings.studio_image_error_since,now()) END,
-        studio_linkel_error_since=CASE WHEN $3 IS NOT NULL THEN coalesce(media_worker_settings.studio_linkel_error_since,now()) END`,
-      [organizationId, imageError, linkelError]
+        studio_linkel_error_since=CASE WHEN excluded.studio_linkel_error IS NOT NULL THEN coalesce(media_worker_settings.studio_linkel_error_since,now()) END`,
+      [organizationId, imageError]
     );
   }
 

@@ -856,11 +856,38 @@ async function reserveLinkelSlot(client: QueryClient) {
     WHERE provider_code='linkel'`);
 }
 
-export async function localLinkelWaitMilliseconds(pool: pg.Pool) {
-  const row = (await pool.query<{ wait_ms: number }>(`SELECT
-    GREATEST(10000, LEAST(30000, ceil(extract(epoch FROM next_request_at-now())*1000)))::integer AS wait_ms
-    FROM supplier_provider_checks WHERE provider_code='linkel'`)).rows[0];
-  return row?.wait_ms ?? 30000;
+export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: string) {
+  const row = (await pool.query<{
+    state: 'paused' | 'protection' | 'running' | 'waiting' | 'empty';
+    next_at: Date | null;
+    wait_ms: number;
+  }>(`SELECT CASE
+      WHEN p.manual_pause_mode='all' THEN 'paused'
+      WHEN p.paused_until IS NOT NULL OR p.probe_requested_at IS NOT NULL THEN 'protection'
+      WHEN lease.expires_at IS NOT NULL THEN 'running'
+      WHEN pending.due_at IS NOT NULL THEN 'waiting'
+      WHEN p.manual_pause_mode IS NOT NULL THEN 'paused'
+      ELSE 'empty' END AS state,
+    CASE WHEN p.manual_pause_mode='all' THEN p.manual_pause_until
+      WHEN p.paused_until IS NOT NULL OR p.probe_requested_at IS NOT NULL
+        THEN GREATEST(p.next_request_at,CASE WHEN p.probe_requested_at IS NULL THEN p.paused_until END)
+      WHEN lease.expires_at IS NULL AND pending.due_at IS NOT NULL THEN GREATEST(p.next_request_at,pending.due_at)
+      WHEN p.manual_pause_mode IS NOT NULL THEN p.manual_pause_until END AS next_at,
+    GREATEST(10000, LEAST(30000, ceil(extract(epoch FROM p.next_request_at-now())*1000)))::integer AS wait_ms
+    FROM supplier_provider_checks p
+    LEFT JOIN LATERAL (
+      SELECT max(expires_at) AS expires_at FROM supplier_check_leases
+      WHERE provider_code=p.provider_code AND expires_at>now()
+    ) lease ON true
+    LEFT JOIN LATERAL (
+      SELECT min(LEAST(l.initial_requested_at, CASE WHEN p.manual_pause_mode IS NULL
+        THEN LEAST(l.manual_requested_at,l.confirmation_due_at,l.next_check_at) END)) AS due_at
+      FROM supplier_product_links l JOIN products product ON product.id=l.product_id
+        AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
+      WHERE l.organization_id=$1 AND l.provider_code=p.provider_code AND l.checks_enabled AND NOT l.removed AND l.url IS NOT NULL
+    ) pending ON lease.expires_at IS NULL AND p.paused_until IS NULL AND p.probe_requested_at IS NULL
+    WHERE p.provider_code='linkel'`, [organizationId])).rows[0];
+  return row ?? { state: 'empty' as const, next_at: null, wait_ms: 30000 };
 }
 
 export async function completeLocalLinkel(

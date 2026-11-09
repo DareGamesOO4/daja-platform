@@ -72,20 +72,39 @@ function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   return { status: 'available', stockStatus, priceAmount, priceCurrency: 'RSD' } as const;
 }
 
-export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus: (message: string, issue?: string | null) => void) {
+const scheduleTime = new Intl.DateTimeFormat('sr-Latn-RS', {
+  timeZone: 'Europe/Belgrade', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+});
+
+function idleStatus(response: Response) {
+  const time = Date.parse(response.headers.get('X-Daja-Linkel-Next-At') ?? '');
+  const when = time > Date.now() ? scheduleTime.format(time) : '';
+  switch (response.headers.get('X-Daja-Linkel-State')) {
+    case 'paused': return 'Provere pauzirane u adminu' + (when ? ' do ' + when : '');
+    case 'protection': return when ? 'Zaštitna pauza do ' + when : 'Čeka proveru pristupa Linkelu';
+    case 'running': return 'Provera je u toku na drugom DAJA računaru';
+    case 'empty': return 'Nema Linkel linkova u redu';
+    default: return 'Čeka sledeći termin' + (when ? ' · ' + when : '');
+  }
+}
+
+export async function runLocalLinkel(
+  api: Api, shutdown: AbortSignal, setStatus: (message: string, lastResult?: string) => void
+) {
+  let retryDelay = 15_000;
   while (!shutdown.aborted) {
-    const started = Date.now();
     let wait = 15_000;
     try {
       const response = await api('linkel/claim', {}, shutdown);
       const serverWait = Number(response.headers.get('X-Daja-Linkel-Wait-Ms'));
       if (Number.isFinite(serverWait) && serverWait >= 10_000 && serverWait <= 400_000) wait = serverWait;
       if (response.status === 204) {
-        setStatus('Čeka sledeći termin');
+        setStatus(idleStatus(response));
       } else {
         const payload = await response.json();
         const job = jobSchema.parse(payload?.data ?? payload);
-        setStatus('Provera u toku');
+        setStatus(job.kind === 'health' ? 'Proverava pristup Linkelu' : 'Provera artikla u toku na ovom računaru');
+        const started = Date.now();
         let result = { outcome: failed as ReturnType<typeof readProduct>, homeHealthy: false, blocked: false };
         try {
           const page = await readLinkel(job.url, shutdown);
@@ -108,16 +127,24 @@ export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus:
           job.kind === 'health' && !result.homeHealthy ? 'Početna strana Linkela nije dostupna.' :
           job.kind === 'product' && result.outcome.status === 'error' ? (result.outcome.accessFailed
             ? 'Stranica artikla nije dostupna.' : 'Cena ili stanje nisu potvrđeni.') : null;
-        setStatus(issue ?? (job.kind === 'health' ? 'Linkel je dostupan' :
-          'Poslednja provera ' + new Date().toLocaleString('sr-RS')), issue);
+        const lastResult = issue ?? (job.kind === 'health' ? 'Pristup potvrđen' :
+          result.outcome.status === 'missing' ? (result.homeHealthy ? 'Stranica artikla nije pronađena' : 'Pristup sajtu nije potvrđen') :
+          result.outcome.status === 'available' && result.outcome.stockStatus === null ? 'Cena očitana, stanje nije navedeno' : 'Rezultat poslat');
+        setStatus(result.blocked || (job.kind === 'health' && !result.homeHealthy)
+          ? 'Zaštitna pauza' : 'Čeka sledeći termin', scheduleTime.format(new Date()) + ' · ' + lastResult);
+        // Refresh the shared queue promptly after submitting the result.
+        wait = 10_000;
       }
+      retryDelay = 15_000;
     } catch (error) {
       if (!shutdown.aborted) {
         const issue = error instanceof Error && /^DAJA API je vratio HTTP \d+\.$/.test(error.message)
           ? error.message : 'Studio nije uspeo da preuzme ili završi Linkel proveru.';
-        setStatus(issue, issue);
+        setStatus(issue);
+        wait = retryDelay;
+        retryDelay = Math.min(retryDelay * 2, 120_000);
       }
     }
-    await delay(Math.max(0, wait - (Date.now() - started)), undefined, { signal: shutdown }).catch(() => {});
+    await delay(wait, undefined, { signal: shutdown }).catch(() => {});
   }
 }

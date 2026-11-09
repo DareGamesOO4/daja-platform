@@ -139,7 +139,7 @@ internal sealed class Dashboard : Form
         state = new Label { AutoSize = true, ForeColor = Color.FromArgb(247, 223, 155), Font = new Font("Segoe UI Semibold", 12) };
         detail = new Label { AutoSize = true, ForeColor = Color.White, MaximumSize = new Size(540, 0) };
         renderState = new Label { AutoSize = true, ForeColor = Color.White, Text = "Render · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
-        linkelState = new Label { AutoSize = true, ForeColor = Color.White, Text = "Linkel · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
+        linkelState = new Label { AutoSize = true, MaximumSize = new Size(540, 0), ForeColor = Color.White, Text = "Linkel · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
         status.Controls.Add(state);
         status.Controls.Add(detail);
         status.Controls.Add(renderState);
@@ -317,11 +317,13 @@ internal sealed class Dashboard : Form
     {
         renderState.Text = "Render · stanje nije dostupno";
         linkelState.Text = "Linkel · stanje nije dostupno";
+        pauseState.Text = "";
         var userConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-user.json");
         var activeStatusFile = File.Exists(userConfig)
             ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-status.json") : statusFile;
         if (!File.Exists(userConfig) && !Directory.Exists(Path.GetDirectoryName(statusFile)))
         {
+            progress.Value = 0;
             state.Text = "Čeka povezivanje sa DAJA serverom";
             detail.Text = "Lokalna obrada je dostupna iz ovog prozora.";
             return;
@@ -335,6 +337,7 @@ internal sealed class Dashboard : Form
                 DateTimeOffset updated;
                 if (!DateTimeOffset.TryParse(snapshot.updated, out updated) || DateTimeOffset.UtcNow - updated > TimeSpan.FromSeconds(30))
                 {
+                    progress.Value = 0;
                     state.Text = "Pozadinski worker nije aktivan";
                     detail.Text = "Nema svežeg statusa sa ovog računara.";
                     return;
@@ -345,7 +348,8 @@ internal sealed class Dashboard : Form
                     snapshot.phase == "paused" ? "Povezan · pauziran iz admina" :
                     snapshot.phase == "error" ? "Veza ili obrada imaju problem" : "Povezivanje…";
                 DateTimeOffset completed;
-                linkelState.Text = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno");
+                linkelState.Text = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno") +
+                    (String.IsNullOrEmpty(snapshot.linkelLast) ? "" : Environment.NewLine + "Poslednja lokalna provera · " + snapshot.linkelLast);
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
                 detail.Text = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
@@ -366,10 +370,10 @@ internal sealed class Dashboard : Form
                 pauseState.Text = snapshot.phase == "local-paused" ? (snapshot.pauseUntil == null ? "Pauzirano dok ne nastaviš" : "Pauzirano do " + DateTimeOffset.Parse(snapshot.pauseUntil).ToLocalTime().ToString("t")) : "";
             }
         }
-        catch (IOException) { state.Text = "Čeka pokretanje workera"; detail.Text = "Status će se pojaviti kada worker krene."; }
-        catch (UnauthorizedAccessException) { state.Text = "Status nije dostupan"; detail.Text = "Proveri dozvole Windows workera."; }
-        catch (InvalidOperationException) { state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
-        catch (ArgumentException) { state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
+        catch (IOException) { progress.Value = 0; state.Text = "Čeka pokretanje workera"; detail.Text = "Status će se pojaviti kada worker krene."; }
+        catch (UnauthorizedAccessException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Proveri dozvole Windows workera."; }
+        catch (InvalidOperationException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
+        catch (ArgumentException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
     }
 
     private static string Quote(string value) { return "\"" + value + "\""; }
@@ -382,6 +386,7 @@ internal sealed class Dashboard : Form
         public string error { get; set; }
         public string updated { get; set; }
         public string linkel { get; set; }
+        public string linkelLast { get; set; }
         public string activity { get; set; }
         public string productSlug { get; set; }
         public int? imageIndex { get; set; }

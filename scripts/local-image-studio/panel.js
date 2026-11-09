@@ -1,10 +1,10 @@
 const byId = id => document.getElementById(id);
-const phases = { ready: 'povezan, čeka slike', working: 'obrada u toku', paused: 'pauziran iz admina',
+const phases = { 'local-paused': 'obrada slika pauzirana', ready: 'povezan, čeka slike', working: 'obrada u toku', paused: 'pauziran iz admina',
   error: 'problem sa vezom ili obradom', connecting: 'povezivanje…' };
 
 async function updateState() {
   try {
-    const response = await fetch('/state');
+    const response = await fetch('/state', { cache: 'no-store', signal: AbortSignal.timeout(3_000) });
     if (!response.ok) throw new Error();
     const payload = await response.json();
     const { status } = payload;
@@ -16,7 +16,8 @@ async function updateState() {
     byId('render').textContent = 'Render · ' + (!render ? 'server nije potvrdio stanje' :
       !render.renderOnline ? 'nema svežeg signala' : failed ? 'aktivan, poslednja obrada prijavila grešku' :
       'raspored aktivan (03–07)');
-    byId('linkel').textContent = 'Linkel · ' + (status.linkel ?? 'stanje nije dostupno');
+    byId('linkel').textContent = 'Linkel · ' + (status.linkel ?? 'stanje nije dostupno') +
+      (status.linkelLast ? ' · Poslednja lokalna provera: ' + status.linkelLast : '');
   } catch {
     byId('worker').textContent = 'DAJA računar · lokalni worker nije dostupan';
     byId('render').textContent = 'Render · stanje nije dostupno';
@@ -54,5 +55,8 @@ byId('trial').onsubmit = async event => {
   } catch (error) { byId('trial-status').textContent = error.message; }
   finally { button.disabled = false; }
 };
-void updateState();
-setInterval(() => { if (!document.hidden) void updateState(); }, 4_000);
+async function refreshState() {
+  if (!document.hidden) await updateState();
+  setTimeout(refreshState, 4_000);
+}
+void refreshState();

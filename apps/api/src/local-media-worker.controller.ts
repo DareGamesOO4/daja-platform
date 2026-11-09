@@ -18,7 +18,7 @@ import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
 import { inspectLocalMediaSource } from './local-media-source.js';
 import { LocalMediaPresence } from './local-media-presence.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
-import { claimLocalLinkel, completeLocalLinkel, localLinkelWaitMilliseconds } from './supplier-queue.js';
+import { claimLocalLinkel, completeLocalLinkel, localLinkelQueueStatus } from './supplier-queue.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -71,7 +71,7 @@ export class LocalMediaWorkerController {
     }).optional() }).safeParse(body ?? {});
     if (!report.success) throw new ValidationFailedError('Invalid Studio status');
     if (report.data.studio) {
-      await this.presence.studioHeartbeat(organizationId, report.data.studio.imageError, report.data.studio.linkelError);
+      await this.presence.studioHeartbeat(organizationId, report.data.studio.imageError);
     }
     const { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt } = await this.presence.status(organizationId);
     return { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt };
@@ -82,9 +82,16 @@ export class LocalMediaWorkerController {
     const organizationId = this.authenticate(request);
     response.setHeader('Cache-Control', 'no-store');
     const job = await claimLocalLinkel(this.db.pool, organizationId);
-    response.setHeader('X-Daja-Linkel-Wait-Ms', String(await localLinkelWaitMilliseconds(this.db.pool)));
-    if (!job) response.status(204);
-    return job ?? undefined;
+    // A status lookup must never prevent delivery of an already reserved lease.
+    if (job) {
+      response.setHeader('X-Daja-Linkel-Wait-Ms', '10000');
+      return job;
+    }
+    const queue = await localLinkelQueueStatus(this.db.pool, organizationId);
+    response.setHeader('X-Daja-Linkel-Wait-Ms', String(queue.wait_ms));
+    response.setHeader('X-Daja-Linkel-State', queue.state);
+    if (queue.next_at) response.setHeader('X-Daja-Linkel-Next-At', queue.next_at.toISOString());
+    response.status(204);
   }
 
   @Post('linkel/rapid-start')
