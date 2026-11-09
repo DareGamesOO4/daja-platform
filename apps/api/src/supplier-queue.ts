@@ -794,13 +794,19 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
     if (!provider.automatic) return null;
     const link = (await client.query<QueueLink>(
       `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
+       JOIN supplier_provider_checks sweep ON sweep.provider_code=l.provider_code
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
         AND l.url IS NOT NULL AND p.deleted_at IS NULL
         AND (l.rapid_requested_at IS NOT NULL OR l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
-          OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
-       ORDER BY CASE WHEN l.rapid_requested_at IS NOT NULL THEN -1 WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
+          OR l.confirmation_due_at<=now() OR l.next_check_at<=now()
+          OR (sweep.rapid_check_started_at IS NOT NULL AND (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)))
+       ORDER BY CASE WHEN l.rapid_requested_at IS NOT NULL OR (sweep.rapid_check_started_at IS NOT NULL AND
+           (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)) THEN -1
+         WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
          WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
-        LEAST(l.rapid_requested_at,l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
+        LEAST(l.rapid_requested_at,l.initial_requested_at,l.manual_requested_at,
+          CASE WHEN sweep.rapid_check_started_at IS NOT NULL AND (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)
+            THEN sweep.rapid_check_started_at END,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
       [organizationId]
     )).rows[0];
     if (!link) {
