@@ -7,6 +7,7 @@ import { ValidationFailedError } from '@daja/security';
 
 export const NUMBERED_PROVIDERS = ['ekka', 'bultime', 'timezone', 'qandq'] as const;
 export const ALL_PROVIDERS = [...NUMBERED_PROVIDERS, 'linkel', 'milano'] as const;
+const SERVER_PROVIDERS = [...NUMBERED_PROVIDERS, 'milano'] as const;
 export type NumberedProvider = (typeof NUMBERED_PROVIDERS)[number];
 export type SupplierOutcome =
   | {
@@ -770,6 +771,95 @@ async function finishLegacy(
     );
   }
 }
+
+export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
+  return supplierTransaction(pool, async client => {
+    await expireSupplierLeases(client);
+    const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean }>(
+      `SELECT (probe_requested_at IS NOT NULL OR COALESCE(paused_until<=now(), false)) AS probe,
+        (manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
+        (COALESCE(manual_pause_mode,'')<>'all') AS initial
+       FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_request_at<=now()
+       AND NOT EXISTS (SELECT 1 FROM supplier_check_leases WHERE provider_code=p.provider_code)`
+    )).rows[0];
+    if (!provider?.initial) return null;
+    if (provider.probe) {
+      const lease = (await client.query<Lease>(
+        "INSERT INTO supplier_check_leases(provider_code,kind) VALUES ('linkel','health') RETURNING *"
+      )).rows[0]!;
+      await reserveLinkelSlot(client);
+      return { token: lease.token, kind: 'health' as const, url: 'https://www.linkel.rs/sr/' };
+    }
+    if (!provider.automatic) return null;
+    const link = (await client.query<QueueLink>(
+      `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
+       WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
+        AND l.url IS NOT NULL AND p.deleted_at IS NULL
+        AND (l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
+          OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
+       ORDER BY CASE WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
+         WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
+        LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
+      [organizationId]
+    )).rows[0];
+    if (!link) return null;
+    const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at ? 'manual'
+      : link.confirmation_due_at && link.confirmation_due_at <= new Date() ? 'confirmation' : 'regular';
+    const lease = (await client.query<Lease>(
+      `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind)
+       VALUES ('linkel',$1,$2,$3) RETURNING *`, [link.id, link.generation, kind]
+    )).rows[0]!;
+    await client.query(
+      `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
+    );
+    await reserveLinkelSlot(client);
+    return { token: lease.token, kind: 'product' as const, url: link.url };
+  });
+}
+
+async function reserveLinkelSlot(client: QueryClient) {
+  await client.query(`UPDATE supplier_provider_checks
+    SET next_request_at=now()+interval '390 seconds' WHERE provider_code='linkel'`);
+}
+
+export async function completeLocalLinkel(
+  database: Database, organizationId: string, token: string,
+  outcome: SupplierOutcome, homeHealthy: boolean, blocked: boolean, duration: number
+) {
+  const result = (await database.pool.query<Lease & { legacy_due: boolean }>(
+    `SELECT lease.*,COALESCE(l.next_check_at<=now(), false) AS legacy_due
+     FROM supplier_check_leases lease LEFT JOIN supplier_product_links l ON l.id=lease.link_id
+     WHERE lease.token=$1 AND lease.provider_code='linkel' AND lease.expires_at>now()
+       AND ((lease.kind='health' AND lease.link_id IS NULL) OR (l.organization_id=$2 AND l.generation=lease.generation))`,
+    [token, organizationId]
+  )).rows[0];
+  if (!result) return;
+  if (result.kind === 'health') {
+    await supplierTransaction(database.pool, async client => {
+      const released = await client.query('DELETE FROM supplier_check_leases WHERE token=$1 AND expires_at>now()', [token]);
+      if (!released.rowCount) return;
+      await recordSupplierStatistics(client, 'site', 'linkel', {
+        outcome: homeHealthy ? 'available' : 'error', duration
+      });
+      if (!homeHealthy) await pauseProvider(client, 'linkel', 'Studio ne može da pristupi Linkelu.');
+      else await client.query(`UPDATE supplier_provider_checks SET paused_until=NULL,pause_reason=NULL,
+        health_ok=true,health_checked_at=now(),probe_requested_at=NULL,updated_at=now() WHERE provider_code='linkel'`);
+    });
+    return;
+  }
+  if (blocked) {
+    await supplierTransaction(database.pool, async client => {
+      const active = await client.query('SELECT 1 FROM supplier_check_leases WHERE token=$1 AND expires_at>now()', [token]);
+      if (active.rowCount) await pauseProvider(client, 'linkel', 'Linkel je odbio automatizovanu proveru sa računara.');
+    });
+  }
+  const link = (await database.pool.query<QueueLink>(
+    'SELECT * FROM supplier_product_links WHERE id=$1 AND organization_id=$2', [result.link_id, organizationId]
+  )).rows[0];
+  if (link) await finishLegacy(database, {
+    page: async () => outcome, home: async () => homeHealthy
+  }, result, { ...link, generation: result.generation!, legacy_due: result.legacy_due }, outcome, AbortSignal.timeout(60_000), duration);
+}
 export async function rollMissedSlots(
   client: QueryClient,
   providers: readonly string[] = ALL_PROVIDERS
@@ -947,7 +1037,7 @@ export function startNumberedSupplierChecks(
           `SELECT provider_code FROM supplier_provider_checks p
           WHERE p.provider_code=ANY($1::text[]) AND (probe_requested_at IS NOT NULL OR (paused_until<=now() AND COALESCE(manual_pause_mode,'')<>'all'))
             AND NOT EXISTS (SELECT 1 FROM supplier_check_leases lease WHERE lease.provider_code=p.provider_code AND lease.kind='health') LIMIT $2`,
-          [ALL_PROVIDERS, Math.max(remaining, 0)]
+          [SERVER_PROVIDERS, Math.max(remaining, 0)]
         );
         for (const p of health.rows) {
           const lease = await client.query<Lease>(
@@ -975,7 +1065,7 @@ export function startNumberedSupplierChecks(
             ) SELECT l.* FROM eligible l WHERE l.provider_code=ANY($2::text[]) OR l.provider_position=1
             ORDER BY CASE WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1 WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
               LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,COALESCE(l.next_regular_at,l.next_check_at)),l.id LIMIT $3`,
-            [ALL_PROVIDERS, NUMBERED_PROVIDERS, remaining]
+            [SERVER_PROVIDERS, NUMBERED_PROVIDERS, remaining]
           );
           const legacyClaimed = new Set<string>();
           for (const link of links.rows) {

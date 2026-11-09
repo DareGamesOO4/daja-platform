@@ -85,6 +85,7 @@ internal sealed class Dashboard : Form
     private readonly Label state;
     private readonly Label detail;
     private readonly Label renderState;
+    private readonly Label linkelState;
     private readonly Label pauseState;
     private readonly ComboBox pauseDuration;
     private readonly Button pauseButton;
@@ -138,9 +139,11 @@ internal sealed class Dashboard : Form
         state = new Label { AutoSize = true, ForeColor = Color.FromArgb(247, 223, 155), Font = new Font("Segoe UI Semibold", 12) };
         detail = new Label { AutoSize = true, ForeColor = Color.White, MaximumSize = new Size(540, 0) };
         renderState = new Label { AutoSize = true, ForeColor = Color.White, Text = "Render · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
+        linkelState = new Label { AutoSize = true, ForeColor = Color.White, Text = "Linkel · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
         status.Controls.Add(state);
         status.Controls.Add(detail);
         status.Controls.Add(renderState);
+        status.Controls.Add(linkelState);
         layout.Controls.Add(status);
 
         var controls = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, Margin = new Padding(0, 0, 0, 10) };
@@ -309,6 +312,7 @@ internal sealed class Dashboard : Form
     private void ReadWorkerStatus()
     {
         renderState.Text = "Render · stanje nije dostupno";
+        linkelState.Text = "Linkel · stanje nije dostupno";
         var userConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-user.json");
         var activeStatusFile = File.Exists(userConfig)
             ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-status.json") : statusFile;
@@ -337,6 +341,7 @@ internal sealed class Dashboard : Form
                     snapshot.phase == "paused" ? "Povezan · pauziran iz admina" :
                     snapshot.phase == "error" ? "Veza ili obrada imaju problem" : "Povezivanje…";
                 DateTimeOffset completed;
+                linkelState.Text = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno");
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
                 detail.Text = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
@@ -372,6 +377,7 @@ internal sealed class Dashboard : Form
         public string completed { get; set; }
         public string error { get; set; }
         public string updated { get; set; }
+        public string linkel { get; set; }
         public string activity { get; set; }
         public string productSlug { get; set; }
         public int? imageIndex { get; set; }

@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { runLocalLinkel } from './local-linkel-checks.js';
 import type { ProductImageProfile } from '../packages/database/src/image-encoder-core.js';
 import {
   defaultMediaWorkerProfile, mediaWorkerProfileSchema as profileSchema
@@ -16,7 +17,8 @@ const MAX_BYTES = 25 * 1024 * 1024;
 const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 const configSchema = z.object({
   apiBaseUrl: z.url(),
-  token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/)
+  token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/),
+  checkLinkel: z.boolean().default(false)
 });
 const claimSchema = z.object({
   id: z.uuid(),
@@ -220,7 +222,12 @@ async function work(configPath: string, statusPath?: string) {
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
-  const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown };
+  const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown,
+    linkel: config.checkLinkel ? 'Povezivanje' : 'Isključeno na ovom računaru' };
+  if (config.checkLinkel) {
+    void runLocalLinkel((route, payload, signal) => api(config, route, payload, signal), shutdown.signal,
+      message => { status.linkel = message; });
+  }
   async function refreshRenderStatus() {
     try {
       const response = await api(config, 'status', {}, shutdown.signal);

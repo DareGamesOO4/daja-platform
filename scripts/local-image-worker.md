@@ -24,6 +24,8 @@ Za pokretanje pre prijave u Windows otvori PowerShell kao administrator i pokren
 
 Instalater registruje zadatak koji radi kao Windows Local Service od paljenja računara i pokreće ga odmah. Program i ključ čuva u folderu DajaImageWorker u ProgramData. Pristup folderu imaju Local Service, SYSTEM i administratori.
 
+Na računaru zaduženom za Linkel dodaj `-CheckLinkel` na instalacionu komandu. U korisničkoj instalaciji isti posao uključuje `"checkLinkel": true` u postojećem `worker-user.json`. Linkel red deli postojeće podatke o proverama u adminu i ima 1.500 termina na sedam dana, u razmacima od 403 sekunde. Studio uzima dospele termine i koristi javnu cenu u RSD i dostupnost artikla. Kad Linkel odbije pristup, provere se pauziraju i zadržavaju se poslednji uspešni podaci. Slike i Linkel imaju odvojene poslove i dele isti namenski ključ.
+
 ## Ugovor za backend
 
 Worker poziva HTTPS rute uz Authorization Bearer sa namenskim ključem. Backend aktivira lokalni red za javnu organizaciju kada je podešen MEDIA_LOCAL_WORKER_TOKEN_HASH kao SHA-256 ključa u heksadecimalnom formatu. Kad radnik unese URL u web admin, backend preuzima izvor, čuva ga u R2 i stavlja u isti red kao i otpremljeni fajl proizvoda.

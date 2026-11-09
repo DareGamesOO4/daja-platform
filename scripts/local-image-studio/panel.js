@@ -16,9 +16,11 @@ async function updateState() {
     byId('render').textContent = 'Render · ' + (!render ? 'server nije potvrdio stanje' :
       !render.renderOnline ? 'nema svežeg signala' : failed ? 'aktivan, poslednja obrada prijavila grešku' :
       'raspored aktivan (03–07)');
+    byId('linkel').textContent = 'Linkel · ' + (status.linkel ?? 'stanje nije dostupno');
   } catch {
     byId('worker').textContent = 'DAJA računar · lokalni worker nije dostupan';
     byId('render').textContent = 'Render · stanje nije dostupno';
+    byId('linkel').textContent = 'Linkel · stanje nije dostupno';
   }
 }
 

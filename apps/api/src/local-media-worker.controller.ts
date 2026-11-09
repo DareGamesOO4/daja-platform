@@ -18,6 +18,7 @@ import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
 import { inspectLocalMediaSource } from './local-media-source.js';
 import { LocalMediaPresence } from './local-media-presence.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
+import { claimLocalLinkel, completeLocalLinkel } from './supplier-queue.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -66,6 +67,34 @@ export class LocalMediaWorkerController {
     response.setHeader('Cache-Control', 'no-store');
     const { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt } = await this.presence.status(organizationId);
     return { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt };
+  }
+
+  @Post('linkel/claim')
+  async claimLinkel(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    response.setHeader('Cache-Control', 'no-store');
+    const job = await claimLocalLinkel(this.db.pool, organizationId);
+    if (!job) response.status(204);
+    return job ?? undefined;
+  }
+
+  @Post('linkel/complete')
+  async completeLinkel(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    const parsed = z.object({
+      token: z.uuid(), homeHealthy: z.boolean(), blocked: z.boolean(),
+      duration: z.number().int().min(0).max(90_000),
+      outcome: z.discriminatedUnion('status', [
+        z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']),
+          priceAmount: z.number().min(0).max(100_000_000), priceCurrency: z.literal('RSD') }),
+        z.object({ status: z.literal('missing') }),
+        z.object({ status: z.literal('error'), accessFailed: z.boolean() })
+      ])
+    }).safeParse(body);
+    if (!parsed.success) throw new ValidationFailedError('Invalid Linkel result');
+    const { token, outcome, homeHealthy, blocked, duration } = parsed.data;
+    await completeLocalLinkel(this.db, organizationId, token, outcome, homeHealthy, blocked, duration);
+    response.status(204);
   }
 
   @Post('queue')
