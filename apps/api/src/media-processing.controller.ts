@@ -107,6 +107,7 @@ export class MediaProcessingController {
   }
 
   @Get('summary')
+  @Header('Cache-Control', 'no-store')
   async summary(@Req() request: Request) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
@@ -137,7 +138,11 @@ export class MediaProcessingController {
         (SELECT count(*)::int FROM media_derivative_jobs j WHERE j.organization_id=$1 AND j.lease_until>now()) AS processing`,
       [ctx.organizationId, ctx.userId]
     );
-    return result.rows[0];
+    const { studioSeenAt, studioOffline, studioImageError, studioLinkelError } =
+      await this.presence.status(ctx.organizationId);
+    return { ...result.rows[0], studio: {
+      seenAt: studioSeenAt, offline: studioOffline, imageError: studioImageError, linkelError: studioLinkelError
+    } };
   }
 
   @Get()

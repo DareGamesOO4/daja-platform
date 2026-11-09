@@ -116,11 +116,7 @@ export class OrderEmailService {
     const phone = customerValue(order.customer, 'phone') || 'Nije unet';
     const items = orderItems(order);
     const shipping = shippingDetails(order);
-    const recipients = notificationRecipients(
-      this.config.ORDER_NOTIFICATION_EMAILS ||
-        this.config.SES_REPLY_TO_EMAIL ||
-        this.config.STOREFRONT_ADMIN_EMAILS
-    );
+    const recipients = orderNotificationRecipients(this.config);
     return {
       recipients,
       fromEmail: this.orderFromEmail(),
@@ -597,7 +593,8 @@ function emailLink(value: string): string {
   return '<a href="mailto:' + escapeHtml(email) + '" style="color:#18181b;text-decoration:underline">' + escapeHtml(email) + '</a>';
 }
 
-function notificationRecipients(value: string): string[] {
+export function orderNotificationRecipients(config: AppConfig): string[] {
+  const value = config.ORDER_NOTIFICATION_EMAILS || config.SES_REPLY_TO_EMAIL || config.STOREFRONT_ADMIN_EMAILS;
   return value.split(',').map(rawEmailAddress).filter(Boolean);
 }
 

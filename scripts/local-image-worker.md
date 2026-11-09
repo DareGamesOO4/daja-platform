@@ -26,6 +26,8 @@ Instalater registruje zadatak koji radi kao Windows Local Service od paljenja ra
 
 Na računaru zaduženom za Linkel dodaj `-CheckLinkel` na instalacionu komandu. U korisničkoj instalaciji isti posao uključuje `"checkLinkel": true` u postojećem `worker-user.json`. Linkel red deli postojeće podatke o proverama u adminu i ima 1.500 termina na sedam dana, u razmacima od 403 sekunde. Studio uzima dospele termine i koristi javnu cenu u RSD i dostupnost artikla. Kad Linkel odbije pristup, provere se pauziraju i zadržavaju se poslednji uspešni podaci. Slike i Linkel imaju odvojene poslove i dele isti namenski ključ.
 
+Instalacija sa uključenim Linkelom šalje poseban signal nadzora na svakih 30 sekundi. Admin prikazuje prekid posle tri minuta i prijavljene greške slika i Linkela. Greška koja traje dva minuta ili prekid veze dodaju mejl u isti red i za iste primaoce kao obaveštenja o porudžbinama. Nadzor računara počinje kada se Studio prvi put javi.
+
 ## Ugovor za backend
 
 Worker poziva HTTPS rute uz Authorization Bearer sa namenskim ključem. Backend aktivira lokalni red za javnu organizaciju kada je podešen MEDIA_LOCAL_WORKER_TOKEN_HASH kao SHA-256 ključa u heksadecimalnom formatu. Kad radnik unese URL u web admin, backend preuzima izvor, čuva ga u R2 i stavlja u isti red kao i otpremljeni fajl proizvoda.

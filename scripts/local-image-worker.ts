@@ -224,13 +224,20 @@ async function work(configPath: string, statusPath?: string) {
   process.once('SIGTERM', () => shutdown.abort());
   const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown,
     linkel: config.checkLinkel ? 'Povezivanje' : 'Isključeno na ovom računaru' };
+  let linkelError: string | null = null;
+  let imageError: string | null = null;
+  let imageJobFailed = false;
   if (config.checkLinkel) {
     void runLocalLinkel((route, payload, signal) => api(config, route, payload, signal), shutdown.signal,
-      message => { status.linkel = message; });
+      (message, issue) => {
+        if (issue !== undefined) linkelError = issue;
+        status.linkel = linkelError ?? message;
+      });
   }
   async function refreshRenderStatus() {
     try {
-      const response = await api(config, 'status', {}, shutdown.signal);
+      const response = await api(config, 'status',
+        config.checkLinkel ? { studio: { imageError, linkelError } } : {}, shutdown.signal);
       const payload = await response.json() as { data?: unknown };
       status.render = payload && typeof payload === 'object' && 'data' in payload
         ? payload.data
@@ -265,6 +272,7 @@ async function work(configPath: string, statusPath?: string) {
   console.log('DAJA worker čeka posao.');
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
+    let jobClaimed = false;
     try {
       let pauseState: { until?: string | null; paused?: boolean } = {};
       try { pauseState = JSON.parse(await readFile(pausePath, 'utf8')); } catch {}
@@ -278,7 +286,9 @@ async function work(configPath: string, statusPath?: string) {
       if (pauseState.until) await writeFile(pausePath, JSON.stringify({ paused: false, until: null }));
       status.pauseUntil = null;
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
+      if (!imageJobFailed) imageError = null;
       if (response.status !== 204) {
+        jobClaimed = true;
         const payload = await response.json() as { data?: unknown };
         const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
         Object.assign(status, { phase: 'working', job: claim.id, productSlug: claim.productSlug, imageIndex: claim.imageIndex,
@@ -290,6 +300,8 @@ async function work(configPath: string, statusPath?: string) {
           void publishStatus();
         });
         status.completed = new Date().toISOString();
+        imageError = null;
+        imageJobFailed = false;
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
       }
@@ -303,6 +315,8 @@ async function work(configPath: string, statusPath?: string) {
         ? error.message
         : detail;
       console.error(reason + ' Novi pokušaj za 15 sekundi.');
+      imageError = reason;
+      imageJobFailed ||= jobClaimed;
       Object.assign(status, { phase: 'error', job: '', error: reason });
       pause = 15_000;
     }

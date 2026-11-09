@@ -70,7 +70,7 @@ function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   return { status: 'available', stockStatus, priceAmount, priceCurrency: 'RSD' } as const;
 }
 
-export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus: (message: string) => void) {
+export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus: (message: string, issue?: string | null) => void) {
   while (!shutdown.aborted) {
     const started = Date.now();
     let wait = 15_000;
@@ -101,12 +101,19 @@ export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus:
           shutdown.throwIfAborted();
         }
         await api('linkel/complete', { token: job.token, duration: Date.now() - started, ...result }, shutdown);
-        setStatus(result.blocked ? 'Linkel je odbio pristup' : job.kind === 'health'
-          ? (result.homeHealthy ? 'Linkel je dostupan' : 'Linkel nije dostupan')
-          : result.outcome.status === 'error' ? 'Cena ili stanje nisu potvrđeni' : 'Poslednja provera ' + new Date().toLocaleString('sr-RS'));
+        const issue = result.blocked ? 'Linkel je odbio pristup (zaštita sajta ili ograničenje zahteva).' :
+          job.kind === 'health' && !result.homeHealthy ? 'Početna strana Linkela nije dostupna.' :
+          job.kind === 'product' && result.outcome.status === 'error' ? (result.outcome.accessFailed
+            ? 'Stranica artikla nije dostupna.' : 'Cena ili stanje nisu potvrđeni.') : null;
+        setStatus(issue ?? (job.kind === 'health' ? 'Linkel je dostupan' :
+          'Poslednja provera ' + new Date().toLocaleString('sr-RS')), issue);
       }
     } catch (error) {
-      if (!shutdown.aborted) setStatus(error instanceof Error ? error.message : 'Provera nije uspela');
+      if (!shutdown.aborted) {
+        const issue = error instanceof Error && /^DAJA API je vratio HTTP \d+\.$/.test(error.message)
+          ? error.message : 'Studio nije uspeo da preuzme ili završi Linkel proveru.';
+        setStatus(issue, issue);
+      }
     }
     await delay(Math.max(0, wait - (Date.now() - started)), undefined, { signal: shutdown }).catch(() => {});
   }
