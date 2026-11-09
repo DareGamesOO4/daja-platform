@@ -12,7 +12,7 @@ Security links have priority over transactional messages, then marketing/product
 
 GET unsubscribe links only open a confirmation page; the button submits POST. RFC 8058 POST remains an immediate unsubscribe, without login or another confirmation. Link scanners following GET cannot revoke consent. Revocation and local suppressions prevent pending marketing/product emails from being sent.
 
-Configure SES credentials and delivery settings **on the worker service**, not only in the frontend's local environment:
+Configure SES credentials and delivery settings on the service that runs the email consumer. The production API runs the consumer because the current Render workspace has no separate background worker. A standalone worker can also run the consumer using the same database queue and shared send limit:
 
 - `SES_REGION=eu-north-1`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`
 - `SES_FROM_EMAIL=DajaShop <novosti@dajashop.rs>`
@@ -30,7 +30,7 @@ Scheduled regular-price and sale-start events are dispatched by the worker every
 
 The worker also catches up active email back-in-stock subscriptions for variants with stock, independently of the API inventory request. Only email subscriptions are consumed by this catch-up; existing SMS handling remains separate. Claim and email enqueue commit together, including when API and worker race for the same subscription.
 
-The API still needs `ORDER_NOTIFICATION_EMAILS` for order notification recipients, `CONTACT_NOTIFICATION_EMAIL`, and `STOREFRONT_PUBLIC_BASE_URL` for links and templates. Sender and Reply-To settings may be provided on the API to override worker defaults; SES credentials are used only by the worker. Contact messages always preserve the customer's validated Reply-To address.
+The API still needs `ORDER_NOTIFICATION_EMAILS` for order notification recipients, `CONTACT_NOTIFICATION_EMAIL`, and `STOREFRONT_PUBLIC_BASE_URL` for links and templates. Contact messages always preserve the customer's validated Reply-To address.
 
 The worker processes both ordinary emails and saved privacy notifications. It applies database migrations before starting consumers, so it can start without the API; an active API migration is allowed to finish under the shared advisory lock. Both Docker images include the migration files. On shutdown the email consumer stops claiming work, waits up to 20 seconds for active network work, and closes before the worker's database pool. Without SES configuration it logs a warning; expiration, cleanup, queue warnings and database heartbeat continue to run.
 
@@ -52,4 +52,4 @@ SES `Delivery` confirms acceptance by the recipient mail server, not placement i
 
 The final dependency review updates the email HTTP request stack to `body-parser` 2.4.0, `proxy-addr` 2.0.8 and `qs` 6.17.0, with Zod 4.6.7 as the minimum workspace validation version. The storefront router is separately updated to 7.18.5. These stay within existing major versions. A production-dependency audit still reports nine backend packages (five high, four moderate); this email review is not a clean security audit of the whole platform. General media/upload, realtime and document-tool advisories remain a separate security backlog. No forced major upgrades or application tests were run.
 
-The SES sandbox is intentional for current testing and must remain enabled. Arbitrary unverified recipients remain blocked by AWS; these code changes do not request production access. No synthetic messages are sent as part of deployment.
+The email consumer checks SES production access and sending status before claiming messages. It checks at most once a minute and leaves the queue untouched for sending when SES is in the sandbox or the account check fails. The sender IAM principal needs `ses:GetAccount` in addition to its existing send and feedback permissions. Message and link expiration still apply while waiting.

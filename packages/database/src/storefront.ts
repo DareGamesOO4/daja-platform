@@ -1842,6 +1842,7 @@ interface OrderRow {
   display_id: string;
   customer_id: string | null;
   customer_email: string | null;
+  customer_email_disabled: boolean;
   customer_phone: string | null;
   customer_payload: Record<string, unknown>;
   shipping_payload: Record<string, unknown>;
@@ -1978,6 +1979,7 @@ function serializeOrder(row: OrderRow) {
     version: row.version,
     displayId: row.display_id,
     customer: row.customer_payload,
+    customerEmailDisabled: row.customer_email_disabled,
     items: row.items_payload,
     subtotal: row.subtotal_amount / 100,
     discountAmount: row.discount_amount / 100,

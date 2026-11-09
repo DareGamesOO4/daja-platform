@@ -11,6 +11,7 @@ interface OrderEmailPayload {
   version?: number;
   displayId: string;
   customer: Record<string, unknown>;
+  customerEmailDisabled?: boolean;
   items: unknown[];
   subtotal: number;
   discountAmount: number;
@@ -59,7 +60,7 @@ export class OrderEmailService {
     const emails: Promise<void>[] = admin.recipients.length
       ? [this.delivery.send({ ...admin, deduplicationKey: `order-created:${eventId}:admin` }, client)] : [];
     const customerEmail = customerValue(order.customer, 'email');
-    if (customerEmail) {
+    if (customerEmail && !order.customerEmailDisabled) {
       emails.push(this.delivery.send({ ...this.customerConfirmationEmail(order, customerEmail),
         deduplicationKey: `order-created:${eventId}:customer` }, client));
     }
@@ -67,6 +68,7 @@ export class OrderEmailService {
   }
 
   async sendStatusUpdate(order: OrderEmailPayload, client?: DbClient): Promise<void> {
+    if (order.customerEmailDisabled) return;
     const customerEmail = customerValue(order.customer, 'email');
     if (!customerEmail) return;
     await this.delivery.send({ ...this.customerStatusEmail(order, customerEmail),

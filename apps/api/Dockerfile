@@ -25,6 +25,8 @@ COPY --from=build --chown=daja:daja /app/node_modules ./node_modules
 COPY --from=build --chown=daja:daja /app/package.json ./package.json
 COPY --from=build --chown=daja:daja /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build --chown=daja:daja /app/apps/api/dist ./apps/api/dist
+COPY --from=build --chown=daja:daja /app/apps/worker/package.json ./apps/worker/package.json
+COPY --from=build --chown=daja:daja /app/apps/worker/dist/email-worker.js ./apps/worker/dist/email-worker.js
 COPY --from=build --chown=daja:daja /app/packages ./packages
 COPY --from=build --chown=daja:daja /app/migrations ./migrations
 USER daja

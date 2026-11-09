@@ -13,6 +13,7 @@
     { "path": "../../packages/observability" },
     { "path": "../../packages/security" },
     { "path": "../../packages/shared" },
-    { "path": "../../packages/validation" }
+    { "path": "../../packages/validation" },
+    { "path": "../worker" }
   ]
 }

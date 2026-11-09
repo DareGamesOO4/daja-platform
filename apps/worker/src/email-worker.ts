@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { GetAccountCommand, SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import {
   SQSClient,
   GetQueueUrlCommand,
@@ -26,6 +26,8 @@ export class EmailWorker {
   private dispatching = false;
   private readingFeedback = false;
   private maintenanceAt = 0;
+  private checkAccountAt = 0;
+  private productionSendingEnabled = false;
   private stopping = false;
   private started = false;
   private dispatchTask: Promise<void> | undefined;
@@ -115,6 +117,30 @@ export class EmailWorker {
     };
   }
 
+  private sesClient(): SESv2Client {
+    return this.client ??= new SESv2Client({
+      region: this.config.SES_REGION,
+      credentials: this.credentials(),
+      // The outbox owns send retries after an ambiguous response.
+      maxAttempts: 1
+    });
+  }
+
+  private async canSendInProduction(): Promise<boolean> {
+    if (Date.now() < this.checkAccountAt) return this.productionSendingEnabled;
+    this.checkAccountAt = Date.now() + 60_000;
+    this.productionSendingEnabled = false;
+    try {
+      const account = await this.sesClient().send(new GetAccountCommand({}), {
+        abortSignal: this.requestSignal()
+      });
+      this.productionSendingEnabled = account.ProductionAccessEnabled === true && account.SendingEnabled === true;
+    } catch (error) {
+      this.logger.warn({ errorName: (error as Error).name }, 'Could not read SES production access; email delivery remains queued');
+    }
+    return this.productionSendingEnabled;
+  }
+
   private async dispatch(): Promise<void> {
     if (this.dispatching) return;
     this.dispatching = true;
@@ -167,7 +193,8 @@ export class EmailWorker {
         this.maintenanceAt = Date.now() + 60_000;
       }
       if (!this.isConfigured() || this.stopping) return;
-      // This shared permit also limits multiple worker replicas to the sandbox rate.
+      if (!(await this.canSendInProduction()) || this.stopping) return;
+      // Keep the existing shared limit across worker replicas.
       const permit = await this.database.pool.query(
         `INSERT INTO email_sender_limits (region, next_attempt_at)
         VALUES ($1, now() + interval '1100 milliseconds') ON CONFLICT (region) DO UPDATE
@@ -205,13 +232,7 @@ export class EmailWorker {
     let accepted = false;
     let messageId: string | undefined;
     try {
-      this.client ??= new SESv2Client({
-        region: this.config.SES_REGION,
-        credentials: this.credentials(),
-        // The outbox owns retries; avoid an additional SDK send retry after an ambiguous response.
-        maxAttempts: 1
-      });
-      const response = await this.client.send(
+      const response = await this.sesClient().send(
         new SendEmailCommand({
           FromEmailAddress: this.sender(input),
           Destination: { ToAddresses: [row.recipient] },

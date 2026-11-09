@@ -6,6 +6,7 @@ import { NestFactory } from '@nestjs/core';
 import { loadConfig } from '@daja/config';
 import { type Database } from '@daja/database';
 import { createLogger } from '@daja/observability';
+import { EmailWorker } from '@daja/worker/email-worker';
 import { DATABASE } from './tokens.js';
 import { startSupplierChecks } from './supplier-checks.js';
 
@@ -35,5 +36,27 @@ server.keepAliveTimeout = 5_000;
 server.maxHeadersCount = 60;
 
 await app.listen(config.PORT);
-startSupplierChecks(app.get<Database>(DATABASE), logger);
+const database = app.get<Database>(DATABASE);
+const stopSupplierChecks = startSupplierChecks(database, logger);
+if (config.NODE_ENV === 'production') {
+  const emailWorker = new EmailWorker(config, logger, database);
+  emailWorker.start();
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopSupplierChecks();
+    void (async () => {
+      await emailWorker.close();
+      await app.close();
+      await database.close();
+      process.exit(0);
+    })().catch((error: unknown) => {
+      logger.error({ err: error }, 'API shutdown failed');
+      process.exit(1);
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+}
 logger.info({ port: config.PORT }, 'DAJA API listening');
