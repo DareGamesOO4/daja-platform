@@ -102,10 +102,7 @@ export async function supplierLinkActions(
             [id, link.provider_code === 'linkel' && input.bulk === true]
           );
       } else if (input.action === 'disable') {
-        if (link.provider_code === 'linkel') {
-          status = 'skipped';
-          reason = 'Linkel linkovi ostaju u sedmodnevnoj proveri';
-        } else if (!link.checks_enabled) {
+        if (!link.checks_enabled) {
           status = 'skipped';
           reason = 'Link je već isključen';
         } else
