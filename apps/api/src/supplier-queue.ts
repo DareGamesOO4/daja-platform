@@ -808,8 +808,10 @@ async function finishLegacy(
 export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
   return supplierTransaction(pool, async client => {
     await expireSupplierLeases(client);
-    const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean }>(
-      `SELECT (probe_requested_at IS NOT NULL OR COALESCE(paused_until<=now(), false)) AND COALESCE(manual_pause_mode,'')<>'all' AS probe,
+    const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean; manual_turn: boolean }>(
+      `SELECT (probe_requested_at IS NOT NULL OR
+          (COALESCE(paused_until<=now(), false) AND COALESCE(manual_pause_mode,'')<>'all')) AS probe,
+        (last_manual_claim_at IS NULL OR last_manual_claim_at<=now()-interval '780 seconds') AS manual_turn,
         (manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
         (COALESCE(manual_pause_mode,'')<>'all' AND paused_until IS NULL) AS initial
        FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_request_at<=now()
@@ -830,10 +832,12 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
         AND l.url IS NOT NULL AND p.deleted_at IS NULL
         AND ($2 AND (l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
           OR $3 AND l.initial_requested_at IS NOT NULL)
-       ORDER BY CASE WHEN $2 AND l.confirmation_due_at<=now() THEN 0 WHEN $2 AND l.next_check_at<=now() THEN 1
-         WHEN l.manual_requested_at IS NOT NULL THEN 2 ELSE 3 END,
+       ORDER BY CASE WHEN $2 AND l.confirmation_due_at<=now() THEN 0
+         WHEN $2 AND $4 AND l.manual_requested_at IS NOT NULL THEN 1
+         WHEN $2 AND l.next_check_at<=now() THEN 2
+         WHEN $2 AND l.manual_requested_at IS NOT NULL THEN 3 ELSE 4 END,
         LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
-      [organizationId, provider.automatic, provider.initial]
+      [organizationId, provider.automatic, provider.initial, provider.manual_turn]
     )).rows[0];
     if (!link) return null;
     const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at ? 'manual'
@@ -845,15 +849,16 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
     await client.query(
       `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
     );
-    await reserveLinkelSlot(client);
+    await reserveLinkelSlot(client, link.manual_requested_at !== null);
     return { token: lease.token, kind: 'product' as const, url: link.url };
   });
 }
 
-async function reserveLinkelSlot(client: QueryClient) {
+async function reserveLinkelSlot(client: QueryClient, manual = false) {
   await client.query(`UPDATE supplier_provider_checks
-    SET next_request_at=now()+interval '390 seconds'
-    WHERE provider_code='linkel'`);
+    SET next_request_at=now()+interval '390 seconds',
+      last_manual_claim_at=CASE WHEN $1 THEN now() ELSE last_manual_claim_at END
+    WHERE provider_code='linkel'`, [manual]);
 }
 
 export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: string) {
@@ -862,14 +867,17 @@ export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: stri
     next_at: Date | null;
     wait_ms: number;
   }>(`SELECT CASE
-      WHEN p.manual_pause_mode='all' THEN 'paused'
-      WHEN p.paused_until IS NOT NULL OR p.probe_requested_at IS NOT NULL THEN 'protection'
       WHEN lease.expires_at IS NOT NULL THEN 'running'
+      WHEN p.probe_requested_at IS NOT NULL THEN 'protection'
+      WHEN p.manual_pause_mode='all' THEN 'paused'
+      WHEN p.paused_until IS NOT NULL THEN 'protection'
       WHEN pending.due_at IS NOT NULL THEN 'waiting'
       WHEN p.manual_pause_mode IS NOT NULL THEN 'paused'
       ELSE 'empty' END AS state,
-    CASE WHEN p.manual_pause_mode='all' THEN p.manual_pause_until
-      WHEN p.paused_until IS NOT NULL OR p.probe_requested_at IS NOT NULL
+    CASE WHEN lease.expires_at IS NOT NULL THEN NULL
+      WHEN p.probe_requested_at IS NOT NULL THEN p.next_request_at
+      WHEN p.manual_pause_mode='all' THEN p.manual_pause_until
+      WHEN p.paused_until IS NOT NULL
         THEN GREATEST(p.next_request_at,CASE WHEN p.probe_requested_at IS NULL THEN p.paused_until END)
       WHEN lease.expires_at IS NULL AND pending.due_at IS NOT NULL THEN GREATEST(p.next_request_at,pending.due_at)
       WHEN p.manual_pause_mode IS NOT NULL THEN p.manual_pause_until END AS next_at,
