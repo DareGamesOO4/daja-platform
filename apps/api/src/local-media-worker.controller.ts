@@ -78,10 +78,12 @@ export class LocalMediaWorkerController {
   }
 
   @Post('linkel/claim')
-  async claimLinkel(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+  async claimLinkel(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
     const organizationId = this.authenticate(request);
     response.setHeader('Cache-Control', 'no-store');
-    const job = await claimLocalLinkel(this.db.pool, organizationId);
+    const claim = z.object({ workerId: z.string().regex(/^[a-f0-9]{64}$/).optional() }).safeParse(body ?? {});
+    if (!claim.success) throw new ValidationFailedError('Invalid Linkel worker identity');
+    const job = await claimLocalLinkel(this.db.pool, organizationId, claim.data.workerId);
     // A status lookup must never prevent delivery of an already reserved lease.
     if (job) {
       response.setHeader('X-Daja-Linkel-Wait-Ms', '3000');

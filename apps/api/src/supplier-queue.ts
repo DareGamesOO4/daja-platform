@@ -807,9 +807,17 @@ async function finishLegacy(
   }
 }
 
-export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
+export async function claimLocalLinkel(pool: pg.Pool, organizationId: string, workerId?: string) {
   return supplierTransaction(pool, async client => {
     await expireSupplierLeases(client);
+    if (workerId) {
+      await client.query(`INSERT INTO supplier_linkel_workers(worker_id) VALUES ($1)
+        ON CONFLICT (worker_id) DO UPDATE SET last_seen_at=now()`, [workerId]);
+    }
+    const active = (await client.query<{ worker_id: string | null }>(
+      "SELECT worker_id FROM supplier_check_leases WHERE provider_code='linkel'"
+    )).rows;
+    if (active.some(lease => !lease.worker_id || lease.worker_id === workerId) || active.length >= 2) return null;
     const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean; manual_turn: boolean; bulk: boolean }>(
       `SELECT (next_request_at<=now() AND (probe_requested_at IS NOT NULL OR
           (COALESCE(paused_until<=now(), false) AND COALESCE(manual_pause_mode,'')<>'all'))) AS probe,
@@ -817,11 +825,11 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
         (next_request_at<=now() AND manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
         (next_request_at<=now() AND COALESCE(manual_pause_mode,'')<>'all' AND paused_until IS NULL) AS initial,
         (manual_pause_mode IS NULL AND paused_until IS NULL AND probe_requested_at IS NULL) AS bulk
-       FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_bulk_request_at<=now()
-       AND NOT EXISTS (SELECT 1 FROM supplier_check_leases WHERE provider_code=p.provider_code)`
+       FROM supplier_provider_checks WHERE provider_code='linkel' AND next_bulk_request_at<=now()`
     )).rows[0];
     if (!provider || (!provider.probe && !provider.initial && !provider.bulk)) return null;
     if (provider.probe) {
+      if (active.length) return null;
       const lease = (await client.query<Lease>(
         "INSERT INTO supplier_check_leases(provider_code,kind) VALUES ('linkel','health') RETURNING *"
       )).rows[0]!;
@@ -842,12 +850,30 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
         LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
       [organizationId, provider.automatic, provider.initial, provider.manual_turn]
     )).rows[0];
-    // Use spare time for bulk work, while due regular and confirmation jobs keep their slots.
-    const bulk = !regular && provider.bulk ? (await client.query<QueueLink>(
+    if (regular && active.length) return null;
+    let bulkTurn = false;
+    if (!regular && provider.bulk) {
+      // Alternate between the two online computers, even when one finishes faster.
+      const turn = (await client.query<{ worker_id: string; ready: boolean }>(`
+        SELECT worker_id, last_bulk_claim_at IS NULL OR last_bulk_claim_at<=now()-interval '3 seconds' AS ready
+        FROM (
+          SELECT w.* FROM supplier_linkel_workers w
+          WHERE w.last_seen_at>now()-interval '45 seconds' OR EXISTS (
+            SELECT 1 FROM supplier_check_leases l WHERE l.provider_code='linkel' AND l.worker_id=w.worker_id
+          )
+          ORDER BY w.worker_id LIMIT 2
+        ) online
+        ORDER BY last_bulk_claim_at NULLS FIRST, worker_id LIMIT 1`
+      )).rows[0];
+      bulkTurn = turn ? turn.worker_id === workerId && turn.ready : !workerId && !active.length;
+    }
+    // Due regular work drains the active bulk leases before another bulk job starts.
+    const bulk = bulkTurn ? (await client.query<QueueLink>(
       `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
          AND l.url IS NOT NULL AND p.deleted_at IS NULL AND l.bulk_requested_at IS NOT NULL
          AND l.next_check_at>now() AND (l.confirmation_due_at IS NULL OR l.confirmation_due_at>now())
+         AND NOT EXISTS (SELECT 1 FROM supplier_check_leases active WHERE active.link_id=l.id)
        ORDER BY l.bulk_requested_at,l.id LIMIT 1`, [organizationId]
     )).rows[0] : undefined;
     const link = regular ?? bulk;
@@ -855,13 +881,17 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
     const kind = link.bulk_requested_at ? 'bulk' : link.initial_requested_at ? 'initial'
       : link.manual_requested_at ? 'manual' : regular?.confirmation_due ? 'confirmation' : 'regular';
     const lease = (await client.query<Lease>(
-      `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind)
-       VALUES ('linkel',$1,$2,$3) RETURNING *`, [link.id, link.generation, kind]
+      `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind,worker_id)
+       VALUES ('linkel',$1,$2,$3,$4) RETURNING *`, [link.id, link.generation, kind, bulk ? workerId ?? null : null]
     )).rows[0]!;
     await client.query(
       `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL,bulk_requested_at=NULL WHERE id=$1`, [link.id]
     );
-    await reserveLinkelSlot(client, link.manual_requested_at !== null, Boolean(bulk));
+    if (bulk && workerId) {
+      await client.query('UPDATE supplier_linkel_workers SET last_bulk_claim_at=clock_timestamp() WHERE worker_id=$1', [workerId]);
+    } else {
+      await reserveLinkelSlot(client, link.manual_requested_at !== null, Boolean(bulk));
+    }
     return { token: lease.token, kind: 'product' as const, url: link.url };
   });
 }
@@ -913,7 +943,7 @@ export async function localLinkelQueueStatus(pool: pg.Pool, organizationId: stri
       FROM supplier_product_links l JOIN products product ON product.id=l.product_id
         AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
       WHERE l.organization_id=$1 AND l.provider_code=p.provider_code AND l.checks_enabled AND NOT l.removed AND l.url IS NOT NULL
-    ) pending ON lease.expires_at IS NULL AND p.paused_until IS NULL AND p.probe_requested_at IS NULL
+    ) pending ON p.paused_until IS NULL AND p.probe_requested_at IS NULL
     WHERE p.provider_code='linkel'`, [organizationId])).rows[0];
   return row ?? { state: 'empty' as const, next_at: null, wait_ms: 30000 };
 }

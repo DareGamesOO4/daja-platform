@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 
+const workerId = createHash('sha256').update(hostname().toLowerCase()).digest('hex');
 const home = 'https://www.linkel.rs/sr/';
 const jobSchema = z.object({ token: z.uuid(), kind: z.enum(['health', 'product']), url: z.url() });
 const failed = { status: 'error', accessFailed: true } as const;
@@ -96,7 +99,7 @@ export async function runLocalLinkel(
   while (!shutdown.aborted) {
     let wait = 15_000;
     try {
-      const response = await api('linkel/claim', {}, shutdown);
+      const response = await api('linkel/claim', { workerId }, shutdown);
       const serverWait = Number(response.headers.get('X-Daja-Linkel-Wait-Ms'));
       if (Number.isFinite(serverWait) && serverWait >= 3_000 && serverWait <= 400_000) wait = serverWait;
       if (response.status === 204) {
