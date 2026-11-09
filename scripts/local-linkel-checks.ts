@@ -5,7 +5,7 @@ import { z } from 'zod';
 
 const workerId = createHash('sha256').update(hostname().toLowerCase()).digest('hex');
 const home = 'https://www.linkel.rs/sr/';
-const jobSchema = z.object({ token: z.uuid(), kind: z.enum(['health', 'product']), url: z.url() });
+const jobSchema = z.object({ token: z.uuid(), kind: z.enum(['health', 'product']), url: z.url(), stockOnly: z.boolean().default(false) });
 const failed = { status: 'error', accessFailed: true } as const;
 type Api = (route: string, payload: unknown, signal: AbortSignal) => Promise<Response>;
 
@@ -66,13 +66,15 @@ function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   const priceAmount = amount ? Number(amount) : NaN;
   const availability = (page.html.match(/itemprop=["']availability["'][^>]*schema\.org\/(InStock|OutOfStock)\b/i)?.[1] ??
     page.html.match(/"availability"\s*:\s*"https?:\/\/schema\.org\/(InStock|OutOfStock)"/i)?.[1])?.toLowerCase();
-  const visible = page.html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ');
+  // The main form contains this product's stock label. Related products can have different stock and prices.
+  const form = page.html.match(/<form\b[^>]*\bid=["']add-to-cart-or-refresh["'][^>]*>([\s\S]*?)<\/form>/i)?.[1] ?? '';
+  const visible = form.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ');
   const stockStatus = availability === 'instock' ? 'in_stock' : availability === 'outofstock' ? 'out_of_stock'
     : /(?:nije|nema) na stanju/i.test(visible) ? 'out_of_stock' : /na stanju/i.test(visible) ? 'in_stock' : null;
-  if (currency.toUpperCase() !== 'RSD' || !Number.isFinite(priceAmount) || priceAmount < 0 || priceAmount > 100_000_000) {
-    return { status: 'error', accessFailed: false } as const;
-  }
-  return { status: 'available', stockStatus, priceAmount, priceCurrency: 'RSD' } as const;
+  const validPrice = currency.toUpperCase() === 'RSD' &&
+    Number.isFinite(priceAmount) && priceAmount >= 0 && priceAmount <= 100_000_000;
+  if (!validPrice && !stockStatus) return { status: 'error', accessFailed: false } as const;
+  return { status: 'available', stockStatus, priceAmount: validPrice ? priceAmount : null, priceCurrency: 'RSD' } as const;
 }
 
 const scheduleTime = new Intl.DateTimeFormat('sr-Latn-RS', {
@@ -115,7 +117,10 @@ export async function runLocalLinkel(
           result.blocked = blocked(page);
           if (job.kind === 'health') result.homeHealthy = isHome(page);
           else {
-            result.outcome = readProduct(page);
+            const outcome = readProduct(page);
+            result.outcome = outcome.status === 'available' && outcome.priceAmount === null && !job.stockOnly
+              ? { status: 'error', accessFailed: false }
+              : outcome;
             if (result.outcome.status === 'missing') {
               const homepage = isHome(page) ? page : await readLinkel(home, shutdown);
               result.homeHealthy = isHome(homepage);

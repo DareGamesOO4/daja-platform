@@ -315,17 +315,12 @@ internal sealed class Dashboard : Form
 
     private void ReadWorkerStatus()
     {
-        renderState.Text = "Render · stanje nije dostupno";
-        linkelState.Text = "Linkel · stanje nije dostupno";
-        pauseState.Text = "";
         var userConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-user.json");
         var activeStatusFile = File.Exists(userConfig)
             ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker-status.json") : statusFile;
         if (!File.Exists(userConfig) && !Directory.Exists(Path.GetDirectoryName(statusFile)))
         {
-            progress.Value = 0;
-            state.Text = "Čeka povezivanje sa DAJA serverom";
-            detail.Text = "Lokalna obrada je dostupna iz ovog prozora.";
+            ShowUnavailableStatus("Čeka povezivanje sa DAJA serverom", "Lokalna obrada je dostupna iz ovog prozora.");
             return;
         }
         try
@@ -337,43 +332,67 @@ internal sealed class Dashboard : Form
                 DateTimeOffset updated;
                 if (!DateTimeOffset.TryParse(snapshot.updated, out updated) || DateTimeOffset.UtcNow - updated > TimeSpan.FromSeconds(30))
                 {
-                    progress.Value = 0;
-                    state.Text = "Pozadinski worker nije aktivan";
-                    detail.Text = "Nema svežeg statusa sa ovog računara.";
+                    ShowUnavailableStatus("Pozadinski worker nije aktivan", "Nema svežeg statusa sa ovog računara.");
                     return;
                 }
-                state.Text = snapshot.phase == "working" ? "Obrada je u toku" :
+                var phaseText = snapshot.phase == "working" ? "Obrada je u toku" :
                     snapshot.phase == "local-paused" ? "Obrada pauzirana" :
                     snapshot.phase == "ready" ? "Povezan · čeka slike" :
                     snapshot.phase == "paused" ? "Povezan · pauziran iz admina" :
                     snapshot.phase == "error" ? "Veza ili obrada imaju problem" : "Povezivanje…";
                 DateTimeOffset completed;
-                linkelState.Text = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno") +
+                var linkelText = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno") +
                     (String.IsNullOrEmpty(snapshot.linkelLast) ? "" : Environment.NewLine + "Poslednja lokalna provera · " + snapshot.linkelLast);
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
-                detail.Text = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
+                var detailText = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
                     " · " + (snapshot.sourceWidth.HasValue ? snapshot.sourceWidth + "×" + snapshot.sourceHeight + " px · " : "") +
                     (snapshot.activity ?? "Obrada slike") + " · " + snapshot.job :
                     snapshot.phase == "error" ? snapshot.error : last;
+                var renderText = "Render · stanje nije dostupno";
                 if (snapshot.render != null)
                 {
                     DateTimeOffset failure;
                     DateTimeOffset success;
                     var failed = DateTimeOffset.TryParse(snapshot.render.renderErrorAt, out failure) &&
                         (!DateTimeOffset.TryParse(snapshot.render.renderCompletedAt, out success) || failure > success);
-                    renderState.Text = !snapshot.render.renderOnline ? "Render · nema svežeg signala" :
+                    renderText = !snapshot.render.renderOnline ? "Render · nema svežeg signala" :
                         failed ? "Render · poslednja obrada prijavila grešku" :
                         "Render · rezerva 03:00–07:00 (posle 7 dana)";
                 }
-                progress.Value = Math.Max(0, Math.Min(100, snapshot.progress));
-                pauseState.Text = snapshot.phase == "local-paused" ? (snapshot.pauseUntil == null ? "Pauzirano dok ne nastaviš" : "Pauzirano do " + DateTimeOffset.Parse(snapshot.pauseUntil).ToLocalTime().ToString("t")) : "";
+                DateTimeOffset pauseUntil;
+                var pauseText = snapshot.phase != "local-paused" ? "" :
+                    DateTimeOffset.TryParse(snapshot.pauseUntil, out pauseUntil)
+                    ? "Pauzirano do " + pauseUntil.ToLocalTime().ToString("t") : "Pauzirano dok ne nastaviš";
+                ShowStatus(phaseText, detailText, renderText, linkelText, pauseText, snapshot.progress);
             }
         }
-        catch (IOException) { progress.Value = 0; state.Text = "Čeka pokretanje workera"; detail.Text = "Status će se pojaviti kada worker krene."; }
-        catch (UnauthorizedAccessException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Proveri dozvole Windows workera."; }
-        catch (InvalidOperationException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
-        catch (ArgumentException) { progress.Value = 0; state.Text = "Status nije dostupan"; detail.Text = "Sačekaj sledeće osvežavanje."; }
+        catch (IOException) { ShowUnavailableStatus("Čeka pokretanje workera", "Status će se pojaviti kada worker krene."); }
+        catch (UnauthorizedAccessException) { ShowUnavailableStatus("Status nije dostupan", "Proveri dozvole Windows workera."); }
+        catch (InvalidOperationException) { ShowUnavailableStatus("Status nije dostupan", "Sačekaj sledeće osvežavanje."); }
+        catch (ArgumentException) { ShowUnavailableStatus("Status nije dostupan", "Sačekaj sledeće osvežavanje."); }
+    }
+
+    private void ShowUnavailableStatus(string phaseText, string detailText)
+    {
+        ShowStatus(phaseText, detailText, "Render · stanje nije dostupno", "Linkel · stanje nije dostupno", "", 0);
+    }
+
+    private void ShowStatus(string phaseText, string detailText, string renderText, string linkelText, string pauseText, int percent)
+    {
+        SetStatusText(state, phaseText);
+        SetStatusText(detail, detailText);
+        SetStatusText(renderState, renderText);
+        SetStatusText(linkelState, linkelText);
+        SetStatusText(pauseState, pauseText);
+        var clamped = Math.Max(0, Math.Min(100, percent));
+        if (progress.Value != clamped) progress.Value = clamped;
+    }
+
+    private static void SetStatusText(Label label, string value)
+    {
+        var text = value ?? "";
+        if (label.Text != text) label.Text = text;
     }
 
     private static string Quote(string value) { return "\"" + value + "\""; }

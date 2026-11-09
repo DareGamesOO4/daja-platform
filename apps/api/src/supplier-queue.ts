@@ -706,7 +706,9 @@ async function finishLegacy(
       await client.query(
         `UPDATE supplier_product_links l SET
           check_status='available',stock_status=COALESCE($6::text,l.stock_status),
-          price_amount=$3,price_currency=$4,last_error=NULL,missing_count=0,
+          price_amount=COALESCE($3::numeric,l.price_amount),
+          price_currency=CASE WHEN $3 IS NULL THEN l.price_currency ELSE $4::text END,
+          last_error=NULL,missing_count=0,
           last_checked_at=now(),last_seen_at=now(),next_check_at=$5,
           negative_count=CASE WHEN $6 IS NOT NULL THEN 0
             WHEN $2::text='out_of_stock' THEN 1 ELSE l.negative_count END,
@@ -719,7 +721,8 @@ async function finishLegacy(
             THEN CASE WHEN l.negative_count>0 AND l.confirmation_due_at>now()
               THEN l.confirmation_due_at ELSE now()+interval '24 hours' END END,
           last_good_result=jsonb_build_object('checkedAt',now(),'stockStatus',COALESCE($6,l.stock_status),
-            'priceAmount',$3::numeric,'priceCurrency',$4::text)
+            'priceAmount',COALESCE($3,l.price_amount),
+            'priceCurrency',CASE WHEN $3 IS NULL THEN l.price_currency ELSE $4 END)
         WHERE l.id=$1`,
         [row.id, stockStatus, priceAmount ?? null, priceCurrency ?? null, next, confirmedStock]
       );
@@ -747,7 +750,9 @@ async function finishLegacy(
       const reason =
         outcome.status === 'missing'
           ? 'Stranica proizvoda ne postoji'
-          : 'Pristup sajtu ili čitanje proizvoda nije uspelo';
+          : isLinkel && outcome.accessFailed === false
+            ? 'Linkel stranica ne prikazuje cenu ni potvrđeno stanje'
+            : 'Pristup sajtu ili čitanje proizvoda nije uspelo';
       const eligible =
         !row.last_checked_at || Date.now() - new Date(row.last_checked_at).getTime() >= 86400000;
       const count =

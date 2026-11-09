@@ -92,7 +92,7 @@ export async function supplierLinkActions(
         } else if (link.running || link.manual_requested_at || link.bulk_requested_at || link.initial_requested_at) {
           status = 'already_queued';
           reason = 'Provera već radi ili čeka';
-        } else if (link.provider_code === 'linkel' && link.recently_checked) {
+        } else if (link.provider_code === 'linkel' && link.recently_checked && !link.last_error) {
           status = 'skipped';
           reason = 'Linkel je već proveren u poslednjih sat vremena';
         } else

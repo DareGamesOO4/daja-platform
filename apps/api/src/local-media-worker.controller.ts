@@ -87,7 +87,7 @@ export class LocalMediaWorkerController {
     // A status lookup must never prevent delivery of an already reserved lease.
     if (job) {
       response.setHeader('X-Daja-Linkel-Wait-Ms', '3000');
-      return job;
+      return { ...job, stockOnly: true };
     }
     const queue = await localLinkelQueueStatus(this.db.pool, organizationId);
     response.setHeader('X-Daja-Linkel-Wait-Ms', String(queue.wait_ms));
@@ -110,12 +110,15 @@ export class LocalMediaWorkerController {
       duration: z.number().int().min(0).max(90_000),
       outcome: z.discriminatedUnion('status', [
         z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']).nullable(),
-          priceAmount: z.number().min(0).max(100_000_000), priceCurrency: z.literal('RSD') }),
+          priceAmount: z.number().min(0).max(100_000_000).nullable(), priceCurrency: z.literal('RSD') }),
         z.object({ status: z.literal('missing') }),
         z.object({ status: z.literal('error'), accessFailed: z.boolean() })
       ])
     }).safeParse(body);
-    if (!parsed.success) throw new ValidationFailedError('Invalid Linkel result');
+    if (!parsed.success || (parsed.data.outcome.status === 'available'
+      && parsed.data.outcome.priceAmount === null && parsed.data.outcome.stockStatus === null)) {
+      throw new ValidationFailedError('Invalid Linkel result');
+    }
     const { token, outcome, homeHealthy, blocked, duration } = parsed.data;
     await completeLocalLinkel(this.db, organizationId, token, outcome, homeHealthy, blocked, duration);
     response.status(204);
