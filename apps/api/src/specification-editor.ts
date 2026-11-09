@@ -8,7 +8,7 @@ const field = z.object({ specId: z.string().uuid(), groupId: z.string().max(80),
 export const specificationConfigurationSchema = z.object({ groups: z.array(z.object({ id: z.string().min(1).max(80), name: z.string().trim().min(1).max(100) })).max(40), fields: z.array(field).max(400) });
 export const specificationEditorRequestSchema = z.object({
   action: z.enum(['get', 'configure', 'option']), departmentId: z.string().uuid(), brand: z.string().max(240).optional(),
-  // Product entry omits usage statistics, but keeps all applicable rules.
+  // Callers can skip usage statistics while keeping all applicable rules.
   includeUsage: z.boolean().optional().default(true),
   specs: z.record(z.string(), z.string()).optional(), version: z.number().int().min(0).optional(),
   configuration: specificationConfigurationSchema.optional(), specId: z.string().uuid().optional(),
@@ -23,14 +23,16 @@ type EditorResult = {
   ranking: Record<string, Record<string, number>>;
   usageCounts: Record<string, Record<string, number>>;
   brands: { id: string; name: string }[];
+  cacheTtlMs?: number;
 };
 type EditorCacheEntry = { expiresAt: number; data?: EditorResult; pending?: Promise<EditorResult> };
 
 // The editor response is shared by every product form in the same department.
 // Its ranking needs a scan of the department's variants, so coalesce concurrent
-// reads and retain it briefly. Mutations below invalidate the entry immediately.
+// reads and retain the ranking for two hours. Taxonomy changes invalidate it.
 const editorReadCache = new Map<string, EditorCacheEntry>();
 const editorReadCacheTtlMs = 45_000;
+const editorUsageCacheTtlMs = 2 * 60 * 60_000;
 const editorReadCacheMaxEntries = 32;
 
 function editorCacheKey(organizationId: string, departmentId: string, includeUsage: boolean): string {
@@ -42,8 +44,8 @@ export function invalidateSpecificationEditorCache(organizationId: string, depar
   for (const key of editorReadCache.keys()) if (key.startsWith(prefix)) editorReadCache.delete(key);
 }
 
-function copyEditorResult(result: EditorResult): EditorResult {
-  return structuredClone(result);
+function copyEditorResult(result: EditorResult, expiresAt: number): EditorResult {
+  return { ...structuredClone(result), cacheTtlMs: Math.max(0, expiresAt - Date.now()) };
 }
 const norm = (v: string) => v.trim().toLocaleLowerCase('sr-RS').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[-\s]+/g, '_');
 const groups = [
@@ -97,8 +99,11 @@ export async function specificationEditor(database: Database, organizationId: st
   }
 
   const cached = editorReadCache.get(key);
-  if (cached?.data && cached.expiresAt > Date.now()) return copyEditorResult(cached.data);
-  if (cached?.pending) return copyEditorResult(await cached.pending);
+  if (cached?.data && cached.expiresAt > Date.now()) return copyEditorResult(cached.data, cached.expiresAt);
+  if (cached?.pending) {
+    const result = await cached.pending;
+    return copyEditorResult(result, cached.expiresAt);
+  }
 
   editorReadCache.delete(key);
   if (editorReadCache.size >= editorReadCacheMaxEntries) {
@@ -106,17 +111,20 @@ export async function specificationEditor(database: Database, organizationId: st
     if (!oldest.done) editorReadCache.delete(oldest.value);
   }
   const pending = specificationEditorNow(database, organizationId, input);
-  editorReadCache.set(key, { expiresAt: 0, pending });
+  const entry: EditorCacheEntry = { expiresAt: 0, pending };
+  editorReadCache.set(key, entry);
   try {
     const result = await pending;
     // A save may have invalidated this read while its database query was in
     // flight. Do not put that older snapshot back into the cache.
-    if (editorReadCache.get(key)?.pending === pending)
-      editorReadCache.set(key, { expiresAt: Date.now() + editorReadCacheTtlMs, data: result });
-    return copyEditorResult(result);
+    if (editorReadCache.get(key) === entry) {
+      entry.expiresAt = Date.now() + (input.includeUsage ? editorUsageCacheTtlMs : editorReadCacheTtlMs);
+      entry.data = result;
+      delete entry.pending;
+    }
+    return copyEditorResult(result, entry.expiresAt);
   } catch (error) {
-    const current = editorReadCache.get(key);
-    if (current?.pending === pending) editorReadCache.delete(key);
+    if (editorReadCache.get(key) === entry) editorReadCache.delete(key);
     throw error;
   }
 }
