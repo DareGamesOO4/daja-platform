@@ -76,10 +76,11 @@ export async function runLocalLinkel(api: Api, shutdown: AbortSignal, setStatus:
     let wait = 15_000;
     try {
       const response = await api('linkel/claim', {}, shutdown);
+      const serverWait = Number(response.headers.get('X-Daja-Linkel-Wait-Ms'));
+      if (Number.isFinite(serverWait) && serverWait >= 10_000 && serverWait <= 400_000) wait = serverWait;
       if (response.status === 204) {
         setStatus('Čeka sledeći termin');
       } else {
-        wait = 400_000;
         const payload = await response.json();
         const job = jobSchema.parse(payload?.data ?? payload);
         setStatus('Provera u toku');

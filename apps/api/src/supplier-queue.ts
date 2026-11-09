@@ -121,6 +121,7 @@ async function expireSupplierLeases(client: QueryClient): Promise<void> {
     if (lease.link_id) {
       await client.query(
         `UPDATE supplier_product_links SET initial_requested_at=CASE WHEN $3='initial' THEN now() ELSE initial_requested_at END, manual_requested_at=CASE WHEN $3='manual' THEN now() ELSE manual_requested_at END,
+      rapid_requested_at=CASE WHEN $3<>'health' AND EXISTS (SELECT 1 FROM supplier_provider_checks WHERE provider_code='linkel' AND rapid_check_started_at IS NOT NULL) THEN now() ELSE rapid_requested_at END,
       updated_at=now() WHERE id=$1 AND generation=$2 AND NOT removed AND checks_enabled`,
         [lease.link_id, lease.generation, lease.kind]
       );
@@ -795,14 +796,17 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
       `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
         AND l.url IS NOT NULL AND p.deleted_at IS NULL
-        AND (l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
+        AND (l.rapid_requested_at IS NOT NULL OR l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
           OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
-       ORDER BY CASE WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
+       ORDER BY CASE WHEN l.rapid_requested_at IS NOT NULL THEN -1 WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
          WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
-        LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
+        LEAST(l.rapid_requested_at,l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
       [organizationId]
     )).rows[0];
-    if (!link) return null;
+    if (!link) {
+      await finishLinkelRapidSweep(client);
+      return null;
+    }
     const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at ? 'manual'
       : link.confirmation_due_at && link.confirmation_due_at <= new Date() ? 'confirmation' : 'regular';
     const lease = (await client.query<Lease>(
@@ -810,7 +814,7 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
        VALUES ('linkel',$1,$2,$3) RETURNING *`, [link.id, link.generation, kind]
     )).rows[0]!;
     await client.query(
-      `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
+      `UPDATE supplier_product_links SET rapid_requested_at=NULL,initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
     );
     await reserveLinkelSlot(client);
     return { token: lease.token, kind: 'product' as const, url: link.url };
@@ -819,7 +823,58 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
 
 async function reserveLinkelSlot(client: QueryClient) {
   await client.query(`UPDATE supplier_provider_checks
-    SET next_request_at=now()+interval '390 seconds' WHERE provider_code='linkel'`);
+    SET next_request_at=now()+CASE WHEN rapid_check_started_at IS NOT NULL THEN interval '10 seconds' ELSE interval '390 seconds' END
+    WHERE provider_code='linkel'`);
+}
+
+async function finishLinkelRapidSweep(client: QueryClient) {
+  const active = await client.query<{ rapid_check_started_at: Date | null }>(
+    `SELECT rapid_check_started_at FROM supplier_provider_checks WHERE provider_code='linkel' FOR UPDATE`
+  );
+  if (!active.rows[0]?.rapid_check_started_at) return false;
+  const pending = await client.query(
+    `SELECT 1 FROM supplier_product_links WHERE provider_code='linkel' AND rapid_requested_at IS NOT NULL LIMIT 1`
+  );
+  const leased = await client.query(
+    `SELECT 1 FROM supplier_check_leases WHERE provider_code='linkel' AND expires_at>now() LIMIT 1`
+  );
+  if (pending.rowCount || leased.rowCount) return false;
+  await client.query(`UPDATE supplier_provider_checks SET rapid_check_started_at=NULL,
+    next_request_at=now()+interval '390 seconds',updated_at=now() WHERE provider_code='linkel'`);
+  return true;
+}
+
+export async function localLinkelWaitMilliseconds(pool: pg.Pool) {
+  const row = (await pool.query<{ wait_ms: number }>(`SELECT CASE
+    WHEN rapid_check_started_at IS NOT NULL AND paused_until IS NULL AND manual_pause_mode IS NULL THEN 10000
+    ELSE 400000 END AS wait_ms FROM supplier_provider_checks WHERE provider_code='linkel'`)).rows[0];
+  return row?.wait_ms ?? 400000;
+}
+
+export async function startLocalLinkelRapidCheck(pool: pg.Pool, organizationId: string) {
+  return supplierTransaction(pool, async client => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('supplier-queue:linkel'))");
+    const provider = (await client.query<{ rapid_check_started_at: Date | null; rapid_check_last_started_at: Date | null; paused_until: Date | null; manual_pause_mode: string | null }>(
+      `SELECT rapid_check_started_at,rapid_check_last_started_at,paused_until,manual_pause_mode
+       FROM supplier_provider_checks WHERE provider_code='linkel' FOR UPDATE`
+    )).rows[0];
+    if (!provider) throw new ValidationFailedError('Linkel raspored nije podešen');
+    if (provider.rapid_check_started_at) throw new ValidationFailedError('Vanredna Linkel provera je već u toku');
+    if (provider.manual_pause_mode || (provider.paused_until && provider.paused_until > new Date()))
+      throw new ValidationFailedError('Linkel provere su pauzirane; prvo ukloni pauzu');
+    if (provider.rapid_check_last_started_at && Date.now() - provider.rapid_check_last_started_at.getTime() < 30 * 86400000)
+      throw new ValidationFailedError('Vanredno ubrzanje Linkela je već pokrenuto u poslednjih 30 dana');
+    const queued = await client.query(
+      `UPDATE supplier_product_links l SET rapid_requested_at=now()
+       FROM products p WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
+         AND l.url IS NOT NULL AND p.id=l.product_id AND p.organization_id=l.organization_id AND p.deleted_at IS NULL
+       RETURNING l.id`, [organizationId]
+    );
+    if (!queued.rowCount) return { accepted: true, pending: 0 };
+    await client.query(`UPDATE supplier_provider_checks SET rapid_check_started_at=now(),rapid_check_last_started_at=now(),
+      next_request_at=now(),updated_at=now() WHERE provider_code='linkel'`);
+    return { accepted: true, pending: queued.rowCount };
+  });
 }
 
 export async function completeLocalLinkel(
@@ -845,6 +900,7 @@ export async function completeLocalLinkel(
       else await client.query(`UPDATE supplier_provider_checks SET paused_until=NULL,pause_reason=NULL,
         health_ok=true,health_checked_at=now(),probe_requested_at=NULL,updated_at=now() WHERE provider_code='linkel'`);
     });
+    await supplierTransaction(database.pool, client => finishLinkelRapidSweep(client));
     return;
   }
   if (blocked) {
@@ -859,6 +915,7 @@ export async function completeLocalLinkel(
   if (link) await finishLegacy(database, {
     page: async () => outcome, home: async () => homeHealthy
   }, result, { ...link, generation: result.generation!, legacy_due: result.legacy_due }, outcome, AbortSignal.timeout(60_000), duration);
+  await supplierTransaction(database.pool, client => finishLinkelRapidSweep(client));
 }
 export async function rollMissedSlots(
   client: QueryClient,
