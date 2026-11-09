@@ -54,6 +54,7 @@ export async function resumeSuppliers(pool: pg.Pool, providers: string[]) {
       next_regular_at=p.cycle_epoch+(floor(extract(epoch FROM now()-p.cycle_epoch)/864000)::integer+1)*interval '240 hours'
       +make_interval(secs=>p.phase_seconds+(l.queue_position-1)*p.interval_seconds)
       FROM supplier_provider_checks p WHERE l.provider_code=p.provider_code AND p.provider_code=ANY($1::text[])
+      AND l.provider_code<>'linkel'
       AND p.manual_pause_mode IS NOT NULL AND l.confirmation_due_at<=LEAST(now(),COALESCE(p.manual_pause_until,now()))`,
       [providers]
     );
@@ -73,7 +74,7 @@ export async function supplierLinkActions(
     const items = [];
     for (const id of [...new Set(input.ids)]) {
       const found = await client.query(
-        `SELECT l.*,EXISTS(SELECT 1 FROM supplier_check_leases WHERE link_id=l.id AND expires_at>now()) AS running
+        `SELECT l.*, (l.last_checked_at>now()-interval '1 hour') AS recently_checked, EXISTS(SELECT 1 FROM supplier_check_leases WHERE link_id=l.id AND expires_at>now()) AS running
         FROM supplier_product_links l JOIN products p ON p.id=l.product_id WHERE l.id=$1 AND l.organization_id=$2
         AND p.organization_id=l.organization_id AND p.deleted_at IS NULL AND NOT l.removed AND l.url IS NOT NULL AND l.provider_code=ANY($3::text[]) FOR UPDATE OF l`,
         [id, organizationId, ALL_PROVIDERS]
@@ -91,13 +92,19 @@ export async function supplierLinkActions(
         } else if (link.running || link.manual_requested_at || link.initial_requested_at) {
           status = 'already_queued';
           reason = 'Provera već radi ili čeka';
+        } else if (link.provider_code === 'linkel' && link.recently_checked) {
+          status = 'skipped';
+          reason = 'Linkel je već proveren u poslednjih sat vremena';
         } else
           await client.query(
             'UPDATE supplier_product_links SET manual_requested_at=now() WHERE id=$1',
             [id]
           );
       } else if (input.action === 'disable') {
-        if (!link.checks_enabled) {
+        if (link.provider_code === 'linkel') {
+          status = 'skipped';
+          reason = 'Linkel linkovi ostaju u sedmodnevnoj proveri';
+        } else if (!link.checks_enabled) {
           status = 'skipped';
           reason = 'Link je već isključen';
         } else

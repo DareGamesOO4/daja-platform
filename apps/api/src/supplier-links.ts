@@ -123,22 +123,15 @@ export async function saveLinkelLink(
     );
     return;
   }
-  const saved = await client.query(
+  await client.query(
     `INSERT INTO supplier_product_links (organization_id, product_id, provider_code, url)
      VALUES ($1, $2, 'linkel', $3)
      ON CONFLICT (organization_id, product_id, provider_code) DO UPDATE
        SET url = EXCLUDED.url, check_status = 'unverified', stock_status = NULL, price_amount = NULL,
-           price_currency = NULL, missing_count = 0, external_reference = NULL,
+           price_currency = NULL, missing_count = 0, negative_count = 0, external_reference = NULL,
            last_checked_at = NULL, last_seen_at = NULL, next_check_at = now(), last_error = NULL, updated_at = now()
      WHERE supplier_product_links.url IS DISTINCT FROM EXCLUDED.url
      `,
     [organizationId, productId, url]
   );
-  if (saved.rowCount) {
-    await client.query(
-      `UPDATE supplier_provider_checks
-       SET next_request_at = now(), updated_at = now()
-       WHERE provider_code = 'linkel'`,
-    );
-  }
 }

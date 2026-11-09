@@ -18,7 +18,7 @@ import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
 import { inspectLocalMediaSource } from './local-media-source.js';
 import { LocalMediaPresence } from './local-media-presence.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
-import { claimLocalLinkel, completeLocalLinkel, localLinkelWaitMilliseconds, startLocalLinkelRapidCheck } from './supplier-queue.js';
+import { claimLocalLinkel, completeLocalLinkel, localLinkelWaitMilliseconds } from './supplier-queue.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -81,16 +81,16 @@ export class LocalMediaWorkerController {
   async claimLinkel(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const organizationId = this.authenticate(request);
     response.setHeader('Cache-Control', 'no-store');
-    response.setHeader('X-Daja-Linkel-Wait-Ms', String(await localLinkelWaitMilliseconds(this.db.pool)));
     const job = await claimLocalLinkel(this.db.pool, organizationId);
+    response.setHeader('X-Daja-Linkel-Wait-Ms', String(await localLinkelWaitMilliseconds(this.db.pool)));
     if (!job) response.status(204);
     return job ?? undefined;
   }
 
   @Post('linkel/rapid-start')
   async rapidStartLinkel(@Req() request: Request) {
-    const organizationId = this.authenticate(request);
-    return startLocalLinkelRapidCheck(this.db.pool, organizationId);
+    this.authenticate(request);
+    throw new ValidationFailedError('Linkel radi po sedmodnevnom rasporedu. Za pojedinačni artikal koristi „Proveri sada“.');
   }
 
   @Post('linkel/complete')

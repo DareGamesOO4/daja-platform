@@ -121,7 +121,6 @@ async function expireSupplierLeases(client: QueryClient): Promise<void> {
     if (lease.link_id) {
       await client.query(
         `UPDATE supplier_product_links SET initial_requested_at=CASE WHEN $3='initial' THEN now() ELSE initial_requested_at END, manual_requested_at=CASE WHEN $3='manual' THEN now() ELSE manual_requested_at END,
-      rapid_requested_at=CASE WHEN $3<>'health' AND EXISTS (SELECT 1 FROM supplier_provider_checks WHERE provider_code='linkel' AND rapid_check_started_at IS NOT NULL) THEN now() ELSE rapid_requested_at END,
       updated_at=now() WHERE id=$1 AND generation=$2 AND NOT removed AND checks_enabled`,
         [lease.link_id, lease.generation, lease.kind]
       );
@@ -225,7 +224,7 @@ export const STATE_SELECT = `SELECT l.id, l.product_id AS "productId", l.provide
   l.last_checked_at AS "lastCheckedAt", l.last_good_result AS "lastGoodResult", l.last_error AS "lastError",
   l.disabled_reason AS "disabledReason", l.disabled_at AS "disabledAt", l.first_problem_at AS "firstProblemAt",
   l.first_problem_reason AS "firstProblemReason", l.confirmation_due_at AS "confirmationDueAt",
-  l.next_regular_at AS "nextRegularAt", COALESCE(p.manual_pause_until,p.paused_until) AS "pausedUntil",
+  COALESCE(l.next_regular_at, CASE WHEN l.provider_code='linkel' THEN l.next_check_at END) AS "nextRegularAt", COALESCE(p.manual_pause_until,p.paused_until) AS "pausedUntil",
   COALESCE(p.manual_pause_reason,p.pause_reason) AS "pauseReason", l.manual_requested_at AS "manualRequestedAt",
   p.manual_pause_mode AS "manualPauseMode",p.manual_pause_until AS "manualPauseUntil",
   CASE WHEN p.manual_pause_mode IS NOT NULL AND (p.manual_pause_until IS NULL OR p.manual_pause_until>now()) THEN true ELSE false END AS "manualPaused",
@@ -655,23 +654,19 @@ async function finishLegacy(
     }
   }
   const snapshot = await supplierTransaction(database.pool, async (client) => {
-    const found = await client.query<QueueLink>(
-      `SELECT l.* FROM supplier_product_links l WHERE l.id=$1 AND l.generation=$2 AND l.checks_enabled
-      AND NOT l.removed AND EXISTS(SELECT 1 FROM supplier_check_leases WHERE token=$3 AND expires_at>now()) FOR UPDATE`,
+    const found = await client.query<QueueLink & {
+      stock_status: 'in_stock' | 'out_of_stock' | null;
+      stock_confirmation_due: boolean;
+    }>(
+      `SELECT l.*,l.negative_count>0 AND l.first_problem_at<=active.started_at-interval '24 hours' AS stock_confirmation_due
+      FROM supplier_product_links l JOIN supplier_check_leases active ON active.link_id=l.id AND active.token=$3
+      WHERE l.id=$1 AND l.generation=$2 AND l.checks_enabled AND NOT l.removed AND active.expires_at>now()
+      FOR UPDATE OF l`,
       [link.id, link.generation, lease.token]
     );
     const row = found.rows[0];
     if (!row) return null;
     await client.query('DELETE FROM supplier_check_leases WHERE token=$1', [lease.token]);
-    await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
-      outcome:
-        outcome.status === 'available'
-          ? outcome.stockStatus === 'out_of_stock'
-            ? 'out_of_stock'
-            : 'available'
-          : outcome.status,
-      duration
-    });
     const provider = (
       await client.query(`SELECT * FROM supplier_provider_checks WHERE provider_code=$1`, [
         row.provider_code
@@ -692,8 +687,42 @@ async function finishLegacy(
       });
     let next = row.next_check_at;
     // A manual-only check preserves the regular schedule; a coincident regular check is merged into it.
-    const regular = link.legacy_due || lease.kind === 'initial';
-    if (outcome.status === 'available') {
+    const isLinkel = row.provider_code === 'linkel';
+    const reportedStock = outcome.status === 'available' ? outcome.stockStatus : null;
+    // A negative observation needs a second explicit result at least 24 hours later.
+    const confirmedStock = isLinkel && reportedStock === 'out_of_stock'
+      && (paused || (row.stock_status !== 'out_of_stock' && !row.stock_confirmation_due))
+      ? null : reportedStock;
+    await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
+      outcome: outcome.status === 'available' ? confirmedStock === 'out_of_stock' ? 'out_of_stock' : 'available' : outcome.status,
+      duration
+    });
+    const regular = link.legacy_due || (!isLinkel && lease.kind === 'initial');
+    if (isLinkel && regular) next = await legacyNextSlot(client, row);
+    if (isLinkel && outcome.status === 'available') {
+      const { stockStatus, priceAmount, priceCurrency } = outcome;
+      await client.query(
+        `UPDATE supplier_product_links l SET
+          check_status='available',stock_status=COALESCE($6::text,l.stock_status),
+          price_amount=$3,price_currency=$4,last_error=NULL,missing_count=0,
+          last_checked_at=now(),last_seen_at=now(),next_check_at=$5,
+          negative_count=CASE WHEN $6 IS NOT NULL THEN 0
+            WHEN $2::text='out_of_stock' THEN 1 ELSE l.negative_count END,
+          first_problem_at=CASE WHEN $6 IS NOT NULL THEN NULL
+            WHEN l.negative_count>0 THEN l.first_problem_at WHEN $2='out_of_stock' THEN now() END,
+          first_problem_reason=CASE WHEN $6 IS NOT NULL THEN NULL
+            WHEN l.negative_count>0 OR $2='out_of_stock' THEN 'Artikal možda nije na stanju kod dobavljača' END,
+          confirmation_due_at=CASE WHEN $6 IS NOT NULL THEN NULL
+            WHEN l.negative_count>0 OR $2='out_of_stock'
+            THEN CASE WHEN l.negative_count>0 AND l.confirmation_due_at>now()
+              THEN l.confirmation_due_at ELSE now()+interval '24 hours' END END,
+          last_good_result=jsonb_build_object('checkedAt',now(),'stockStatus',COALESCE($6,l.stock_status),
+            'priceAmount',$3::numeric,'priceCurrency',$4::text)
+        WHERE l.id=$1`,
+        [row.id, stockStatus, priceAmount ?? null, priceCurrency ?? null, next, confirmedStock]
+      );
+      await client.query("UPDATE supplier_provider_checks SET consecutive_errors=0 WHERE provider_code='linkel'");
+    } else if (outcome.status === 'available') {
       if (regular) next = await legacyNextSlot(client, row);
       await client.query(
         `UPDATE supplier_product_links SET check_status='available',stock_status=$2,price_amount=$3,price_currency=$4,
@@ -724,11 +753,14 @@ async function finishLegacy(
           ? Math.min(row.missing_count + 1, paused ? 2 : 3)
           : row.missing_count;
       const final = count >= 3 && !paused && healthy;
-      if (regular) next = final ? await legacyNextSlot(client, row) : new Date(Date.now() + 86400000);
+      if (regular && !isLinkel) next = final ? await legacyNextSlot(client, row) : new Date(Date.now() + 86400000);
       await client.query(
         `UPDATE supplier_product_links SET missing_count=$2,check_status=CASE WHEN $3 THEN 'missing' ELSE check_status END,
         stock_status=CASE WHEN $3 THEN NULL ELSE stock_status END,last_checked_at=now(),last_error=$4,next_check_at=$5,
-        confirmation_due_at=CASE WHEN $3 THEN NULL ELSE now()+interval '24 hours' END,
+        confirmation_due_at=CASE WHEN $3 THEN NULL
+          WHEN provider_code='linkel' AND confirmation_due_at>now() THEN confirmation_due_at
+          ELSE now()+interval '24 hours' END,
+        negative_count=CASE WHEN $3 AND provider_code='linkel' THEN 0 ELSE negative_count END,
         first_problem_at=COALESCE(first_problem_at,now()),first_problem_reason=COALESCE(first_problem_reason,$4) WHERE id=$1`,
         [row.id, count, final, reason, next]
       );
@@ -777,13 +809,13 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
   return supplierTransaction(pool, async client => {
     await expireSupplierLeases(client);
     const provider = (await client.query<{ probe: boolean; automatic: boolean; initial: boolean }>(
-      `SELECT (probe_requested_at IS NOT NULL OR COALESCE(paused_until<=now(), false)) AS probe,
+      `SELECT (probe_requested_at IS NOT NULL OR COALESCE(paused_until<=now(), false)) AND COALESCE(manual_pause_mode,'')<>'all' AS probe,
         (manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
-        (COALESCE(manual_pause_mode,'')<>'all') AS initial
+        (COALESCE(manual_pause_mode,'')<>'all' AND paused_until IS NULL) AS initial
        FROM supplier_provider_checks p WHERE provider_code='linkel' AND next_request_at<=now()
        AND NOT EXISTS (SELECT 1 FROM supplier_check_leases WHERE provider_code=p.provider_code)`
     )).rows[0];
-    if (!provider?.initial) return null;
+    if (!provider || (!provider.probe && !provider.initial)) return null;
     if (provider.probe) {
       const lease = (await client.query<Lease>(
         "INSERT INTO supplier_check_leases(provider_code,kind) VALUES ('linkel','health') RETURNING *"
@@ -791,36 +823,27 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
       await reserveLinkelSlot(client);
       return { token: lease.token, kind: 'health' as const, url: 'https://www.linkel.rs/sr/' };
     }
-    if (!provider.automatic) return null;
-    const link = (await client.query<QueueLink>(
-      `SELECT l.* FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
-       JOIN supplier_provider_checks sweep ON sweep.provider_code=l.provider_code
+    const link = (await client.query<QueueLink & { confirmation_due: boolean }>(
+      `SELECT l.*,COALESCE(l.confirmation_due_at<=now(),false) AS confirmation_due
+       FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
         AND l.url IS NOT NULL AND p.deleted_at IS NULL
-        AND (l.rapid_requested_at IS NOT NULL OR l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
-          OR l.confirmation_due_at<=now() OR l.next_check_at<=now()
-          OR (sweep.rapid_check_started_at IS NOT NULL AND (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)))
-       ORDER BY CASE WHEN l.rapid_requested_at IS NOT NULL OR (sweep.rapid_check_started_at IS NOT NULL AND
-           (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)) THEN -1
-         WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1
-         WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
-        LEAST(l.rapid_requested_at,l.initial_requested_at,l.manual_requested_at,
-          CASE WHEN sweep.rapid_check_started_at IS NOT NULL AND (l.last_checked_at IS NULL OR l.last_checked_at<sweep.rapid_check_started_at)
-            THEN sweep.rapid_check_started_at END,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
-      [organizationId]
+        AND ($2 AND (l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
+          OR $3 AND l.initial_requested_at IS NOT NULL)
+       ORDER BY CASE WHEN $2 AND l.confirmation_due_at<=now() THEN 0 WHEN $2 AND l.next_check_at<=now() THEN 1
+         WHEN l.manual_requested_at IS NOT NULL THEN 2 ELSE 3 END,
+        LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
+      [organizationId, provider.automatic, provider.initial]
     )).rows[0];
-    if (!link) {
-      await finishLinkelRapidSweep(client);
-      return null;
-    }
+    if (!link) return null;
     const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at ? 'manual'
-      : link.confirmation_due_at && link.confirmation_due_at <= new Date() ? 'confirmation' : 'regular';
+      : link.confirmation_due ? 'confirmation' : 'regular';
     const lease = (await client.query<Lease>(
       `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind)
        VALUES ('linkel',$1,$2,$3) RETURNING *`, [link.id, link.generation, kind]
     )).rows[0]!;
     await client.query(
-      `UPDATE supplier_product_links SET rapid_requested_at=NULL,initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
+      `UPDATE supplier_product_links SET initial_requested_at=NULL,manual_requested_at=NULL WHERE id=$1`, [link.id]
     );
     await reserveLinkelSlot(client);
     return { token: lease.token, kind: 'product' as const, url: link.url };
@@ -829,58 +852,15 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string) {
 
 async function reserveLinkelSlot(client: QueryClient) {
   await client.query(`UPDATE supplier_provider_checks
-    SET next_request_at=now()+CASE WHEN rapid_check_started_at IS NOT NULL THEN interval '10 seconds' ELSE interval '390 seconds' END
+    SET next_request_at=now()+interval '390 seconds'
     WHERE provider_code='linkel'`);
 }
 
-async function finishLinkelRapidSweep(client: QueryClient) {
-  const active = await client.query<{ rapid_check_started_at: Date | null }>(
-    `SELECT rapid_check_started_at FROM supplier_provider_checks WHERE provider_code='linkel' FOR UPDATE`
-  );
-  if (!active.rows[0]?.rapid_check_started_at) return false;
-  const pending = await client.query(
-    `SELECT 1 FROM supplier_product_links WHERE provider_code='linkel' AND rapid_requested_at IS NOT NULL LIMIT 1`
-  );
-  const leased = await client.query(
-    `SELECT 1 FROM supplier_check_leases WHERE provider_code='linkel' AND expires_at>now() LIMIT 1`
-  );
-  if (pending.rowCount || leased.rowCount) return false;
-  await client.query(`UPDATE supplier_provider_checks SET rapid_check_started_at=NULL,
-    next_request_at=now()+interval '390 seconds',updated_at=now() WHERE provider_code='linkel'`);
-  return true;
-}
-
 export async function localLinkelWaitMilliseconds(pool: pg.Pool) {
-  const row = (await pool.query<{ wait_ms: number }>(`SELECT CASE
-    WHEN rapid_check_started_at IS NOT NULL AND paused_until IS NULL AND manual_pause_mode IS NULL THEN 10000
-    ELSE 400000 END AS wait_ms FROM supplier_provider_checks WHERE provider_code='linkel'`)).rows[0];
-  return row?.wait_ms ?? 400000;
-}
-
-export async function startLocalLinkelRapidCheck(pool: pg.Pool, organizationId: string) {
-  return supplierTransaction(pool, async client => {
-    await client.query("SELECT pg_advisory_xact_lock(hashtext('supplier-queue:linkel'))");
-    const provider = (await client.query<{ rapid_check_started_at: Date | null; rapid_check_last_started_at: Date | null; paused_until: Date | null; manual_pause_mode: string | null }>(
-      `SELECT rapid_check_started_at,rapid_check_last_started_at,paused_until,manual_pause_mode
-       FROM supplier_provider_checks WHERE provider_code='linkel' FOR UPDATE`
-    )).rows[0];
-    if (!provider) throw new ValidationFailedError('Linkel raspored nije podešen');
-    if (provider.rapid_check_started_at) throw new ValidationFailedError('Vanredna Linkel provera je već u toku');
-    if (provider.manual_pause_mode || (provider.paused_until && provider.paused_until > new Date()))
-      throw new ValidationFailedError('Linkel provere su pauzirane; prvo ukloni pauzu');
-    if (provider.rapid_check_last_started_at && Date.now() - provider.rapid_check_last_started_at.getTime() < 30 * 86400000)
-      throw new ValidationFailedError('Vanredno ubrzanje Linkela je već pokrenuto u poslednjih 30 dana');
-    const queued = await client.query(
-      `UPDATE supplier_product_links l SET rapid_requested_at=now()
-       FROM products p WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
-         AND l.url IS NOT NULL AND p.id=l.product_id AND p.organization_id=l.organization_id AND p.deleted_at IS NULL
-       RETURNING l.id`, [organizationId]
-    );
-    if (!queued.rowCount) return { accepted: true, pending: 0 };
-    await client.query(`UPDATE supplier_provider_checks SET rapid_check_started_at=now(),rapid_check_last_started_at=now(),
-      next_request_at=now(),updated_at=now() WHERE provider_code='linkel'`);
-    return { accepted: true, pending: queued.rowCount };
-  });
+  const row = (await pool.query<{ wait_ms: number }>(`SELECT
+    GREATEST(10000, LEAST(30000, ceil(extract(epoch FROM next_request_at-now())*1000)))::integer AS wait_ms
+    FROM supplier_provider_checks WHERE provider_code='linkel'`)).rows[0];
+  return row?.wait_ms ?? 30000;
 }
 
 export async function completeLocalLinkel(
@@ -888,7 +868,7 @@ export async function completeLocalLinkel(
   outcome: SupplierOutcome, homeHealthy: boolean, blocked: boolean, duration: number
 ) {
   const result = (await database.pool.query<Lease & { legacy_due: boolean }>(
-    `SELECT lease.*,COALESCE(l.next_check_at<=now(), false) AS legacy_due
+    `SELECT lease.*,COALESCE(l.next_check_at<=lease.started_at, false) AS legacy_due
      FROM supplier_check_leases lease LEFT JOIN supplier_product_links l ON l.id=lease.link_id
      WHERE lease.token=$1 AND lease.provider_code='linkel' AND lease.expires_at>now()
        AND ((lease.kind='health' AND lease.link_id IS NULL) OR (l.organization_id=$2 AND l.generation=lease.generation))`,
@@ -906,7 +886,6 @@ export async function completeLocalLinkel(
       else await client.query(`UPDATE supplier_provider_checks SET paused_until=NULL,pause_reason=NULL,
         health_ok=true,health_checked_at=now(),probe_requested_at=NULL,updated_at=now() WHERE provider_code='linkel'`);
     });
-    await supplierTransaction(database.pool, client => finishLinkelRapidSweep(client));
     return;
   }
   if (blocked) {
@@ -920,8 +899,8 @@ export async function completeLocalLinkel(
   )).rows[0];
   if (link) await finishLegacy(database, {
     page: async () => outcome, home: async () => homeHealthy
-  }, result, { ...link, generation: result.generation!, legacy_due: result.legacy_due }, outcome, AbortSignal.timeout(60_000), duration);
-  await supplierTransaction(database.pool, client => finishLinkelRapidSweep(client));
+  }, result, { ...link, generation: result.generation!, legacy_due: result.legacy_due },
+    blocked ? { status: 'error', accessFailed: true } : outcome, AbortSignal.timeout(60_000), duration);
 }
 export async function rollMissedSlots(
   client: QueryClient,
@@ -956,7 +935,7 @@ export async function rollMissedSlots(
     SELECT l.id,l.organization_id,l.provider_code,p.cycle_seconds,(floor(extract(epoch FROM now()-l.next_check_at)/p.cycle_seconds)::integer+1) AS skipped
     FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
     WHERE l.provider_code=ANY($1::text[]) AND l.provider_code IN ('linkel','milano') AND l.checks_enabled AND NOT l.removed AND l.initial_requested_at IS NULL
-      AND l.last_error IS NULL AND l.missing_count=0 AND p.manual_pause_mode IS NOT NULL
+      AND (l.provider_code='linkel' OR (l.last_error IS NULL AND l.missing_count=0)) AND p.manual_pause_mode IS NOT NULL
       AND l.next_check_at<=LEAST(now(),COALESCE(p.manual_pause_until,now())))
     ,updated AS (UPDATE supplier_product_links l SET next_check_at=l.next_check_at+due.skipped*make_interval(secs => due.cycle_seconds)
     FROM due WHERE l.id=due.id RETURNING due.organization_id,due.provider_code,due.skipped)
