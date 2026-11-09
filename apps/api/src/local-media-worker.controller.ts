@@ -100,7 +100,7 @@ export class LocalMediaWorkerController {
       token: z.uuid(), homeHealthy: z.boolean(), blocked: z.boolean(),
       duration: z.number().int().min(0).max(90_000),
       outcome: z.discriminatedUnion('status', [
-        z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']),
+        z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']).nullable(),
           priceAmount: z.number().min(0).max(100_000_000), priceCurrency: z.literal('RSD') }),
         z.object({ status: z.literal('missing') }),
         z.object({ status: z.literal('error'), accessFailed: z.boolean() })

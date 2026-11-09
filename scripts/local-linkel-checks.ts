@@ -58,13 +58,15 @@ function isHome(page: Awaited<ReturnType<typeof readLinkel>>) {
 function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   if (page.status === 404 || page.status === 410 || isHome(page)) return { status: 'missing' } as const;
   if (page.status !== 200 || blocked(page) || !/<body\b[^>]*\bid=["']product["']/i.test(page.html)) return failed;
-  const amount = page.html.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
-  const currency = page.html.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1];
+  const amount = page.html.match(/<meta\b(?=[^>]*\b(?:property|itemprop)=["'](?:product:price:amount|price)["'])[^>]*\bcontent=["']([^"']+)["']/i)?.[1];
+  const currency = page.html.match(/<meta\b(?=[^>]*\bproperty=["']product:price:currency["'])[^>]*\bcontent=["']([^"']+)["']/i)?.[1] ?? 'RSD';
   const priceAmount = amount ? Number(amount) : NaN;
   const availability = (page.html.match(/itemprop=["']availability["'][^>]*schema\.org\/(InStock|OutOfStock)\b/i)?.[1] ??
     page.html.match(/"availability"\s*:\s*"https?:\/\/schema\.org\/(InStock|OutOfStock)"/i)?.[1])?.toLowerCase();
-  const stockStatus = availability === 'instock' ? 'in_stock' : availability === 'outofstock' ? 'out_of_stock' : null;
-  if (!stockStatus || currency?.toUpperCase() !== 'RSD' || !Number.isFinite(priceAmount) || priceAmount < 0 || priceAmount > 100_000_000) {
+  const visible = page.html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ');
+  const stockStatus = availability === 'instock' ? 'in_stock' : availability === 'outofstock' ? 'out_of_stock'
+    : /(?:nije|nema) na stanju/i.test(visible) ? 'out_of_stock' : /na stanju/i.test(visible) ? 'in_stock' : null;
+  if (currency.toUpperCase() !== 'RSD' || !Number.isFinite(priceAmount) || priceAmount < 0 || priceAmount > 100_000_000) {
     return { status: 'error', accessFailed: false } as const;
   }
   return { status: 'available', stockStatus, priceAmount, priceCurrency: 'RSD' } as const;
