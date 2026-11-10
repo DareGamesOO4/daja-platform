@@ -147,7 +147,7 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
 
       // These data updates fire the supplier revision trigger for many rows.
       // Take the same lock as live supplier writes before acquiring row locks.
-      const supplierPriceMigration = migration.version === '117' || migration.version === '118';
+      const supplierPriceMigration = ['117', '118', '119'].includes(migration.version);
       let statementTimeout: string | undefined;
       try {
         if (supplierPriceMigration) {
