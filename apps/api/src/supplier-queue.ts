@@ -222,7 +222,9 @@ export const STATE_SELECT = `SELECT l.id, l.product_id AS "productId", l.provide
     WHEN p.paused_until IS NOT NULL AND (p.interval_seconds IS NOT NULL OR p.paused_until>now()) AND l.initial_requested_at IS NULL THEN 'paused'
     WHEN l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL OR l.bulk_requested_at IS NOT NULL THEN 'checking'
     WHEN l.negative_count>0 OR (l.missing_count>0 AND l.check_status<>'missing') THEN 'waiting_confirmation' ELSE l.check_status END AS status,
-  l.stock_status AS "stockStatus", l.price_amount AS "priceAmount", l.price_currency AS "priceCurrency",
+  l.stock_status AS "stockStatus",
+  CASE WHEN l.last_good_result->'regularPrice' = 'true'::jsonb THEN l.price_amount END AS "priceAmount",
+  CASE WHEN l.last_good_result->'regularPrice' = 'true'::jsonb THEN l.price_currency END AS "priceCurrency",
   l.last_checked_at AS "lastCheckedAt", l.last_good_result AS "lastGoodResult", l.last_error AS "lastError",
   l.disabled_reason AS "disabledReason", l.disabled_at AS "disabledAt", l.first_problem_at AS "firstProblemAt",
   l.first_problem_reason AS "firstProblemReason", l.confirmation_due_at AS "confirmationDueAt",
@@ -564,6 +566,7 @@ async function finishLink(
             stockStatus: outcome.stockStatus,
             priceAmount: outcome.priceAmount ?? null,
             priceCurrency: outcome.priceCurrency ?? null,
+            regularPrice: outcome.priceAmount != null,
             checkedAt: new Date().toISOString()
           })
         ]
@@ -722,7 +725,8 @@ async function finishLegacy(
               THEN l.confirmation_due_at ELSE now()+interval '24 hours' END END,
           last_good_result=jsonb_build_object('checkedAt',now(),'stockStatus',COALESCE($6,l.stock_status),
             'priceAmount',COALESCE($3,l.price_amount),
-            'priceCurrency',CASE WHEN $3 IS NULL THEN l.price_currency ELSE $4 END)
+            'priceCurrency',CASE WHEN $3 IS NULL THEN l.price_currency ELSE $4 END,
+            'regularPrice',$3 IS NOT NULL OR COALESCE(l.last_good_result->'regularPrice' = 'true'::jsonb,false))
         WHERE l.id=$1`,
         [row.id, stockStatus, priceAmount ?? null, priceCurrency ?? null, next, confirmedStock]
       );
@@ -739,7 +743,10 @@ async function finishLegacy(
           outcome.priceAmount ?? null,
           outcome.priceCurrency ?? null,
           next,
-          JSON.stringify({ checkedAt: new Date().toISOString(), stockStatus: outcome.stockStatus })
+          JSON.stringify({
+            checkedAt: new Date().toISOString(), stockStatus: outcome.stockStatus,
+            regularPrice: outcome.priceAmount != null
+          })
         ]
       );
       await client.query(
