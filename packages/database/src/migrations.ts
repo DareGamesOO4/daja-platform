@@ -145,11 +145,30 @@ export async function migrate(pool: pg.Pool): Promise<MigrationStatus[]> {
         continue;
       }
 
-      await client.query(migration.sql);
-      await client.query(
-        'INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)',
-        [migration.version, migration.name, migration.checksum]
-      );
+      // These data updates fire the supplier revision trigger for many rows.
+      // Take the same lock as live supplier writes before acquiring row locks.
+      const supplierPriceMigration = migration.version === '117' || migration.version === '118';
+      let statementTimeout: string | undefined;
+      try {
+        if (supplierPriceMigration) {
+          const setting = await client.query<{ statement_timeout: string }>('SHOW statement_timeout');
+          statementTimeout = setting.rows[0]!.statement_timeout;
+          await client.query("SELECT set_config('statement_timeout', '120s', false)");
+          await client.query("SELECT pg_advisory_lock(hashtext('supplier-state'))");
+        }
+        await client.query(migration.sql);
+        await client.query(
+          'INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)',
+          [migration.version, migration.name, migration.checksum]
+        );
+      } finally {
+        if (supplierPriceMigration) {
+          await client.query("SELECT pg_advisory_unlock(hashtext('supplier-state'))");
+          if (statementTimeout !== undefined) {
+            await client.query("SELECT set_config('statement_timeout', $1, false)", [statementTimeout]);
+          }
+        }
+      }
     }
 
     return migrationStatus(pool);
