@@ -2,7 +2,7 @@ import { type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { startNumberedSupplierChecks, type SupplierOutcome } from './supplier-queue.js';
-import { linkelRegularPrice, metaPrice, priceFromMarkup } from './supplier-prices.js';
+import { linkelRegularPrice, metaPrice, priceFromMarkup, timezoneRegularPrice } from './supplier-prices.js';
 
 const supplierDeadline = new AsyncLocalStorage<AbortSignal>();
 function supplierSignal(): AbortSignal {
@@ -211,14 +211,7 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
     }
     if (provider === 'timezone') {
       if (!/itemprop=["']availability["']/.test(body)) return { status: 'error' };
-      const firstPrice = /<li\b[^>]*class=["'][^"']*\b(product-price|price-new|price-old)\b[^"']*["'][^>]*>/i.exec(body);
-      const priceBlock = firstPrice ? body.slice(firstPrice.index).split(/<\/ul>/i, 1)[0] ?? '' : '';
-      const oldPrice = priceBlock.match(/<li\b[^>]*class=["'][^"']*\bprice-old\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
-      const discounted = oldPrice !== undefined || /<li\b[^>]*class=["'][^"']*\bprice-new\b/i.test(priceBlock);
-      const currentPrice = priceBlock.match(/<li\b[^>]*class=["'][^"']*\bproduct-price\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
-      const price = metaPrice(body, 'price');
-      const priceAmount = discounted ? priceFromMarkup(oldPrice, 'EUR')
-        : priceFromMarkup(currentPrice, 'EUR') ?? (price && /^\d+(?:[.,]\d+)?$/.test(price) ? Number(price.replace(',', '.')) : null);
+      const priceAmount = timezoneRegularPrice(body);
       const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
       return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
     }

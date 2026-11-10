@@ -12,6 +12,19 @@ export function metaPrice(body: string, field: string): string | undefined {
   return tag?.match(/\bcontent=["']([^"']+)["']/i)?.[1];
 }
 
+export function timezoneRegularPrice(body: string): number | null {
+  const product = body.split(/<div\b[^>]*\bid=["']product-info-wrapper["'][^>]*>/i)[1];
+  const offer = product?.match(/<ul\b(?=[^>]*\bitemprop=["']offers["'])[^>]*>([\s\S]*?)<\/ul>/i)?.[1];
+  if (!offer) return null;
+  // Timezone's main offer has price-new for the promotion and price-old for
+  // the regular price. Its price metadata can concatenate EUR and BGN amounts.
+  const regular = offer.match(/<li\b(?=[^>]*\bclass=["'](?:[^"']*\s)?price-old(?:\s[^"']*)?["'])[^>]*>([\s\S]*?)<\/li>/i)?.[1];
+  if (regular !== undefined) return priceFromMarkup(regular, 'EUR');
+  if (/<li\b[^>]*\bclass=["'](?:[^"']*\s)?price-new(?:\s[^"']*)?["']/i.test(offer)) return null;
+  const current = offer.match(/<li\b(?=[^>]*\bclass=["'](?:[^"']*\s)?product-price(?:\s[^"']*)?["'])[^>]*>([\s\S]*?)<\/li>/i)?.[1];
+  return priceFromMarkup(current, 'EUR');
+}
+
 export function linkelRegularPrice(body: string): number | null {
   const details = body.match(/<div\b(?=[^>]*\bid=["']product-details["'])[^>]*\bdata-product="([^"]+)"/i)?.[1];
   const regular = details?.match(/&quot;price_without_reduction&quot;\s*:\s*([0-9.]+)/i)?.[1];
