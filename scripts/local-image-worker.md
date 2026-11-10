@@ -2,7 +2,9 @@
 
 Paket koristi instalirani Node.js 22.12 ili noviji i uključuje Sharp za Windows x64.
 
-Raspakuj paket u folder u kom će aplikacija ostati i otvori DAJA Worker.exe. Kada zatvoriš prozor, ikonica ostaje pored sata. Desni klik otvara meni, a levi vraća prozor. Opcija za automatsko pokretanje dodaje ikonicu pri prijavi u Windows.
+DAJA Studio.exe otvara prozor i ikonicu pored sata. Pozadinska obrada koristi isti program sa parametrom `--run-worker`. U korisničkoj instalaciji oba se pokreću pri prijavi u Windows. Ikonica se pokreće u pozadini, a prečica DAJA Studio na radnoj površini otvara prozor.
+
+Za vraćanje korisničkog backupa raspakuj arhivu i pokreni `Vrati DAJA.cmd`. Skripta vraća program i konfiguraciju u `%LOCALAPPDATA%\DAJA\ImageWorker`, dodaje automatsko pokretanje i pokreće Studio i worker. Node.js iz foldera `runtime` koristi se kada je uključen u backup. Backup sadrži privatni ključ za worker.
 
 U web adminu otvori Slike za red poslova sa sličicama i status računara i Rendera. Vlasnik tamo podešava kvalitet, effort, maksimalnu dimenziju, lossless i obradu boje za svaki od četiri izlaza. Sačuvani profil primenjuje se od sledećeg posla. Pauza ostavlja trenutni posao da se završi.
 

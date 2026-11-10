@@ -21,7 +21,6 @@ try {
     $uiSource = Join-Path $PSScriptRoot 'local-image-worker-ui.cs'
     & $compiler /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/out:$ui" $uiSource
     if ($LASTEXITCODE -ne 0) { throw 'Pakovanje Windows prozora nije uspelo.' }
-    Copy-Item -LiteralPath $ui -Destination (Join-Path $stage 'DAJA Worker.exe')
 
     foreach ($dependency in @('sharp', '@img/colour', '@img/sharp-win32-x64', 'detect-libc', 'semver')) {
         $source = Join-Path $repo "node_modules/$dependency"
@@ -31,6 +30,7 @@ try {
     }
 
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-local-image-worker.ps1') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'restore-local-image-studio.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-image-worker.md') -Destination (Join-Path $stage 'PROCITAJ.md')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-image-studio') -Destination (Join-Path $stage 'studio') -Recurse
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
