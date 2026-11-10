@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { linkelRegularPrice } from '../apps/api/src/supplier-prices.js';
 
 const workerId = createHash('sha256').update(hostname().toLowerCase()).digest('hex');
 const home = 'https://www.linkel.rs/sr/';
@@ -61,9 +62,7 @@ function isHome(page: Awaited<ReturnType<typeof readLinkel>>) {
 function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   if (page.status === 404 || page.status === 410 || isHome(page)) return { status: 'missing' } as const;
   if (page.status !== 200 || blocked(page) || !/<body\b[^>]*\bid=["']product["']/i.test(page.html)) return failed;
-  const amount = page.html.match(/<meta\b(?=[^>]*\b(?:property|itemprop)=["'](?:product:price:amount|price)["'])[^>]*\bcontent=["']([^"']+)["']/i)?.[1];
-  const currency = page.html.match(/<meta\b(?=[^>]*\bproperty=["']product:price:currency["'])[^>]*\bcontent=["']([^"']+)["']/i)?.[1] ?? 'RSD';
-  const priceAmount = amount ? Number(amount) : NaN;
+  const priceAmount = linkelRegularPrice(page.html);
   const availability = (page.html.match(/itemprop=["']availability["'][^>]*schema\.org\/(InStock|OutOfStock)\b/i)?.[1] ??
     page.html.match(/"availability"\s*:\s*"https?:\/\/schema\.org\/(InStock|OutOfStock)"/i)?.[1])?.toLowerCase();
   // The main form contains this product's stock label. Related products can have different stock and prices.
@@ -71,8 +70,7 @@ function readProduct(page: Awaited<ReturnType<typeof readLinkel>>) {
   const visible = form.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ');
   const stockStatus = availability === 'instock' ? 'in_stock' : availability === 'outofstock' ? 'out_of_stock'
     : /(?:nije|nema) na stanju/i.test(visible) ? 'out_of_stock' : /na stanju/i.test(visible) ? 'in_stock' : null;
-  const validPrice = currency.toUpperCase() === 'RSD' &&
-    Number.isFinite(priceAmount) && priceAmount >= 0 && priceAmount <= 100_000_000;
+  const validPrice = priceAmount !== null && priceAmount >= 0 && priceAmount <= 100_000_000;
   if (!validPrice && !stockStatus) return { status: 'error', accessFailed: false } as const;
   return { status: 'available', stockStatus, priceAmount: validPrice ? priceAmount : null, priceCurrency: 'RSD' } as const;
 }
@@ -131,7 +129,7 @@ export async function runLocalLinkel(
         } catch {
           shutdown.throwIfAborted();
         }
-        await api('linkel/complete', { token: job.token, duration: Date.now() - started, ...result }, shutdown);
+        await api('linkel/complete', { token: job.token, duration: Date.now() - started, regularPrice: true, ...result }, shutdown);
         const issue = result.blocked ? 'Linkel je odbio pristup (zaštita sajta ili ograničenje zahteva).' :
           job.kind === 'health' && !result.homeHealthy ? 'Početna strana Linkela nije dostupna.' :
           job.kind === 'product' && result.outcome.status === 'error' ? (result.outcome.accessFailed

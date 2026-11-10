@@ -2,6 +2,7 @@ import { type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { startNumberedSupplierChecks, type SupplierOutcome } from './supplier-queue.js';
+import { linkelRegularPrice, metaPrice, priceFromMarkup } from './supplier-prices.js';
 
 const supplierDeadline = new AsyncLocalStorage<AbortSignal>();
 function supplierSignal(): AbortSignal {
@@ -62,11 +63,18 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
     if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 500_000);
     if (!/<h1\b[^>]*>[^<]+<\/h1>/i.test(body) || !/Referenca/i.test(body) || !/Stanje proizvoda/i.test(body)) return { status: 'error' };
-    const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
-    const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
+    const price = metaPrice(body, 'product:price:amount');
+    const currency = metaPrice(body, 'product:price:currency')?.toUpperCase() ?? null;
+    const oldPrice = body.match(/<span\b[^>]*\bid=["']old_price_display["'][^>]*>([\s\S]*?)<\/span>/i)?.[1];
+    const discounted = /\bspecific_price\s*=\s*\{|\bid=["'](?:reduction_percent_display|reduction_amount_display)["'][^>]*>\s*-\s*[1-9]/i.test(body);
+    const regular = priceFromMarkup(oldPrice, 'RSD');
     // Ekka hides stock from anonymous visitors. When no visible stock value
     // is supplied, a confirmed valid product page is the availability fallback.
-    return { status: 'available', stockStatus: ekkaStock(body) ?? 'in_stock', priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
+    return {
+      status: 'available', stockStatus: ekkaStock(body) ?? 'in_stock',
+      priceAmount: regular ?? (!discounted && price && Number.isFinite(Number(price)) ? Number(price) : null),
+      priceCurrency: regular === null ? currency : 'RSD'
+    };
   }
   return { status: 'error', accessFailed: true };
 }
@@ -106,13 +114,14 @@ async function bultimePage(urlValue: string): Promise<Outcome> {
     const offerPrice = body.match(/"offers"\s*:\s*\{[\s\S]{0,1200}?"priceCurrency"\s*:\s*"([A-Z]+)"[\s\S]{0,160}?"price"\s*:\s*"?([0-9.]+)/i);
     // The structured offer advertises the sale price. Use the regular price
     // from the main product block, not the price-old tags of related products.
-    const oldPriceTag = /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-old(?=\s|["'])[^"']*["'][^>]*>/i.exec(body);
+    const priceGroup = body.match(/<div\b[^>]*class=["']product-price-group["'][^>]*>[\s\S]*?<div\b[^>]*class=["']price-group["'][^>]*>([\s\S]*?<\/div>)\s*<\/div>/i)?.[1] ?? body;
+    const oldPriceTag = /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-old(?=\s|["'])[^"']*["'][^>]*>/i.exec(priceGroup);
     const oldPrice = oldPriceTag
-      ? body.slice(oldPriceTag.index + oldPriceTag[0].length).split('</div>', 1)[0]
+      ? priceGroup.slice(oldPriceTag.index + oldPriceTag[0].length).split('</div>', 1)[0]
       : null;
     const regular = oldPrice?.replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ')
       .match(/([0-9]+(?:\s+[0-9]{3})*(?:[.,][0-9]+)?)\s*(€|&euro;|EUR|лв\.?|BGN)/i);
-    const hasDiscount = oldPriceTag || /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-new(?=\s|["'])/i.test(body);
+    const hasDiscount = oldPriceTag || /<div\b[^>]*\bclass=["'](?:[^"']*\s)?product-price-new(?=\s|["'])/i.test(priceGroup);
     const priceAmount = regular ? Number(regular[1]!.replace(/\s/g, '').replace(',', '.'))
       : !hasDiscount && offerPrice ? Number(offerPrice[2]) : null;
     const priceCurrency = regular ? (/^(лв|BGN)/i.test(regular[2]!) ? 'BGN' : 'EUR')
@@ -163,11 +172,9 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
     // product merely because those optional HTML details changed.
     const hasProductBody = /<body\b[^>]*\bid=["']product["']/i.test(body);
     if (!hasProductBody) return { status: 'error', message: 'Linkel stranica nema očekivanu oznaku proizvoda.' };
-    const price = body.match(/<meta\s+property=["']product:price:amount["']\s+content=["']([^"']+)["']/i)?.[1];
-    const currency = body.match(/<meta\s+property=["']product:price:currency["']\s+content=["']([^"']+)["']/i)?.[1]?.toUpperCase() || null;
     const visible = body.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
     const stockStatus = /Nije na stanju/i.test(visible) ? 'out_of_stock' : /Na stanju/i.test(visible) ? 'in_stock' : null;
-    return { status: 'available', stockStatus, priceAmount: price && Number.isFinite(Number(price)) ? Number(price) : null, priceCurrency: currency };
+    return { status: 'available', stockStatus, priceAmount: linkelRegularPrice(body), priceCurrency: 'RSD' };
   }
   return { status: 'error', accessFailed: true, message: 'Linkel je vratio previše preusmerenja.' };
 }
@@ -193,37 +200,41 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
     if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 1_000_000);
     if (provider === 'milano') {
-      if (!/property=["']product:price:amount["']/.test(body) || !/property=["']product:availability["']/.test(body)) return { status: 'error' };
-      const price = body.match(/<meta\b[^>]*property=["']product:price:amount["'][^>]*content=["']([0-9.]+)["']/i)?.[1];
-      const stock = body.match(/<meta\b[^>]*property=["']product:availability["'][^>]*content=["']([^"']+)["']/i)?.[1]?.toLowerCase();
-      if (!price) return { status: 'error' };
-      return { status: 'available', stockStatus: stock === 'instock' ? 'in_stock' : stock === 'outofstock' ? 'out_of_stock' : null, priceAmount: Number(price), priceCurrency: 'EUR' };
+      const stock = metaPrice(body, 'product:availability')?.toLowerCase();
+      if (!stock) return { status: 'error' };
+      const price = metaPrice(body, 'product:price:amount');
+      const mainPrice = body.match(/<(?:div|p)\b[^>]*class=["'](?:pop-price|price)["'][^>]*>([\s\S]*?)<\/(?:div|p)>/i)?.[1];
+      const regular = mainPrice?.match(/<del\b[^>]*>([\s\S]*?)<\/del>/i)?.[1];
+      const discounted = /\b(?:on-sale|sale)\b/.test(body.match(/<body\b[^>]*>/i)?.[0] ?? '') || /<(?:del|ins)\b/i.test(mainPrice ?? '');
+      const priceAmount = priceFromMarkup(regular, 'EUR') ?? (!discounted && price && Number.isFinite(Number(price)) ? Number(price) : null);
+      return { status: 'available', stockStatus: stock === 'instock' ? 'in_stock' : stock === 'outofstock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
     }
     if (provider === 'timezone') {
       if (!/itemprop=["']availability["']/.test(body)) return { status: 'error' };
-      const priceTag = body.match(/<meta\b(?=[^>]*\bitemprop=["']price["'])[^>]*>/i)?.[0];
-      const metaPrice = priceTag?.match(/\bcontent=["']([0-9]+(?:[.,][0-9]+)?)["']/i)?.[1];
-      const priceElement = body.match(/<li\b[^>]*class=["'][^"']*\b(?:product-price|price-new)\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
-      const visiblePrice = priceElement
-        ?.replace(/<[^>]+>/g, ' ')
-        .replace(/&nbsp;|&#160;/gi, ' ')
-        .match(/([0-9]+(?:[.,][0-9]+)?)\s*€/i)?.[1];
-      const price = metaPrice ?? visiblePrice;
+      const firstPrice = /<li\b[^>]*class=["'][^"']*\b(product-price|price-new|price-old)\b[^"']*["'][^>]*>/i.exec(body);
+      const priceBlock = firstPrice ? body.slice(firstPrice.index).split(/<\/ul>/i, 1)[0] ?? '' : '';
+      const oldPrice = priceBlock.match(/<li\b[^>]*class=["'][^"']*\bprice-old\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
+      const discounted = oldPrice !== undefined || /<li\b[^>]*class=["'][^"']*\bprice-new\b/i.test(priceBlock);
+      const currentPrice = priceBlock.match(/<li\b[^>]*class=["'][^"']*\bproduct-price\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
+      const price = metaPrice(body, 'price');
+      const priceAmount = discounted ? priceFromMarkup(oldPrice, 'EUR')
+        : priceFromMarkup(currentPrice, 'EUR') ?? (price && /^\d+(?:[.,]\d+)?$/.test(price) ? Number(price.replace(',', '.')) : null);
       const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
-      if (!price) return { status: 'error' };
-      const priceAmount = Number(price.replace(',', '.'));
-      if (!Number.isFinite(priceAmount)) return { status: 'error' };
       return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
     }
     const product = body.split('id="product_info"')[1];
     if (!product || !/Модел|Model/i.test(product.slice(0, 20000))) return { status: 'error' };
-    const price = product.match(/<b\b[^>]*>\s*([0-9.,]+)\s*(?:&euro;|€)\s*<\/b>/i)?.[1];
-    if (!price) return { status: 'error' };
+    const purchase = product.slice(0, 20_000).split(/\bid=["']product-details-title["']/i, 1)[0] ?? '';
+    const oldPrice = purchase.match(/<(?:del|s|strike)\b[^>]*>([\s\S]*?)<\/(?:del|s|strike)>/i)?.[1];
+    const currentPrice = purchase.match(/<div\b[^>]*class=["'][^"']*\bproduct-price\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1]
+      ?? purchase.match(/<b\b[^>]*>\s*([0-9.,]+\s*(?:&euro;|€))\s*<\/b>/i)?.[1];
+    const discounted = oldPrice !== undefined || /\bproduct-old-price\b/i.test(purchase);
+    const priceAmount = priceFromMarkup(discounted ? oldPrice : currentPrice, 'EUR');
     // Do not report stock when the supplier page has no explicit stock signal.
     // The modal preview and scheduled checks share this parser; optimistic
     // fallback here can contradict a previous confirmed out-of-stock result.
     const stockStatus = explicitStock(product.slice(0,20_000));
-    return { status: 'available', stockStatus, priceAmount: Number(price.replace(',', '.')), priceCurrency: 'EUR' };
+    return { status: 'available', stockStatus, priceAmount, priceCurrency: 'EUR' };
   }
   return { status: 'error', accessFailed: true };
 }

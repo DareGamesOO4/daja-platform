@@ -107,6 +107,7 @@ export class LocalMediaWorkerController {
     const organizationId = this.authenticate(request);
     const parsed = z.object({
       token: z.uuid(), homeHealthy: z.boolean(), blocked: z.boolean(),
+      regularPrice: z.literal(true).optional(),
       duration: z.number().int().min(0).max(90_000),
       outcome: z.discriminatedUnion('status', [
         z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']).nullable(),
@@ -119,8 +120,11 @@ export class LocalMediaWorkerController {
       && parsed.data.outcome.priceAmount === null && parsed.data.outcome.stockStatus === null)) {
       throw new ValidationFailedError('Invalid Linkel result');
     }
-    const { token, outcome, homeHealthy, blocked, duration } = parsed.data;
-    await completeLocalLinkel(this.db, organizationId, token, outcome, homeHealthy, blocked, duration);
+    const { token, outcome, homeHealthy, blocked, duration, regularPrice } = parsed.data;
+    const confirmedOutcome = outcome.status === 'available' && !regularPrice
+      ? { ...outcome, priceAmount: null }
+      : outcome;
+    await completeLocalLinkel(this.db, organizationId, token, confirmedOutcome, homeHealthy, blocked, duration);
     response.status(204);
   }
 
