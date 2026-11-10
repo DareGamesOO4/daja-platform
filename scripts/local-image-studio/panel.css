@@ -31,6 +31,7 @@ ul { padding: 0; margin-block: 8px 14px; list-style: none; }
 .job strong { overflow-wrap: anywhere; }
 .job small { display: block; color: var(--muted); }
 #trial-status { overflow-wrap: anywhere; }
+.status-lines p { block-size: 3em; margin-block: 3px 5px; overflow: auto; overflow-wrap: anywhere; }
 a { color: var(--accent); font-weight: 600; }
 @media (max-width: 850px) { .workspace { grid-template-columns: 1fr; } }
 @media (max-width: 480px) { main { padding: 10px; } .variants { grid-template-columns: 1fr; } header { padding: 16px; } }

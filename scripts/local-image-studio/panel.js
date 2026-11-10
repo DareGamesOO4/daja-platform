@@ -2,26 +2,31 @@ const byId = id => document.getElementById(id);
 const phases = { 'local-paused': 'obrada slika pauzirana', ready: 'povezan, čeka slike', working: 'obrada u toku', paused: 'pauziran iz admina',
   error: 'problem sa vezom ili obradom', connecting: 'povezivanje…' };
 
+function setStatusText(id, text) {
+  const element = byId(id);
+  if (element.textContent !== text) element.textContent = text;
+}
+
 async function updateState() {
   try {
     const response = await fetch('/state', { cache: 'no-store', signal: AbortSignal.timeout(3_000) });
     if (!response.ok) throw new Error();
-    const payload = await response.json();
-    const { status } = payload;
-    const render = payload.render?.data ?? payload.render;
-    byId('worker').textContent = 'DAJA računar · ' + (phases[status.phase] ?? 'nepoznato stanje') +
-      (status.error ? ' (' + status.error + ')' : '');
+    const { status, render: rawRender } = await response.json();
+    const render = rawRender?.data ?? rawRender;
+    setStatusText('worker', 'DAJA računar · ' + (phases[status.phase] ?? 'nepoznato stanje') +
+      (status.error ? ' (' + status.error + ')' : ''));
     const failed = render?.renderErrorAt && (!render.renderCompletedAt ||
       new Date(render.renderErrorAt) > new Date(render.renderCompletedAt));
-    byId('render').textContent = 'Render · ' + (!render ? 'server nije potvrdio stanje' :
+    setStatusText('render', 'Render · ' + (!render ? 'server nije potvrdio stanje' :
       !render.renderOnline ? 'nema svežeg signala' : failed ? 'aktivan, poslednja obrada prijavila grešku' :
-      'raspored aktivan (03–07)');
-    byId('linkel').textContent = 'Linkel · ' + (status.linkel ?? 'stanje nije dostupno') +
-      (status.linkelLast ? ' · Poslednja lokalna provera: ' + status.linkelLast : '');
+      'raspored aktivan (03–07)'));
+    setStatusText('linkel', 'Linkel · ' + (status.linkel ?? 'stanje nije dostupno'));
+    setStatusText('linkel-last', status.linkelLast ? 'Poslednja lokalna provera · ' + status.linkelLast : '');
   } catch {
-    byId('worker').textContent = 'DAJA računar · lokalni worker nije dostupan';
-    byId('render').textContent = 'Render · stanje nije dostupno';
-    byId('linkel').textContent = 'Linkel · stanje nije dostupno';
+    setStatusText('worker', 'DAJA računar · lokalni worker nije dostupan');
+    setStatusText('render', 'Render · stanje nije dostupno');
+    setStatusText('linkel', 'Linkel · stanje nije dostupno');
+    setStatusText('linkel-last', '');
   }
 }
 

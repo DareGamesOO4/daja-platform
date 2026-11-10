@@ -86,6 +86,7 @@ internal sealed class Dashboard : Form
     private readonly Label detail;
     private readonly Label renderState;
     private readonly Label linkelState;
+    private readonly Label linkelLastState;
     private readonly Label pauseState;
     private readonly ComboBox pauseDuration;
     private readonly Button pauseButton;
@@ -100,6 +101,7 @@ internal sealed class Dashboard : Form
     private readonly string statusFile;
     private string lastFolder;
     private bool quitting;
+    private DateTimeOffset lastStatusUpdated;
 
     internal static void SetStartup(bool enabled)
     {
@@ -136,14 +138,19 @@ internal sealed class Dashboard : Form
         var title = new Label { Text = "DAJA  /  Obrada slika", AutoSize = true, Font = new Font("Segoe UI Semibold", 22), Margin = new Padding(0, 0, 0, 12) };
         layout.Controls.Add(title);
         var status = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 1, BackColor = Ink, Padding = new Padding(12), Margin = new Padding(0, 0, 0, 15) };
-        state = new Label { AutoSize = true, ForeColor = Color.FromArgb(247, 223, 155), Font = new Font("Segoe UI Semibold", 12) };
-        detail = new Label { AutoSize = true, ForeColor = Color.White, MaximumSize = new Size(540, 0) };
-        renderState = new Label { AutoSize = true, ForeColor = Color.White, Text = "Render · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
-        linkelState = new Label { AutoSize = true, MaximumSize = new Size(540, 0), ForeColor = Color.White, Text = "Linkel · stanje nije dostupno", Margin = new Padding(3, 6, 3, 0) };
+        // Each status has its own fixed row, so changing a label cannot resize the panel.
+        state = StatusLabel(23);
+        state.ForeColor = Color.FromArgb(247, 223, 155);
+        state.Font = new Font("Segoe UI Semibold", 12);
+        detail = StatusLabel(38);
+        renderState = StatusLabel(20);
+        linkelState = StatusLabel(20);
+        linkelLastState = StatusLabel(20);
         status.Controls.Add(state);
         status.Controls.Add(detail);
         status.Controls.Add(renderState);
         status.Controls.Add(linkelState);
+        status.Controls.Add(linkelLastState);
         layout.Controls.Add(status);
 
         var controls = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, Margin = new Padding(0, 0, 0, 10) };
@@ -154,7 +161,7 @@ internal sealed class Dashboard : Form
         pauseButton.Click += delegate { SetPause(); };
         resumeButton = new Button { Text = "Nastavi obradu", AutoSize = true };
         resumeButton.Click += delegate { SetPause(false); };
-        pauseState = new Label { AutoSize = true, Margin = new Padding(4, 7, 0, 0) };
+        pauseState = new Label { AutoEllipsis = true, Size = new Size(170, 26), Margin = new Padding(4, 7, 0, 0) };
         controls.Controls.Add(pauseDuration); controls.Controls.Add(pauseButton); controls.Controls.Add(resumeButton); controls.Controls.Add(pauseState);
         layout.Controls.Add(controls);
         progress = new ProgressBar { Dock = DockStyle.Top, Height = 14, Maximum = 100, Margin = new Padding(0, 0, 0, 8) };
@@ -335,14 +342,16 @@ internal sealed class Dashboard : Form
                     ShowUnavailableStatus("Pozadinski worker nije aktivan", "Nema svežeg statusa sa ovog računara.");
                     return;
                 }
+                lastStatusUpdated = updated;
                 var phaseText = snapshot.phase == "working" ? "Obrada je u toku" :
                     snapshot.phase == "local-paused" ? "Obrada pauzirana" :
                     snapshot.phase == "ready" ? "Povezan · čeka slike" :
                     snapshot.phase == "paused" ? "Povezan · pauziran iz admina" :
                     snapshot.phase == "error" ? "Veza ili obrada imaju problem" : "Povezivanje…";
                 DateTimeOffset completed;
-                var linkelText = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno") +
-                    (String.IsNullOrEmpty(snapshot.linkelLast) ? "" : Environment.NewLine + "Poslednja lokalna provera · " + snapshot.linkelLast);
+                var linkelText = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno");
+                var linkelLastText = String.IsNullOrEmpty(snapshot.linkelLast)
+                    ? "" : "Poslednja lokalna provera · " + snapshot.linkelLast;
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
                 var detailText = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
@@ -364,10 +373,15 @@ internal sealed class Dashboard : Form
                 var pauseText = snapshot.phase != "local-paused" ? "" :
                     DateTimeOffset.TryParse(snapshot.pauseUntil, out pauseUntil)
                     ? "Pauzirano do " + pauseUntil.ToLocalTime().ToString("t") : "Pauzirano dok ne nastaviš";
-                ShowStatus(phaseText, detailText, renderText, linkelText, pauseText, snapshot.progress);
+                ShowStatus(phaseText, detailText, renderText, linkelText, linkelLastText, pauseText, snapshot.progress);
             }
         }
-        catch (IOException) { ShowUnavailableStatus("Čeka pokretanje workera", "Status će se pojaviti kada worker krene."); }
+        catch (IOException)
+        {
+            // Keep a fresh snapshot if the worker is replacing the file during this read.
+            if (DateTimeOffset.UtcNow - lastStatusUpdated > TimeSpan.FromSeconds(30))
+                ShowUnavailableStatus("Čeka pokretanje workera", "Status će se pojaviti kada worker krene.");
+        }
         catch (UnauthorizedAccessException) { ShowUnavailableStatus("Status nije dostupan", "Proveri dozvole Windows workera."); }
         catch (InvalidOperationException) { ShowUnavailableStatus("Status nije dostupan", "Sačekaj sledeće osvežavanje."); }
         catch (ArgumentException) { ShowUnavailableStatus("Status nije dostupan", "Sačekaj sledeće osvežavanje."); }
@@ -375,18 +389,27 @@ internal sealed class Dashboard : Form
 
     private void ShowUnavailableStatus(string phaseText, string detailText)
     {
-        ShowStatus(phaseText, detailText, "Render · stanje nije dostupno", "Linkel · stanje nije dostupno", "", 0);
+        ShowStatus(phaseText, detailText, "Render · stanje nije dostupno", "Linkel · stanje nije dostupno", "", "", 0);
     }
 
-    private void ShowStatus(string phaseText, string detailText, string renderText, string linkelText, string pauseText, int percent)
+    private void ShowStatus(string phaseText, string detailText, string renderText, string linkelText, string linkelLastText, string pauseText, int percent)
     {
         SetStatusText(state, phaseText);
         SetStatusText(detail, detailText);
         SetStatusText(renderState, renderText);
         SetStatusText(linkelState, linkelText);
+        SetStatusText(linkelLastState, linkelLastText);
         SetStatusText(pauseState, pauseText);
         var clamped = Math.Max(0, Math.Min(100, percent));
         if (progress.Value != clamped) progress.Value = clamped;
+    }
+
+    private static Label StatusLabel(int height)
+    {
+        return new Label {
+            AutoEllipsis = true, Dock = DockStyle.Top, Height = height,
+            ForeColor = Color.White, Margin = new Padding(3, 0, 3, 0)
+        };
     }
 
     private static void SetStatusText(Label label, string value)
