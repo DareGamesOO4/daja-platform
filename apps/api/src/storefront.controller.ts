@@ -20,7 +20,7 @@ import { StorefrontRepository, TransactionManager, type Database } from '@daja/d
 import type { Logger } from '@daja/observability';
 import { requirePermission, ValidationFailedError, verifyJwt } from '@daja/security';
 import { browserRequest } from './runtime/edge-ingress.js';
-import { beginBrowserOAuth, beginBrowserPhone, consumeBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
+import { beginBrowserOAuth, beginBrowserPhone, readBrowserPhone, clearBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { CustomerPasskeysService } from './customer-passkeys.service.js';
@@ -330,7 +330,7 @@ export class CustomerAuthController {
     const customer =
       purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
     const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
-    const browserNonce = consumeBrowserPhone(request, response);
+    const browserNonce = readBrowserPhone(request);
     const otpInput = {
       ...(browserNonce ? { browserNonce } : {}),
       organizationId,
@@ -339,15 +339,9 @@ export class CustomerAuthController {
       challengeToken: input.challengeToken,
       ...(customer ? { customerId: customer.customerId } : {})
     };
-    try {
-      if (input.channel === 'whatsapp') await this.whatsappOtp.verify({ ...otpInput, code: input.code! });
-      else await this.phoneOtp.verify({ ...otpInput, firebaseIdToken: input.firebaseIdToken! });
-    } catch (error) {
-      // Preserve the same HttpOnly browser binding for a bounded OTP retry.
-      // The Redis challenge owns expiry, attempt limits, and one-time consumption.
-      if (input.channel === 'whatsapp') beginBrowserPhone(request, response);
-      throw error;
-    }
+    if (input.channel === 'whatsapp') await this.whatsappOtp.verify({ ...otpInput, code: input.code! });
+    else await this.phoneOtp.verify({ ...otpInput, firebaseIdToken: input.firebaseIdToken! });
+    if (browserNonce) clearBrowserPhone(response);
 
     if (customer) {
       return {

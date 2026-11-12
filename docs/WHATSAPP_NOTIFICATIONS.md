@@ -1,13 +1,19 @@
 # WhatsApp notifications — 05.11.2026
 
+13.11.2026: WhatsApp Manager lists both language versions of the newsletter and
+price-change templates as Active (Quality pending). The two notification flags
+were enabled on the Render API. Meta still refuses creation of the Authentication
+template, and WhatsApp back-in-stock remains disabled. Delivery and deployment
+completion were not checked.
+
 Cloud API notifications are separate from OTP and email. Existing email/SMS consent
 is never reused. Production activation remains gated by explicit flags and secrets.
 
 User scope update: WhatsApp back-in-stock alerts are disabled. The unfinished
 stock template was abandoned, not submitted. `WHATSAPP_STOCK_ALERTS_ENABLED=false`
 gates public capabilities, new subscriptions, scanning and outbound attempts.
-The notification approval flag currently requires only newsletter and price-change
-templates in sr/en; all four were submitted as Marketing and remain In review.
+The notification approval flag covers the four Marketing templates for the
+newsletter and price-change alerts in sr/en.
 
 ## Consent and unsubscribe
 

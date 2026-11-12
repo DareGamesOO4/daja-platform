@@ -161,12 +161,15 @@ export function beginBrowserPhone(request: Request, response: Response): string 
   return nonce;
 }
 
-export function consumeBrowserPhone(request: Request, response: Response): string | undefined {
+export function readBrowserPhone(request: Request): string | undefined {
   if (!browserRequest(request)) return undefined;
   const nonce = cookieValue(request.headers.cookie, BROWSER_COOKIES.phone);
-  setCookie(response, BROWSER_COOKIES.phone, '', 0);
   if (!nonce || !/^[a-f0-9]{64}$/.test(nonce)) throw new InvalidTokenError();
   return nonce;
+}
+
+export function clearBrowserPhone(response: Response): void {
+  setCookie(response, BROWSER_COOKIES.phone, '', 0);
 }
 
 export function validateBrowserOAuth(request: Request, response: Response, nonce: unknown): void {
