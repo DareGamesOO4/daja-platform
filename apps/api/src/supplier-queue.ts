@@ -41,6 +41,7 @@ type QueueLink = {
   last_checked_at: Date | null;
   missing_count: number;
   legacy_due?: boolean;
+  order_requested_at?: Date | null;
 };
 type Lease = {
   token: string;
@@ -53,6 +54,19 @@ type Adapters = {
   page(provider: string, url: string, signal: AbortSignal): Promise<SupplierOutcome>;
   home(provider: string, signal: AbortSignal): Promise<boolean>;
 };
+
+const ORDER_CHECK_REQUEST = `LEFT JOIN LATERAL (
+  SELECT min(c.requested_at) AS order_requested_at FROM order_supplier_checks c
+  WHERE c.link_id=l.id AND c.generation=l.generation AND c.url=l.url AND c.checked_at IS NULL
+) order_check ON true`;
+
+async function recordOrderSupplierCheck(client: QueryClient, token: string, outcome: SupplierOutcome) {
+  const result = outcome.status === 'available' ? outcome.stockStatus ?? 'unknown' : outcome.status;
+  await client.query(`UPDATE order_supplier_checks c SET result=$2, checked_at=clock_timestamp()
+    FROM supplier_check_leases lease JOIN supplier_product_links l ON l.id=lease.link_id
+    WHERE lease.token=$1 AND c.link_id=l.id AND c.generation=lease.generation AND c.url=l.url
+      AND c.checked_at IS NULL AND c.requested_at<=lease.started_at`, [token, result]);
+}
 
 export async function supplierTransaction<T>(
   pool: pg.Pool,
@@ -523,6 +537,7 @@ async function finishLink(
     );
     const row = current.rows[0];
     if (!row) return;
+    await recordOrderSupplierCheck(client, lease.token, outcome);
     await client.query(`DELETE FROM supplier_check_leases WHERE token=$1`, [lease.token]);
     await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
       outcome:
@@ -671,6 +686,7 @@ async function finishLegacy(
     );
     const row = found.rows[0];
     if (!row) return null;
+    await recordOrderSupplierCheck(client, lease.token, outcome);
     await client.query('DELETE FROM supplier_check_leases WHERE token=$1', [lease.token]);
     const provider = (
       await client.query(`SELECT * FROM supplier_provider_checks WHERE provider_code=$1`, [
@@ -849,16 +865,19 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string, wo
       return { token: lease.token, kind: 'health' as const, url: 'https://www.linkel.rs/sr/' };
     }
     const regular = (await client.query<QueueLink & { confirmation_due: boolean }>(
-      `SELECT l.*,COALESCE(l.confirmation_due_at<=now(),false) AS confirmation_due
+      `SELECT l.*,order_check.order_requested_at,COALESCE(l.confirmation_due_at<=now(),false) AS confirmation_due
        FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
+       ${ORDER_CHECK_REQUEST}
        WHERE l.organization_id=$1 AND l.provider_code='linkel' AND l.checks_enabled AND NOT l.removed
         AND l.url IS NOT NULL AND p.deleted_at IS NULL
-        AND ($2 AND (l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
+        AND ($2 AND (order_check.order_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now() OR l.next_check_at<=now())
           OR $3 AND l.initial_requested_at IS NOT NULL)
        ORDER BY CASE WHEN $2 AND l.confirmation_due_at<=now() THEN 0
-         WHEN $2 AND $4 AND l.manual_requested_at IS NOT NULL THEN 1
-         WHEN $2 AND l.next_check_at<=now() THEN 2
-         WHEN $2 AND l.manual_requested_at IS NOT NULL THEN 3 ELSE 4 END,
+         WHEN $2 AND order_check.order_requested_at IS NOT NULL THEN 1
+         WHEN $2 AND $4 AND l.manual_requested_at IS NOT NULL THEN 2
+         WHEN $2 AND l.next_check_at<=now() THEN 3
+         WHEN $2 AND l.manual_requested_at IS NOT NULL THEN 4 ELSE 5 END,
+        order_check.order_requested_at,
         LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_check_at),l.id LIMIT 1`,
       [organizationId, provider.automatic, provider.initial, provider.manual_turn]
     )).rows[0];
@@ -890,8 +909,8 @@ export async function claimLocalLinkel(pool: pg.Pool, organizationId: string, wo
     )).rows[0] : undefined;
     const link = regular ?? bulk;
     if (!link) return null;
-    const kind = link.bulk_requested_at ? 'bulk' : link.initial_requested_at ? 'initial'
-      : link.manual_requested_at ? 'manual' : regular?.confirmation_due ? 'confirmation' : 'regular';
+    const kind = bulk ? 'bulk' : link.initial_requested_at ? 'initial'
+      : link.manual_requested_at || link.order_requested_at ? 'manual' : regular?.confirmation_due ? 'confirmation' : 'regular';
     const lease = (await client.query<Lease>(
       `INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind,worker_id)
        VALUES ('linkel',$1,$2,$3,$4) RETURNING *`, [link.id, link.generation, kind, bulk ? workerId ?? null : null]
@@ -1188,21 +1207,24 @@ export function startNumberedSupplierChecks(
         }
         if (remaining > 0) {
           const links = await client.query<QueueLink>(
-            `WITH eligible AS (SELECT l.*,row_number() OVER (PARTITION BY l.provider_code ORDER BY
-              CASE WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1 WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
+            `WITH eligible AS (SELECT l.*,order_check.order_requested_at,row_number() OVER (PARTITION BY l.provider_code ORDER BY
+              CASE WHEN order_check.order_requested_at IS NOT NULL THEN 0 WHEN l.initial_requested_at IS NOT NULL THEN 1 WHEN l.manual_requested_at IS NOT NULL THEN 2 WHEN l.confirmation_due_at<=now() THEN 3 ELSE 4 END,
+              order_check.order_requested_at,
               LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,COALESCE(l.next_regular_at,l.next_check_at)),l.id) AS provider_position,(l.provider_code IN ('linkel','milano') AND l.next_check_at<=now()) AS legacy_due
             FROM supplier_product_links l JOIN products product ON product.id=l.product_id
             JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
+            ${ORDER_CHECK_REQUEST}
             WHERE l.provider_code=ANY($1::text[]) AND l.checks_enabled AND NOT l.removed AND l.url IS NOT NULL AND product.deleted_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM supplier_check_leases lease WHERE lease.link_id=l.id)
               AND (l.initial_requested_at IS NOT NULL AND COALESCE(p.manual_pause_mode,'')<>'all'
                 OR p.manual_pause_mode IS NULL AND (p.paused_until IS NULL OR (p.interval_seconds IS NULL AND p.paused_until<=now()))
-                  AND (l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now()
+                  AND (order_check.order_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL OR l.confirmation_due_at<=now()
                     OR (l.provider_code=ANY($2::text[]) AND l.next_regular_at<=now() AND (l.first_problem_at IS NULL OR l.first_problem_at<=now()-interval '24 hours'))
                     OR (l.provider_code IN ('linkel','milano') AND l.next_check_at<=now())))
               AND (p.interval_seconds IS NOT NULL OR p.next_request_at<=now())
             ) SELECT l.* FROM eligible l WHERE l.provider_code=ANY($2::text[]) OR l.provider_position=1
-            ORDER BY CASE WHEN l.initial_requested_at IS NOT NULL THEN 0 WHEN l.manual_requested_at IS NOT NULL THEN 1 WHEN l.confirmation_due_at<=now() THEN 2 ELSE 3 END,
+            ORDER BY CASE WHEN l.order_requested_at IS NOT NULL THEN 0 WHEN l.initial_requested_at IS NOT NULL THEN 1 WHEN l.manual_requested_at IS NOT NULL THEN 2 WHEN l.confirmation_due_at<=now() THEN 3 ELSE 4 END,
+              l.order_requested_at,
               LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,COALESCE(l.next_regular_at,l.next_check_at)),l.id LIMIT $3`,
             [SERVER_PROVIDERS, NUMBERED_PROVIDERS, remaining]
           );
@@ -1218,7 +1240,7 @@ export function startNumberedSupplierChecks(
             }
             const kind = link.initial_requested_at
               ? 'initial'
-              : link.manual_requested_at
+              : link.manual_requested_at || link.order_requested_at
                 ? 'manual'
                 : link.confirmation_due_at && link.confirmation_due_at <= new Date()
                   ? 'confirmation'

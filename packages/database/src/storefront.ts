@@ -1115,6 +1115,7 @@ export class StorefrontRepository {
        VALUES ($1, $2, $3)`,
       [organizationId, order.id, order.status]
     );
+    await this.client.query('SELECT enqueue_order_supplier_checks($1)', [order.id]);
     return serializeOrder(order);
   }
 
@@ -1145,14 +1146,54 @@ export class StorefrontRepository {
   }
 
   async listAdminOrders(organizationId: string) {
-    const result = await this.client.query<OrderRow>(
-      `SELECT * FROM orders
-       WHERE organization_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 200`,
+    const result = await this.client.query<OrderRow & {
+      email_deliveries: unknown[];
+      supplier_checks: unknown[];
+      status_changed_at: Date | null;
+    }>(
+      `WITH recent AS (
+         SELECT * FROM orders WHERE organization_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 200
+       )
+       SELECT o.*, status_change.created_at AS status_changed_at,
+         COALESCE(emails.deliveries, '[]'::jsonb) AS email_deliveries,
+         COALESCE(suppliers.checks, '[]'::jsonb) AS supplier_checks
+       FROM recent o
+       LEFT JOIN LATERAL (
+         SELECT h.created_at FROM order_status_history h
+         WHERE h.organization_id = o.organization_id AND h.order_id = o.id
+         ORDER BY h.created_at DESC LIMIT 1
+       ) status_change ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object('tag', e.tag, 'recipient', e.recipient, 'status', e.status,
+           'sentAt', e.sent_at, 'feedback', e.feedback_type, 'feedbackAt', e.feedback_at,
+           'attempts', e.attempts) ORDER BY e.tag, e.recipient) AS deliveries
+         FROM email_delivery_status e WHERE e.organization_id = o.organization_id
+           AND e.tag IN ('order-confirmation', 'new-order-notification')
+           AND split_part(e.deduplication_key, ':', 2) = o.id::text
+           AND split_part(e.deduplication_key, ':', 1) = 'order-created'
+       ) emails ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object('productId', c.product_id, 'provider', c.provider_code,
+           'url', c.url, 'checkedAt', c.checked_at, 'requestedAt', c.requested_at, 'result',
+           COALESCE(c.result, CASE
+             WHEN l.id IS NULL OR l.removed OR l.generation <> c.generation OR l.url IS DISTINCT FROM c.url THEN 'removed'
+             WHEN NOT l.checks_enabled THEN 'disabled'
+             WHEN lease.token IS NOT NULL THEN 'checking'
+             WHEN (p.manual_pause_mode IS NOT NULL AND (p.manual_pause_until IS NULL OR p.manual_pause_until > now()))
+               OR p.paused_until > now() THEN 'paused'
+             ELSE 'pending' END)) ORDER BY c.provider_code) AS checks
+         FROM order_supplier_checks c LEFT JOIN supplier_product_links l ON l.id = c.link_id
+         LEFT JOIN supplier_provider_checks p ON p.provider_code = c.provider_code
+         LEFT JOIN supplier_check_leases lease ON c.checked_at IS NULL AND lease.link_id = l.id
+           AND lease.generation = c.generation AND lease.started_at >= c.requested_at AND lease.expires_at > now()
+         WHERE c.order_id = o.id
+       ) suppliers ON true
+       ORDER BY o.created_at DESC`,
       [organizationId]
     );
-    return result.rows.map(serializeOrder);
+    return result.rows.map(row => ({ ...serializeOrder(row), emailDeliveries: row.email_deliveries,
+      supplierChecks: row.supplier_checks, statusChangedAt: row.status_changed_at }));
   }
 
   async getOrder(input: { organizationId: string; orderIdOrDisplayId: string; customerId?: string }) {
