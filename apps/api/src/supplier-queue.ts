@@ -425,6 +425,7 @@ async function pauseProvider(client: QueryClient, provider: string, reason: stri
 }
 
 async function pauseForAccessFailures(client: QueryClient, provider: string): Promise<boolean> {
+  const threshold = provider === 'timezone' ? 20 : 15;
   const samples = await client.query<{ bad: number }>(
     `SELECT count(*) FILTER (WHERE window_bad)::integer AS bad FROM (
       SELECT DISTINCT ON (url) window_bad FROM supplier_product_links
@@ -432,11 +433,11 @@ async function pauseForAccessFailures(client: QueryClient, provider: string): Pr
       ORDER BY url,window_observed_at DESC) recent`,
     [provider]
   );
-  if ((samples.rows[0]?.bad ?? 0) < 15) return false;
+  if ((samples.rows[0]?.bad ?? 0) < threshold) return false;
   await pauseProvider(
     client,
     provider,
-    'Pristup stranicama najmanje 15 različitih artikala nije uspeo u poslednja 2 sata'
+    `Pristup stranicama najmanje ${threshold} različitih artikala nije uspeo u poslednja 2 sata`
   );
   return true;
 }
@@ -465,7 +466,7 @@ async function healthProbe(
   for (const control of controls.rows) {
     try {
       const result = await adapters.page(provider, control.url, signal);
-      if (result.status !== 'available') {
+      if (result.status !== 'available' && !(provider === 'timezone' && result.status === 'missing')) {
         logger.warn(
           { provider, stage: 'control_page', url: control.url, outcome: result.status },
           'Supplier health probe failed'
@@ -512,8 +513,14 @@ async function finishLink(
 ) {
   const started = Date.now() - duration;
   await supplierTransaction(database.pool, async (client) => {
-    const current = await client.query<QueueLink>(
-      `SELECT * FROM supplier_product_links WHERE id=$1 AND generation=$2 AND NOT removed AND EXISTS (SELECT 1 FROM supplier_check_leases WHERE token=$3 AND expires_at>now()) FOR UPDATE`,
+    const current = await client.query<QueueLink & { timezone_missing_since: Date | null; timezone_missing_due: boolean }>(
+      `SELECT l.*,
+        CASE WHEN l.provider_code='timezone' AND l.check_status='missing'
+          AND l.first_problem_reason='Stranica proizvoda ne postoji' THEN l.first_problem_at END AS timezone_missing_since,
+        (l.first_problem_at<=lease.started_at-interval '24 hours') IS TRUE AS timezone_missing_due
+       FROM supplier_product_links l JOIN supplier_check_leases lease
+         ON lease.link_id=l.id AND lease.token=$3 AND lease.expires_at>now()
+       WHERE l.id=$1 AND l.generation=$2 AND NOT l.removed FOR UPDATE OF l`,
       [link.id, lease.generation, lease.token]
     );
     const row = current.rows[0];
@@ -531,7 +538,7 @@ async function finishLink(
     });
     await client.query(
       `UPDATE supplier_product_links SET window_observed_at=now(), window_bad=$2 WHERE id=$1`,
-      [row.id, pageAccessFailed(outcome)]
+      [row.id, !(row.provider_code === 'timezone' && outcome.status === 'missing') && pageAccessFailed(outcome)]
     );
     const provider = await client.query<{
       paused_until: Date | null;
@@ -567,6 +574,24 @@ async function finishLink(
     }
     const reason = outcome.status === 'missing' ? 'Stranica proizvoda ne postoji'
       : outcome.message || 'Pristup sajtu ili čitanje proizvoda nije uspelo';
+    if (row.provider_code === 'timezone' && outcome.status === 'missing') {
+      const disable = Boolean(row.timezone_missing_since && row.timezone_missing_due && !paused && !manuallyPaused);
+      await client.query(
+        `UPDATE supplier_product_links SET check_status='missing',stock_status=NULL,
+         negative_count=1,first_problem_at=COALESCE($2,now()),first_problem_reason=$3,
+         last_error=NULL,last_checked_at=now(),
+         confirmation_due_at=CASE WHEN $4 THEN NULL
+           WHEN $2::timestamptz IS NULL THEN now()+interval '24 hours'
+           WHEN $2+interval '24 hours'>now() THEN $2+interval '24 hours'
+           ELSE now()+interval '24 hours' END,
+         checks_enabled=NOT $4,disabled_at=CASE WHEN $4 THEN now() END,
+         disabled_reason=CASE WHEN $4 THEN 'Timezone stranica ne postoji na dve provere u razmaku od najmanje 24 sata' END
+         WHERE id=$1 AND checks_enabled`,
+        [row.id, row.timezone_missing_since, reason, disable]
+      );
+      if (disable) await recordSupplierStatistics(client, row.organization_id, row.provider_code, { disabled: 1 });
+      return;
+    }
     await client.query(
       `UPDATE supplier_product_links SET negative_count=1,first_problem_at=COALESCE(first_problem_at,now()),
        first_problem_reason=COALESCE(first_problem_reason,$2),last_error=$2,last_checked_at=now(),

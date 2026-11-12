@@ -193,6 +193,9 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
       const location = response.headers.get('location');
       if (!location) return { status: 'error', accessFailed: true };
       url = new URL(location, url);
+      if (provider === 'timezone' && (url.protocol !== 'https:' || !domains.timezone.includes(url.hostname.toLowerCase()) || url.port || url.username || url.password)) {
+        return { status: 'error', accessFailed: true };
+      }
       if (url.pathname === '/' || (provider === 'qandq' && url.searchParams.get('id') !== requestedId)) return { status: 'missing' };
       continue;
     }
