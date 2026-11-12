@@ -84,6 +84,7 @@ import { specificationEditor, specificationEditorRequestSchema } from './specifi
 import { recordWorkSession, workSessionSchema, workforceDashboard, dashboardQuerySchema } from './workforce-sessions.js';
 import { loadGroupState, loadPublicGroupMembers, groupOverview, mutateGroups, groupSaveSchema, groupRevisionSchema } from './variant-groups.js';
 import { publicBrandPaths } from './catalog-brand-pages.js';
+import { homeHeroSlidesSchema, publicHomeHeroSettings, readHomeHeroSettings, writeHomeHeroSettings } from './home-hero-settings.js';
 
 const catalogTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/)
   .refine(value => {
@@ -327,6 +328,12 @@ export class PublicCatalogController {
   @Get('home')
   async homeProducts(@Req() request: Request) {
     return publicHomeProducts(this.database.pool, this.publicContext(request).organizationId);
+  }
+
+  @Get('hero-slides')
+  async homeHeroSlides(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    response.setHeader('Cache-Control', 'no-store');
+    return publicHomeHeroSettings(await readHomeHeroSettings(this.database.pool, this.publicContext(request).organizationId));
   }
 
   @Get('products')
@@ -611,6 +618,32 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     if (!ctx.isOwner) requirePermission(ctx, 'catalog.variant_groups.manage');
     return ctx;
+  }
+
+  private homeHeroContext(request: Request) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.write');
+    return ctx;
+  }
+
+  @Get('admin/home/hero-slides')
+  async adminHomeHeroSlides(@Req() request: Request) {
+    return readHomeHeroSettings(this.database.pool, this.homeHeroContext(request).organizationId);
+  }
+
+  @Put('admin/home/hero-slides')
+  async saveHomeHeroSlides(@Req() request: Request, @Body() body: unknown) {
+    const ctx = this.homeHeroContext(request);
+    const input = parseWithSchema(homeHeroSlidesSchema, body);
+    const transactions = new TransactionManager(this.database.pool, this.logger);
+    const { saved, removedIds } = await transactions.run(client => writeHomeHeroSettings(client, ctx.organizationId, input));
+    for (const mediaId of removedIds) {
+      await transactions.run(client =>
+        new MediaRepository(client).discardUnreferenced(ctx, mediaId, new R2MediaStorageAdapter(this.config))
+      ).catch(error => this.logger.warn({ err: error, mediaId }, 'Saved banner media cleanup failed'));
+    }
+
+    return saved;
   }
 
   @Get('admin/variant-groups')

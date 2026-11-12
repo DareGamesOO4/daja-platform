@@ -618,6 +618,11 @@ export class MediaRepository {
          SELECT 1 FROM product_media WHERE organization_id = $1 AND media_asset_id = $2
          UNION ALL
          SELECT 1 FROM brands WHERE organization_id = $1 AND logo_media_id = $2 AND deleted_at IS NULL
+         UNION ALL
+         SELECT 1 FROM storefront_home_hero_settings settings
+         CROSS JOIN LATERAL jsonb_array_elements(settings.slides) AS item(slide)
+         WHERE settings.organization_id = $1
+           AND (slide->>'desktopMediaId' = $2::uuid::text OR slide->>'mobileMediaId' = $2::uuid::text)
        ) AS referenced`,
       [ctx.organizationId, mediaId]
     );
