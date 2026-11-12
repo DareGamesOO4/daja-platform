@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { AppConfig } from '@daja/config';
+import { orderNotificationRecipients, rawEmailAddress, type AppConfig } from '@daja/config';
 import type { DbClient } from '@daja/database';
 import { emailPreheader } from '@daja/shared';
 import { CONFIG } from './tokens.js';
@@ -591,16 +591,6 @@ function emailLink(value: string): string {
   const email = rawEmailAddress(value);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return escapeHtml(value);
   return '<a href="mailto:' + escapeHtml(email) + '" style="color:#18181b;text-decoration:underline">' + escapeHtml(email) + '</a>';
-}
-
-export function orderNotificationRecipients(config: AppConfig): string[] {
-  const value = config.ORDER_NOTIFICATION_EMAILS || config.SES_REPLY_TO_EMAIL || config.STOREFRONT_ADMIN_EMAILS;
-  return value.split(',').map(rawEmailAddress).filter(Boolean);
-}
-
-function rawEmailAddress(value: string): string {
-  const match = /<([^>]+)>/.exec(value);
-  return (match?.[1] ?? value).trim();
 }
 
 function customerGreetingName(customer: Record<string, unknown>): string {

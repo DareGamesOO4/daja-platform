@@ -1,11 +1,10 @@
 import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import type { AppConfig } from '@daja/config';
+import { orderNotificationRecipients, type AppConfig } from '@daja/config';
 import { TransactionManager, type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { defaultMediaWorkerProfile, mediaWorkerProfileSchema } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
-import { orderNotificationRecipients } from './order-email.service.js';
 
 const studioOffline = "coalesce(studio_seen_at < now()-interval '3 minutes',false)";
 const studioIssues = [

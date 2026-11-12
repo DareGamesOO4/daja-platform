@@ -6,7 +6,7 @@ import {
   ReceiveMessageCommand,
   DeleteMessageCommand
 } from '@aws-sdk/client-sqs';
-import type { AppConfig } from '@daja/config';
+import { orderNotificationRecipients, type AppConfig } from '@daja/config';
 import type { Database, QueuedEmail } from '@daja/database';
 import type { Logger } from '@daja/observability';
 
@@ -16,6 +16,8 @@ interface DeliveryRow {
   payload: QueuedEmail;
   attempts: number;
 }
+
+type SesSendingMode = 'disabled' | 'sandbox' | 'production';
 
 export class EmailWorker {
   private client: SESv2Client | undefined;
@@ -27,7 +29,8 @@ export class EmailWorker {
   private readingFeedback = false;
   private maintenanceAt = 0;
   private checkAccountAt = 0;
-  private productionSendingEnabled = false;
+  private sendingMode: SesSendingMode = 'disabled';
+  private readonly internalOrderRecipients: string[];
   private stopping = false;
   private started = false;
   private dispatchTask: Promise<void> | undefined;
@@ -38,7 +41,9 @@ export class EmailWorker {
     private readonly config: AppConfig,
     private readonly logger: Logger,
     private readonly database: Database
-  ) {}
+  ) {
+    this.internalOrderRecipients = orderNotificationRecipients(config).map(email => email.toLowerCase());
+  }
 
   start(): void {
     if (this.started || this.stopping) return;
@@ -126,19 +131,21 @@ export class EmailWorker {
     });
   }
 
-  private async canSendInProduction(): Promise<boolean> {
-    if (Date.now() < this.checkAccountAt) return this.productionSendingEnabled;
+  private async refreshSendingMode(): Promise<SesSendingMode> {
+    if (Date.now() < this.checkAccountAt) return this.sendingMode;
     this.checkAccountAt = Date.now() + 60_000;
-    this.productionSendingEnabled = false;
+    this.sendingMode = 'disabled';
     try {
       const account = await this.sesClient().send(new GetAccountCommand({}), {
         abortSignal: this.requestSignal()
       });
-      this.productionSendingEnabled = account.ProductionAccessEnabled === true && account.SendingEnabled === true;
+      if (account.SendingEnabled === true) {
+        this.sendingMode = account.ProductionAccessEnabled === true ? 'production' : 'sandbox';
+      }
     } catch (error) {
-      this.logger.warn({ errorName: (error as Error).name }, 'Could not read SES production access; email delivery remains queued');
+      this.logger.warn({ errorName: (error as Error).name }, 'Could not read SES account status; email delivery remains queued');
     }
-    return this.productionSendingEnabled;
+    return this.sendingMode;
   }
 
   private async dispatch(): Promise<void> {
@@ -193,7 +200,8 @@ export class EmailWorker {
         this.maintenanceAt = Date.now() + 60_000;
       }
       if (!this.isConfigured() || this.stopping) return;
-      if (!(await this.canSendInProduction()) || this.stopping) return;
+      const mode = await this.refreshSendingMode();
+      if (mode === 'disabled' || this.stopping) return;
       // Keep the existing shared limit across worker replicas.
       const permit = await this.database.pool.query(
         `INSERT INTO email_sender_limits (region, next_attempt_at)
@@ -206,6 +214,8 @@ export class EmailWorker {
         SELECT queued.id FROM email_deliveries queued
         WHERE expires_at > now() + minimum_validity_seconds * interval '1 second' AND available_at <= now()
           AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))
+          AND ($1::boolean OR (queued.tag IN ('new-order-notification', 'studio-health-alert')
+            AND lower(queued.recipient) = ANY($2::text[])))
           AND NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = queued.recipient)
           AND (queued.payload->>'linkTokenHash' IS NULL OR EXISTS (
             SELECT 1 FROM email_active_links l WHERE l.token_hash = queued.payload->>'linkTokenHash' AND l.tag = queued.tag
@@ -217,7 +227,8 @@ export class EmailWorker {
         ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1
       ) UPDATE email_deliveries d SET status = 'sending', attempts = attempts + 1,
           locked_until = now() + interval '5 minutes'
-        FROM candidate WHERE d.id = candidate.id RETURNING d.id, d.recipient, d.payload, d.attempts`);
+        FROM candidate WHERE d.id = candidate.id RETURNING d.id, d.recipient, d.payload, d.attempts`,
+        [mode === 'production', this.internalOrderRecipients]);
       const row = claimed.rows[0];
       if (row) await this.deliver(row);
     } catch (error) {

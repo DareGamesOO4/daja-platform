@@ -100,6 +100,16 @@ const envSchema = z.object({
 
 export type AppConfig = z.infer<typeof envSchema>;
 
+export function rawEmailAddress(value: string): string {
+  const match = /<([^>]+)>/.exec(value);
+  return (match?.[1] ?? value).trim();
+}
+
+export function orderNotificationRecipients(config: AppConfig): string[] {
+  const value = config.ORDER_NOTIFICATION_EMAILS || config.SES_REPLY_TO_EMAIL || config.STOREFRONT_ADMIN_EMAILS;
+  return value.split(',').map(rawEmailAddress).filter(Boolean);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
