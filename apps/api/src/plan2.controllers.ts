@@ -1101,11 +1101,14 @@ export class StaffCatalogController {
   @Throttle({ default: { limit: 300, ttl: 60_000 } })
   async staffCatalogSearch(@Req() request: Request, @Query() query: Record<string, string | undefined>,
     @Res({ passthrough: true }) response: Response): Promise<CatalogSearchResponse> {
+    const started = performance.now();
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     response.setHeader('Cache-Control', 'private, no-store');
-    return searchPublicCatalog(this.database.pool, ctx.organizationId, parseWithSchema(publicSearchQuerySchema, query),
+    const result = await searchPublicCatalog(this.database.pool, ctx.organizationId, parseWithSchema(publicSearchQuerySchema, query),
       { contributorId: this.isCatalogContributor(ctx) ? ctx.userId : undefined });
+    response.setHeader('Server-Timing', `search;dur=${(performance.now() - started).toFixed(1)}`);
+    return result;
   }
 
   @Get('staff/catalog/products/:slug')

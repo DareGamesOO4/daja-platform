@@ -718,12 +718,36 @@ function cursorOffset(cursor: string | undefined, key: string): number {
   } catch { throw new ValidationFailedError('Neispravan kursor pretrage.'); }
 }
 // Resolve model fragments against database indexes without preparing the full catalog.
-async function indexedModelSuggestions(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse | null> {
+async function indexedModelSuggestions(pool: Pool, organizationId: string, input: SearchQuery,
+  staff?: { contributorId?: string | undefined }): Promise<CatalogSearchResponse | null> {
   const query = input.q.trim();
   if (input.mode !== 'suggestions' || input.sort !== 'relevance' ||
       !/^[a-z0-9][a-z0-9._/-]*$/i.test(query) || !/[a-z]/i.test(query) || !/\d/.test(query)) return null;
   const code = compact(query);
   if (code.length < 3) return null;
+  // The public branches still use their partial trigram indexes. The staff
+  // branch only checks hidden watches visible to this staff member.
+  const hiddenWatch = `d.slug='satovi' AND NOT (p.active AND p.published)
+    AND ($5::uuid IS NULL OR p.created_by_user_id=$5)`;
+  const hiddenCandidates = staff ? `
+      UNION ALL
+      SELECT p.id, greatest(
+        CASE WHEN codes.name=$2 THEN 3 WHEN codes.name LIKE $2 || '%' THEN 2 WHEN codes.name LIKE '%' || $2 || '%' THEN 1 ELSE 0 END,
+        CASE WHEN codes.sku=$2 THEN 3 WHEN codes.sku LIKE $2 || '%' THEN 2 WHEN codes.sku LIKE '%' || $2 || '%' THEN 1 ELSE 0 END,
+        CASE WHEN codes.mpn=$2 THEN 3 WHEN codes.mpn LIKE $2 || '%' THEN 2 WHEN codes.mpn LIKE '%' || $2 || '%' THEN 1 ELSE 0 END
+      ) AS priority
+      FROM products p
+      JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id AND d.deleted_at IS NULL
+      JOIN product_variants v ON v.product_id=p.id AND v.organization_id=p.organization_id AND v.deleted_at IS NULL
+      CROSS JOIN LATERAL (SELECT
+        regexp_replace(lower(p.name), '[^a-z0-9]', '', 'g') AS name,
+        regexp_replace(lower(v.sku), '[^a-z0-9]', '', 'g') AS sku,
+        regexp_replace(lower(v.mpn), '[^a-z0-9]', '', 'g') AS mpn
+      ) codes
+      WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND ${hiddenWatch}
+        AND ($4::text IS NULL OR $4='satovi')
+        AND (codes.name LIKE '%' || $2 || '%' OR codes.sku LIKE '%' || $2 || '%' OR codes.mpn LIKE '%' || $2 || '%')
+  ` : '';
   const matches = await pool.query<{ id: string; department: string; priority: number }>(`
     WITH candidates AS (
       SELECT product_id AS id, CASE WHEN regexp_replace(lower(sku), '[^a-z0-9]', '', 'g') = $2 THEN 3
@@ -740,20 +764,24 @@ async function indexedModelSuggestions(pool: Pool, organizationId: string, input
         WHEN regexp_replace(lower(name), '[^a-z0-9]', '', 'g') LIKE $2 || '%' THEN 2 ELSE 1 END AS priority
       FROM products WHERE organization_id = $1 AND deleted_at IS NULL AND active AND published
         AND regexp_replace(lower(name), '[^a-z0-9]', '', 'g') LIKE '%' || $2 || '%'
+      ${hiddenCandidates}
     )
     SELECT p.id, d.slug AS department, max(candidate.priority) AS priority FROM candidates candidate
     JOIN products p ON p.id = candidate.id AND p.organization_id = $1
     JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
-    WHERE p.deleted_at IS NULL AND p.active AND p.published
+    WHERE p.deleted_at IS NULL
       AND d.slug = ANY($3::text[]) AND ($4::text IS NULL OR d.slug = $4)
-      AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id
-        AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.active AND v.published)
-    GROUP BY p.id, d.slug ORDER BY priority DESC, p.name, p.id`, [organizationId, code, departments, input.department ?? null]);
+      AND ((p.active AND p.published AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id
+        AND v.organization_id = p.organization_id AND v.deleted_at IS NULL AND v.active AND v.published))
+        ${staff ? `OR (${hiddenWatch})` : ''})
+    GROUP BY p.id, d.slug ORDER BY priority DESC, p.name, p.id`,
+    [organizationId, code, departments, input.department ?? null, ...(staff ? [staff.contributorId ?? null] : [])]);
   // Unknown codes still receive the existing spelling corrections and fallback search.
   if (!matches.rows.length) return null;
   const selected = matches.rows.slice(0, 6);
   const ids = selected.map(row => row.id);
-  const { items } = await new CatalogRepository(pool).listPublicProducts({ organizationId }, { productIds: ids, limit: ids.length });
+  const { items } = await new CatalogRepository(pool).listPublicProducts(
+    { organizationId }, { productIds: ids, limit: ids.length, hiddenWatches: staff });
   if (!items.length) return null;
   const priority = new Map(selected.map(row => [row.id, row.priority]));
   items.sort((a, b) => (priority.get(b.productId) || 0) - (priority.get(a.productId) || 0)
@@ -769,7 +797,7 @@ async function indexedModelSuggestions(pool: Pool, organizationId: string, input
 
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery,
   staff?: { contributorId?: string | undefined }): Promise<CatalogSearchResponse> {
-  const exact = staff ? null : await indexedModelSuggestions(pool, organizationId, input);
+  const exact = await indexedModelSuggestions(pool, organizationId, input, staff);
   if (exact) return exact;
   const data=await snapshot(pool,organizationId,staff);
   let cached = searchResults.get(data);
