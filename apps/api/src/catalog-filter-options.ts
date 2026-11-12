@@ -1,6 +1,7 @@
 interface Condition { source: string; values: string[] }
 interface Option { id: string; label: string; visible: boolean; conditions: Condition[] }
 interface Node { mode: string; sources: string[]; options: Option[]; children: Node[]; autoAddOptions?: boolean | undefined; style: string; unit?: string }
+const optionNames = new Intl.Collator('sr-Latn', { numeric: true });
 
 /** Expand a response, never the stored draft. Hidden/merged conditions reserve their values too. */
 export function automaticFilterOptions<T extends Node>(nodes: T[], read: (source: string) => string[]): T[] {
@@ -20,7 +21,7 @@ export function automaticFilterOptions<T extends Node>(nodes: T[], read: (source
         const match = value.replace(',', '.').match(/^(\d+(?:\.\d+)?)\s*([^\d]*)$/);
         return !!match && (!match[2]?.trim() || match[2].trim().toLowerCase() === (node.unit || '').toLowerCase());
       })
-      .sort((a, b) => a.localeCompare(b, 'sr-Latn', { numeric: true }))
+      .sort(optionNames.compare)
       .map((value) => ({ id: `auto_${encodeURIComponent(source)}:${encodeURIComponent(value)}`, label: source.startsWith('feature:') ? source.slice(8) : value, visible: true, color: '', image: '', conditions: [{ source, values: [value] }] })));
     return { ...node, options: [...node.options, ...additions] };
   });

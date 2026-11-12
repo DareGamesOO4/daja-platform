@@ -170,13 +170,19 @@ function readValues(row: SearchRow, source: string): string[] {
     const key = source.slice(5);
     if (internal(key)) return [];
     const attrs = publicAttributes(row.attributes);
-    let index = normalizedAttributes.get(row);
-    if (!index) {
-      index = new Map();
-      for (const [name, value] of Object.entries(attrs)) if (!index.has(normalize(name))) index.set(normalize(name), value);
-      normalizedAttributes.set(row, index);
+    let raw = attrs[key];
+    if (raw === null || raw === undefined) {
+      let index = normalizedAttributes.get(row);
+      if (!index) {
+        index = new Map();
+        for (const [name, value] of Object.entries(attrs)) {
+          const normalized = normalize(name);
+          if (!index.has(normalized)) index.set(normalized, value);
+        }
+        normalizedAttributes.set(row, index);
+      }
+      raw = index.get(normalize(key));
     }
-    const raw = attrs[key] ?? index.get(normalize(key));
     return (Array.isArray(raw) ? raw : [raw]).filter((item) => item !== null && item !== undefined && typeof item !== 'object').map(String);
   }
   return [String(source === 'brand' ? row.brand ?? '' : source === 'category' ? row.category ?? '' : '')];
@@ -271,7 +277,18 @@ async function snapshot(pool: Pool, organizationId: string, staff?: { contributo
     const facets: Facet[] = [];
     for (const config of configs.rows) {
       const rows = products.rows.filter((row) => row.department === config.department);
-      collectFacets(config.department, automaticFilterOptions(config.published?.filters ?? [], (source) => rows.flatMap((row) => values(row, source))), facets);
+      const optionsBySource = new Map<string, string[]>();
+      const filters = automaticFilterOptions(config.published?.filters ?? [], (source) => {
+        let options = optionsBySource.get(source);
+        if (!options) {
+          const distinct = new Set<string>();
+          for (const row of rows) for (const value of values(row, source)) distinct.add(value);
+          options = [...distinct];
+          optionsBySource.set(source, options);
+        }
+        return options;
+      });
+      collectFacets(config.department, filters, facets);
     }
     const entries = products.rows.map((row): Entry => ({
       row, codes: [...new Set([row.sku, row.mpn, row.name].filter(Boolean).map(compact))],
@@ -796,16 +813,25 @@ async function indexedModelSuggestions(pool: Pool, organizationId: string, input
 }
 
 export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery,
-  staff?: { contributorId?: string | undefined }): Promise<CatalogSearchResponse> {
+  staff?: { contributorId?: string | undefined }, timings?: string[]): Promise<CatalogSearchResponse> {
+  let started = performance.now();
   const exact = await indexedModelSuggestions(pool, organizationId, input, staff);
+  timings?.push(`model;dur=${(performance.now() - started).toFixed(1)}`);
   if (exact) return exact;
+  started = performance.now();
   const data=await snapshot(pool,organizationId,staff);
+  timings?.push(`snapshot;dur=${(performance.now() - started).toFixed(1)}`);
+  started = performance.now();
   let cached = searchResults.get(data);
   if (!cached) { cached = new Map(); searchResults.set(data, cached); }
   const { seed: _seed, ...searchInput } = input;
   const key = JSON.stringify(searchInput);
   const known = cached.get(key);
-  if (known && known.expires > Date.now()) return known.promise;
+  if (known && known.expires > Date.now()) {
+    const result = await known.promise;
+    timings?.push(`match;dur=${(performance.now() - started).toFixed(1)}`);
+    return result;
+  }
   const entry = { expires: data.expires, promise: searchSnapshot(pool, organizationId, input, data, staff) };
   cached.set(key, entry);
   while (cached.size > 64) cached.delete(cached.keys().next().value!);
@@ -817,6 +843,7 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
       if (Number.isFinite(expiry)) entry.expires = Math.min(entry.expires, expiry);
     }
     result.cacheUntil = entry.expires;
+    timings?.push(`match;dur=${(performance.now() - started).toFixed(1)}`);
     return result;
   } catch (error) { if (cached.get(key) === entry) cached.delete(key); throw error; }
 }

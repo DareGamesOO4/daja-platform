@@ -290,8 +290,9 @@ export class PublicCatalogController {
   async search(@Req() request: Request, @Query() query: Record<string, string | undefined>,
     @Res({ passthrough: true }) response: Response): Promise<CatalogSearchResponse> {
     const started = performance.now();
-    const result = await searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query));
-    response.setHeader('Server-Timing', `search;dur=${(performance.now() - started).toFixed(1)}`);
+    const timings: string[] = [];
+    const result = await searchPublicCatalog(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(publicSearchQuerySchema, query), undefined, timings);
+    response.setHeader('Server-Timing', [`search;dur=${(performance.now() - started).toFixed(1)}`, ...timings].join(', '));
     response.setHeader('Cache-Control', 'private, no-store');
     return result;
   }
@@ -1105,9 +1106,10 @@ export class StaffCatalogController {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'catalog.read');
     response.setHeader('Cache-Control', 'private, no-store');
+    const timings: string[] = [];
     const result = await searchPublicCatalog(this.database.pool, ctx.organizationId, parseWithSchema(publicSearchQuerySchema, query),
-      { contributorId: this.isCatalogContributor(ctx) ? ctx.userId : undefined });
-    response.setHeader('Server-Timing', `search;dur=${(performance.now() - started).toFixed(1)}`);
+      { contributorId: this.isCatalogContributor(ctx) ? ctx.userId : undefined }, timings);
+    response.setHeader('Server-Timing', [`search;dur=${(performance.now() - started).toFixed(1)}`, ...timings].join(', '));
     return result;
   }
 
