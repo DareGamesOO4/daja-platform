@@ -144,26 +144,39 @@ export async function supplierLinkActions(
   });
 }
 
-const LINK_VIEW = `WITH links AS (${STATE_SELECT.replace('SELECT l.id,', `SELECT product.name AS "productName", product.slug AS "productSlug",
+const LINK_SOURCE = `${STATE_SELECT.replace('SELECT l.id,', `SELECT product.name AS "productName", product.slug AS "productSlug",
  product.active AS "productActive", product.published AS "productPublished",
  product.brand_id AS "brandId", product.department_id AS "departmentId", l.id,`)}
  JOIN products product ON product.id=l.product_id AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
- WHERE l.organization_id=$1 AND NOT l.removed AND l.url IS NOT NULL)
- SELECT * FROM links WHERE ($2::text IS NULL OR "providerCode"=$2)
- AND ($3::text IS NULL OR status=$3)
- AND ($4::text IS NULL OR "productName" ILIKE '%'||$4||'%' OR url ILIKE '%'||$4||'%')
+ WHERE l.organization_id=$1 AND NOT l.removed AND l.url IS NOT NULL`;
+const STOCK = `CASE WHEN "stockConfirmationPending" OR "lastError" IS NOT NULL
+  THEN 'unknown' ELSE COALESCE("stockStatus",'unknown') END`;
+const VISIBILITY = `CASE WHEN "productActive" AND "productPublished" THEN 'visible' ELSE 'hidden' END`;
+const FACETS = [
+  { key: 'provider', value: '"providerCode"', parameter: '$2::text' },
+  { key: 'status', value: 'status', parameter: '$3::text' },
+  { key: 'brandId', value: '"brandId"', parameter: '$6::uuid' },
+  { key: 'departmentId', value: '"departmentId"', parameter: '$7::uuid' },
+  { key: 'stock', value: STOCK, parameter: '$8::text' },
+  { key: 'visibility', value: VISIBILITY, parameter: '$9::text' }
+] as const;
+const FACET_MATCHES = FACETS.map(({ value, parameter }) => `(${parameter} IS NULL OR (${value})=${parameter})`);
+const SHARED_FILTERS = `($4::text IS NULL OR "productName" ILIKE '%'||$4||'%' OR url ILIKE '%'||$4||'%')
  AND (NOT $5::boolean OR status IN ('disabled','waiting_confirmation','unverified','missing') OR "lastError" IS NOT NULL OR "stockStatus"='out_of_stock')
- AND ($6::uuid IS NULL OR "brandId"=$6)
- AND ($7::uuid IS NULL OR "departmentId"=$7)
- AND ($8::text IS NULL OR (CASE WHEN "stockConfirmationPending" OR "lastError" IS NOT NULL
-   THEN 'unknown' ELSE COALESCE("stockStatus",'unknown') END)=$8)
- AND ($9::text IS NULL OR ("productActive" AND "productPublished")=($9='visible'))
  AND (NOT $10::boolean OR EXISTS (
    SELECT 1 FROM supplier_product_links alternative
    WHERE alternative.organization_id=$1 AND alternative.product_id=links."productId"
      AND alternative.id<>links.id AND NOT alternative.removed AND alternative.url IS NOT NULL
      AND alternative.stock_status='in_stock' AND alternative.last_error IS NULL AND alternative.negative_count=0
  ))`;
+const LINK_VIEW = `WITH links AS (${LINK_SOURCE})
+ SELECT * FROM links WHERE ${FACET_MATCHES.join(' AND ')} AND ${SHARED_FILTERS}`;
+
+// Each menu excludes its own selection and uses the other filters across all pages.
+const FACET_COLUMNS = FACETS.map(({ key, value }, index) => {
+  const otherMatches = FACET_MATCHES.filter((_, position) => position !== index).join(' AND ');
+  return `COALESCE(array_agg(DISTINCT (${value})) FILTER (WHERE (${value}) IS NOT NULL AND ${otherMatches}), '{}') AS "${key}"`;
+});
 export async function supplierLinksList(
   pool: pg.Pool,
   organizationId: string,
@@ -197,8 +210,11 @@ export async function supplierLinksList(
       items: (await pool.query(LINK_VIEW + ` ORDER BY ${order} ${direction} NULLS LAST,id`, values))
         .rows
     };
-  const count = await pool.query(
-    `SELECT count(*)::integer AS total FROM (${LINK_VIEW}) filtered`,
+  const summary = await pool.query<{ total: number } & Record<(typeof FACETS)[number]['key'], string[]>>(
+    `WITH links AS (${LINK_SOURCE})
+     SELECT count(*) FILTER (WHERE ${FACET_MATCHES.join(' AND ')})::integer AS total,
+       ${FACET_COLUMNS.join(',\n')}
+     FROM links WHERE ${SHARED_FILTERS}`,
     values
   );
   const items = await pool.query(
@@ -215,7 +231,8 @@ export async function supplierLinksList(
      ORDER BY page.${order} ${direction} NULLS LAST,page.id`,
     [...values, ((filters.page || 1) - 1) * 50]
   );
-  return { items: items.rows, total: count.rows[0].total, page: filters.page || 1 };
+  const { total, ...facets } = summary.rows[0]!;
+  return { items: items.rows, total, facets, page: filters.page || 1 };
 }
 export async function supplierStatistics(
   pool: pg.Pool,
