@@ -1165,7 +1165,8 @@ export class StorefrontRepository {
          ORDER BY h.created_at DESC LIMIT 1
        ) status_change ON true
        LEFT JOIN LATERAL (
-         SELECT jsonb_agg(jsonb_build_object('tag', e.tag, 'recipient', e.recipient, 'status', e.status,
+         SELECT jsonb_agg(jsonb_build_object('id', e.id, 'canRetry', e.can_retry,
+           'tag', e.tag, 'recipient', e.recipient, 'status', e.status,
            'sentAt', e.sent_at, 'feedback', e.feedback_type, 'feedbackAt', e.feedback_at,
            'attempts', e.attempts) ORDER BY e.tag, e.recipient) AS deliveries
          FROM email_delivery_status e WHERE e.organization_id = o.organization_id

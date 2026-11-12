@@ -779,11 +779,29 @@ export class StorefrontOrdersController {
   async retryEmail(@Req() request: Request, @Param('id') id: string) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'privacy.manage');
+    return this.queueEmailRetry(ctx, id);
+  }
+
+  @Post('admin/orders/:orderId/emails/:id/retry')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async retryOrderEmail(@Req() request: Request, @Param('orderId') orderId: string, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'orders.write');
+    return this.queueEmailRetry(ctx, id, parseWithSchema(uuidSchema, orderId));
+  }
+
+  private async queueEmailRetry(ctx: ReturnType<typeof resolveRequestContext>, id: string, orderId?: string) {
     const result = await this.database.pool.query(`UPDATE email_deliveries d SET status = 'pending', available_at = now(),
       last_error = NULL, locked_until = NULL WHERE d.id = $1 AND d.organization_id = $2
       AND (d.status = 'pending' OR (d.status = 'failed' AND d.retryable))
+      AND ($3::uuid IS NULL OR (
+        d.tag IN ('order-confirmation', 'new-order-notification')
+        AND split_part(d.deduplication_key, ':', 1) = 'order-created'
+        AND split_part(d.deduplication_key, ':', 2) = $3::uuid::text
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.id = $3 AND o.organization_id = $2 AND o.deleted_at IS NULL)
+      ))
       AND EXISTS (SELECT 1 FROM email_delivery_status v WHERE v.id = d.id AND v.can_retry) RETURNING d.id`,
-      [parseWithSchema(uuidSchema, id), ctx.organizationId]);
+      [parseWithSchema(uuidSchema, id), ctx.organizationId, orderId ?? null]);
     if (!result.rowCount) throw new ValidationFailedError('Poruka se ne može ponoviti. Za istekao link zatražite novi email.');
     this.logger.info({ deliveryId: id, userId: ctx.userId }, 'Administrator requested email retry');
     return { queued: true };
