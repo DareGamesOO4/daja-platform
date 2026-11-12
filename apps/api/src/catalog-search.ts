@@ -56,11 +56,15 @@ export interface CatalogSearchResponse {
   nextCursor: string | null;
 }
 interface Entry { row: SearchRow; codes: string[]; name: string; brand: string; category: string; specs: string; features: string; description: string }
-interface Snapshot { entries: Entry[]; facets: Facet[]; synonyms: SearchSynonym[]; expires: number }
-const snapshots = new Map<string, Promise<Snapshot>>();
+interface Snapshot { entries: Entry[]; facets: Facet[]; synonyms: SearchSynonym[]; expires: number; refreshAfter: number }
+interface SnapshotSlot { current?: Snapshot; pending?: Promise<Snapshot>; invalidated?: boolean }
+const snapshots = new Map<string, SnapshotSlot>();
 export function invalidateCatalogSearch(organizationId: string) {
-  for (const key of snapshots.keys()) {
-    if (key === organizationId || key.startsWith(`${organizationId}:`)) snapshots.delete(key);
+  for (const [key, slot] of snapshots) {
+    if (key === organizationId || key.startsWith(`${organizationId}:`)) {
+      slot.invalidated = true;
+      snapshots.delete(key);
+    }
   }
 }
 const searchResults = new WeakMap<Snapshot, Map<string, { expires: number; promise: Promise<CatalogSearchResponse> }>>();
@@ -189,11 +193,12 @@ function readValues(row: SearchRow, source: string): string[] {
 }
 const membershipCache = new WeakMap<SearchRow, WeakMap<Facet, boolean>>();
 function optionMatches(row: SearchRow, facet: Facet) {
+  if (row.department !== facet.department) return false;
   let cached = membershipCache.get(row);
   if (!cached) { cached = new WeakMap(); membershipCache.set(row, cached); }
   const known = cached.get(facet);
   if (known !== undefined) return known;
-  const result = row.department === facet.department && facet.option.conditions.some((condition) => condition.values.some((value) => values(row, condition.source).includes(value)));
+  const result = facet.option.conditions.some((condition) => condition.values.some((value) => values(row, condition.source).includes(value)));
   cached.set(facet, result);
   return result;
 }
@@ -219,98 +224,123 @@ function collectFacets(department: string, nodes: Node[], result: Facet[]) {
   }
 }
 
-async function snapshot(pool: Pool, organizationId: string, staff?: { contributorId?: string | undefined }): Promise<Snapshot> {
+async function snapshot(pool: Pool, organizationId: string, staff?: { contributorId?: string | undefined }, timings?: string[]): Promise<Snapshot> {
   const cacheKey = staff ? `${organizationId}:${staff.contributorId ?? 'staff'}` : organizationId;
-  const cached = snapshots.get(cacheKey);
-  if (cached) {
-    const value = await cached;
-    // Another request may already have replaced this expired snapshot.
-    if (snapshots.get(cacheKey) !== cached) return snapshot(pool, organizationId, staff);
-    if (value.expires > Date.now()) return value;
-    snapshots.delete(cacheKey);
+  let slot = snapshots.get(cacheKey);
+  if (!slot) {
+    if (snapshots.size >= 20) snapshots.delete(snapshots.keys().next().value!);
+    slot = {};
+    snapshots.set(cacheKey, slot);
   }
-  const loading = (async () => {
-    // Only lightweight searchable metadata is cached on the server. Images and
-    // current public cards are loaded for the selected IDs, never for every keypress.
-    const [products, initialConfigs, searchSettings, priceBoundary] = await Promise.all([
-      pool.query<SearchRow>(`SELECT p.id, p.name, p.slug, p.description, p.features,
-        v.sku, v.mpn, v.gender, v.attributes, b.name AS brand, c.name AS category, d.slug AS department,
-        COALESCE(sale.amount_minor, v.current_price_amount) AS price,
-        COALESCE(inv.quantity, 0) > 0 AS in_stock
-        FROM products p
-        JOIN LATERAL (SELECT * FROM product_variants pv WHERE pv.organization_id = p.organization_id AND pv.product_id = p.id
-          AND pv.deleted_at IS NULL AND ((pv.active AND pv.published) OR ($3::boolean AND NOT (p.active AND p.published)))
-          ORDER BY (pv.active AND pv.published) DESC, pv.current_price_amount DESC, pv.id LIMIT 1) v ON true
-        JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
-        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
-        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
-        LEFT JOIN LATERAL (SELECT amount_minor FROM variant_prices vp WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
-          AND vp.price_type = 'sale' AND vp.valid_from <= now() AND vp.cancelled_at IS NULL AND (vp.valid_until IS NULL OR vp.valid_until > now())
-          ORDER BY vp.valid_from DESC, vp.created_at DESC LIMIT 1) sale ON true
-        LEFT JOIN LATERAL (SELECT SUM(quantity) AS quantity FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id) inv ON true
-        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND d.slug = ANY($2::text[])
-          AND ((p.active AND p.published) OR ($3::boolean AND d.slug='satovi'
-            AND ($4::uuid IS NULL OR p.created_by_user_id=$4)))`,
-        [organizationId, departments, Boolean(staff), staff?.contributorId ?? null]),
-      pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]),
-      pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId]),
-      pool.query<{ at: Date | null }>(`SELECT min(boundary) AS at FROM (
-        SELECT min(valid_from) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_from>now()
-        UNION ALL
-        SELECT min(valid_until) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_until>now()
-      ) boundaries`, [organizationId])
-    ]);
-    let configs = initialConfigs;
-    const missing = departments.filter((department) => !configs.rows.some((config) => config.department === department));
-    if (missing.length) {
-      // Use the same one-time baseline as the public filters endpoint. Never
-      // regenerate an existing configuration or approve a new option here.
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        for (const department of missing) await initializeCatalogFilters(client, organizationId, department);
-        await client.query('COMMIT');
-      } catch (error) { await client.query('ROLLBACK'); throw error; }
-      finally { client.release(); }
-      configs = await pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]);
+  const now = Date.now();
+  const current = slot.current;
+  if (current && current.expires > now) {
+    // Refresh in the background only when a real search is still using this
+    // scope. A scheduled sale boundary still ends the usable lifetime.
+    if (current.refreshAfter <= now && !slot.pending) {
+      current.refreshAfter = Infinity;
+      void refreshSnapshot(slot, pool, organizationId, staff).catch(() => {});
     }
-    const facets: Facet[] = [];
-    for (const config of configs.rows) {
-      const rows = products.rows.filter((row) => row.department === config.department);
-      const optionsBySource = new Map<string, string[]>();
-      const filters = automaticFilterOptions(config.published?.filters ?? [], (source) => {
-        let options = optionsBySource.get(source);
-        if (!options) {
-          const distinct = new Set<string>();
-          for (const row of rows) for (const value of values(row, source)) distinct.add(value);
-          options = [...distinct];
-          optionsBySource.set(source, options);
-        }
-        return options;
-      });
-      collectFacets(config.department, filters, facets);
-    }
-    const entries = products.rows.map((row): Entry => ({
-      row, codes: [...new Set([row.sku, row.mpn, row.name].filter(Boolean).map(compact))],
-      name: canonical(row.name), brand: canonical(row.brand), category: canonical(row.category),
-      // Boolean specification keys cannot imply function presence: only an
-      // approved condition or an explicit feature title can establish it.
-      specs: canonical([...watchSeries(row), ...Object.entries(publicAttributes(row.attributes)).flatMap(([key, value]) => {
-        const items = (Array.isArray(value) ? value : [value]).filter((item) => item !== null && item !== undefined && typeof item !== 'object');
-        return items.length && !items.every((item) => /^(da|ne|yes|no|true|false|0|1)$/i.test(String(item).trim())) ? [key, ...items] : [];
-      })].join(' ')),
-      features: canonical(publicFeatures(row.features).map((feature) => `${feature.title} ${feature.subtitle ?? ''}`).join(' ')),
-      description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
-    }));
-    const boundary = priceBoundary.rows[0]?.at?.getTime() ?? Infinity;
-    // Catalog, inventory, price and media events invalidate this snapshot.
-    // Keep the index between searches; scheduled sale boundaries still expire it.
-    return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Math.min(Date.now() + 60_000, boundary) };
-  })();
-  // Bound the organization cache and deduplicate concurrent cold requests.
-  if (snapshots.size >= 20 && !snapshots.has(cacheKey)) snapshots.delete(snapshots.keys().next().value ?? '');
-  snapshots.set(cacheKey, loading);
-  try { return await loading; } catch (error) { if (snapshots.get(cacheKey) === loading) snapshots.delete(cacheKey); throw error; }
+    return current;
+  }
+  const loaded = await (slot.pending ?? refreshSnapshot(slot, pool, organizationId, staff, timings));
+  return slot.invalidated ? snapshot(pool, organizationId, staff, timings) : loaded;
+}
+
+function refreshSnapshot(slot: SnapshotSlot, pool: Pool, organizationId: string,
+  staff?: { contributorId?: string | undefined }, timings?: string[]): Promise<Snapshot> {
+  slot.pending = loadSnapshot(pool, organizationId, staff, timings).then((next) => {
+    slot.current = next;
+    return next;
+  }).finally(() => { delete slot.pending; });
+  return slot.pending;
+}
+
+async function loadSnapshot(pool: Pool, organizationId: string,
+  staff?: { contributorId?: string | undefined }, timings?: string[]): Promise<Snapshot> {
+  const databaseStarted = performance.now();
+  // Only lightweight searchable metadata is cached on the server. Images and
+  // current public cards are loaded for the selected IDs, never for every keypress.
+  const [products, initialConfigs, searchSettings, priceBoundary] = await Promise.all([
+    pool.query<SearchRow>(`SELECT p.id, p.name, p.slug, p.description, p.features,
+      v.sku, v.mpn, v.gender, v.attributes, b.name AS brand, c.name AS category, d.slug AS department,
+      COALESCE(sale.amount_minor, v.current_price_amount) AS price,
+      EXISTS (SELECT 1 FROM inventory_balances ib WHERE ib.organization_id = p.organization_id
+        AND ib.variant_id = v.id AND ib.quantity > 0) AS in_stock
+      FROM products p
+      JOIN LATERAL (SELECT * FROM product_variants pv WHERE pv.organization_id = p.organization_id AND pv.product_id = p.id
+        AND pv.deleted_at IS NULL AND ((pv.active AND pv.published) OR ($3::boolean AND NOT (p.active AND p.published)))
+        ORDER BY (pv.active AND pv.published) DESC, pv.current_price_amount DESC, pv.id LIMIT 1) v ON true
+      JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
+      LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
+      LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
+      LEFT JOIN LATERAL (SELECT amount_minor FROM variant_prices vp WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+        AND vp.price_type = 'sale' AND vp.valid_from <= now() AND vp.cancelled_at IS NULL AND (vp.valid_until IS NULL OR vp.valid_until > now())
+        ORDER BY vp.valid_from DESC, vp.created_at DESC LIMIT 1) sale ON true
+      WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND d.slug = ANY($2::text[])
+        AND ((p.active AND p.published) OR ($3::boolean AND d.slug='satovi'
+          AND ($4::uuid IS NULL OR p.created_by_user_id=$4)))`,
+      [organizationId, departments, Boolean(staff), staff?.contributorId ?? null]),
+    pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]),
+    pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId]),
+    pool.query<{ at: Date | null }>(`SELECT min(boundary) AS at FROM (
+      SELECT min(valid_from) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_from>now()
+      UNION ALL
+      SELECT min(valid_until) AS boundary FROM variant_prices WHERE organization_id=$1 AND price_type='sale' AND cancelled_at IS NULL AND valid_until>now()
+    ) boundaries`, [organizationId])
+  ]);
+  let configs = initialConfigs;
+  const missing = departments.filter((department) => !configs.rows.some((config) => config.department === department));
+  if (missing.length) {
+    // Use the same one-time baseline as the public filters endpoint. Never
+    // regenerate an existing configuration or approve a new option here.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const department of missing) await initializeCatalogFilters(client, organizationId, department);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+    configs = await pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]);
+  }
+  timings?.push(`snapshot_db;dur=${(performance.now() - databaseStarted).toFixed(1)}`);
+  const indexStarted = performance.now();
+  const facets: Facet[] = [];
+  for (const config of configs.rows) {
+    const rows = products.rows.filter((row) => row.department === config.department);
+    const optionsBySource = new Map<string, string[]>();
+    const filters = automaticFilterOptions(config.published?.filters ?? [], (source) => {
+      let options = optionsBySource.get(source);
+      if (!options) {
+        const distinct = new Set<string>();
+        for (const row of rows) for (const value of values(row, source)) distinct.add(value);
+        options = [...distinct];
+        optionsBySource.set(source, options);
+      }
+      return options;
+    });
+    collectFacets(config.department, filters, facets);
+  }
+  const entries = products.rows.map((row): Entry => ({
+    row, codes: [...new Set([row.sku, row.mpn, row.name].filter(Boolean).map(compact))],
+    name: canonical(row.name), brand: canonical(row.brand), category: canonical(row.category),
+    // Boolean specification keys cannot imply function presence: only an
+    // approved condition or an explicit feature title can establish it.
+    specs: canonical([...watchSeries(row), ...Object.entries(publicAttributes(row.attributes)).flatMap(([key, value]) => {
+      const items = (Array.isArray(value) ? value : [value]).filter((item) => item !== null && item !== undefined && typeof item !== 'object');
+      return items.length && !items.every((item) => /^(da|ne|yes|no|true|false|0|1)$/i.test(String(item).trim())) ? [key, ...items] : [];
+    })].join(' ')),
+    features: canonical(publicFeatures(row.features).map((feature) => `${feature.title} ${feature.subtitle ?? ''}`).join(' ')),
+    description: canonical(String(row.description ?? '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>|&(?:[a-z]+|#\d+);/gi, ' '))
+  }));
+  timings?.push(`snapshot_index;dur=${(performance.now() - indexStarted).toFixed(1)}`);
+  const boundary = priceBoundary.rows[0]?.at?.getTime() ?? Infinity;
+  const preparedAt = Date.now();
+  // Catalog, inventory, price and media events invalidate this snapshot.
+  // Keep the index between searches; scheduled sale boundaries still expire it.
+  return { entries, facets, synonyms: searchSettings.rows[0]?.synonyms || [],
+    expires: Math.min(preparedAt + 60_000, boundary),
+    refreshAfter: boundary > preparedAt + 60_000 ? preparedAt + 50_000 : Infinity };
 }
 
 function amount(value: string): number {
@@ -346,7 +376,7 @@ function colorMatch(row:SearchRow,color:string,part?:string){
   return cachedRowTest(row, `color:${color}:${part || ''}`, () => Object.entries(publicAttributes(row.attributes)).some(([key,value])=>/boja|color|colour/.test(normalize(key))&&(!qualifier||qualifier.test(normalize(key)))&&canonical(Array.isArray(value)?value.join(' '):value).split(' ').includes(color)));
 }
 const parsedQueries = new WeakMap<Facet[], Map<string, Parsed>>();
-const parserIndexes = new WeakMap<Facet[], { alternatives: RegExp; aliases: Array<{ pattern: RegExp; matching: Facet[] }> }>();
+const parserIndexes = new WeakMap<Facet[], { alternatives: RegExp; aliases: Array<{ alias: string; pattern: RegExp; matching: Facet[] }> }>();
 function parserIndex(facets: Facet[]) {
   let cached = parserIndexes.get(facets);
   if (cached) return cached;
@@ -359,7 +389,7 @@ function parserIndex(facets: Facet[]) {
   const aliases = [...byAlias.keys()].sort((a,b) => b.length-a.length);
   const atom = `(?:${[...aliases,...colors,'muski','zenski','unisex'].map(escapePattern).join('|')})`;
   cached = { alternatives: new RegExp(`\\b(${atom}(?:\\s+ili\\s+${atom})+)(?:\\s+(narukvica|brojcanik|kuciste))?\\b`, 'g'),
-    aliases: aliases.map(alias => ({ pattern: new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`, 'g'), matching: byAlias.get(alias)! })) };
+    aliases: aliases.map(alias => ({ alias, pattern: new RegExp(`(?<![a-z0-9])(?:(bez|nije)\\s+)?${escapePattern(alias)}(?![a-z0-9])`, 'g'), matching: byAlias.get(alias)! })) };
   parserIndexes.set(facets, cached);
   return cached;
 }
@@ -432,7 +462,8 @@ function parseUncachedQuery(query: string, facets: Facet[], custom:SearchSynonym
   // Accept both "crni brojčanik" and "brojčanik crni".
   text=text.replace(new RegExp(`\\b(brojcanik|narukvica|kuciste)\\s+(${colorWords})\\b`,'g'),(_match,part:string,color:string)=>`${color} ${part}`);
   text=text.replace(new RegExp(`\\b(?:(bez|nije)\\s+)?(${colorWords})(?:\\s+(?:boja\\s+)?(narukvica|brojcanik|kuciste))?\\b`,'g'),(match,negative:string|undefined,color:string,part:string|undefined)=>add(match,`${negative?'Isključena boja':'Boja'}${part?` ${part==='narukvica'?'narukvice':part==='brojcanik'?'brojčanika':'kućišta'}`:''}: ${displayValue(color)}`,row=>negative?!colorMatch(row,color,part):colorMatch(row,color,part)));
-  for(const {pattern,matching} of index.aliases){
+  for(const {alias,pattern,matching} of index.aliases){
+    if (!text.includes(alias)) continue;
     text=text.replace(pattern,(match,negative:string|undefined)=>{
       const facet=matching[0];
       const label=facet&&/^(da|ne|yes|no|true|false|0|1)$/i.test(facet.option.label)?`${displayValue(facet.node.title)}: ${/^(da|yes|true|1)$/i.test(facet.option.label)?'Da':'Ne'}`:displayValue(facet!.option.label);
@@ -452,64 +483,27 @@ function parseUncachedQuery(query: string, facets: Facet[], custom:SearchSynonym
   }
   return {tests:conditions.map(c=>c.test),terms,labels:conditions.map(c=>c.label),conditions,model:terms.some(t=>/[a-z]/.test(t)&&/\d/.test(t))?terms.join(''):''};
 }
-const rankingKeys = new WeakMap<Parsed, Map<string, { whole: string; terms: Array<{ text: string; code: string }> }>>();
-function rank(entry: Entry, parsed: Parsed, query: string): number | null {
-  if (!parsed.tests.every((test) => test(entry.row))) return null;
-  let cached = rankingKeys.get(parsed);
-  if (!cached) { cached = new Map(); rankingKeys.set(parsed, cached); }
-  let keys = cached.get(query);
-  if (!keys) {
-    keys = { whole: compact(query), terms: parsed.terms.map(text => ({ text, code: compact(text) })) };
-    cached.set(query, keys);
-    while (cached.size > 8) cached.delete(cached.keys().next().value!);
-  }
-  let score = 0;
-  const whole = keys.whole;
-  if (entry.codes.includes(whole)) score += 5000;
-  else if (whole && entry.codes.some((code) => code.startsWith(whole))) score += 4000;
-  for (const { text: term, code } of keys.terms) {
-    const part = entry.codes.some((value) => value.includes(code)) ? 1200
-      : entry.name.includes(term) ? 1000 : entry.brand.includes(term) ? 800
-        : entry.category.includes(term) ? 700 : entry.specs.includes(term) || entry.features.includes(term) ? 400
-          : entry.description.includes(term) ? 100 : 0;
-    if (!part) return null;
-    score += part;
-  }
-  return score + parsed.tests.length * 500;
+function keywordScore(entry: Entry, term: string, code: string): number {
+  return entry.codes.some((value) => value.includes(code)) ? 1200
+    : entry.name.includes(term) ? 1000 : entry.brand.includes(term) ? 800
+      : entry.category.includes(term) ? 700 : entry.specs.includes(term) || entry.features.includes(term) ? 400
+        : entry.description.includes(term) ? 100 : 0;
 }
 interface RankedEntry { entry: Entry; score: number }
-// A posting list maps each searchable trigram to its products. The rarest
-// trigram narrows keyword queries before the existing ranking and conditions.
-// Index every field used by rank(), so description/specification matches remain valid.
-const textIndexes = new WeakMap<Entry[], Map<string, Entry[]>>();
-function keywordCandidates(entries: Entry[], parsed: Parsed): Entry[] {
-  const terms = parsed.terms.filter(term => term.length >= 3);
-  if (!terms.length) return entries;
-  let index = textIndexes.get(entries);
-  if (!index) {
-    index = new Map();
-    for (const entry of entries) {
-      const text = [...entry.codes, entry.name, entry.brand, entry.category, entry.specs, entry.features, entry.description].join(' ');
-      const grams = new Set<string>();
-      for (let i = 0; i + 2 < text.length; i++) {
-        const gram = text.slice(i, i + 3);
-        if (!gram.includes(' ')) grams.add(gram);
-      }
-      for (const gram of grams) {
-        let posting = index.get(gram);
-        if (!posting) { posting = []; index.set(gram, posting); }
-        posting.push(entry);
-      }
-    }
-    textIndexes.set(entries, index);
+const keywordMatches = new WeakMap<Entry[], Map<string, RankedEntry[]>>();
+function matchKeyword(entries: Entry[], term: string, code: string): RankedEntry[] {
+  let cache = keywordMatches.get(entries);
+  if (!cache) { cache = new Map(); keywordMatches.set(entries, cache); }
+  const known = cache.get(term);
+  if (known) return known;
+  const rows: RankedEntry[] = [];
+  for (const entry of entries) {
+    const score = keywordScore(entry, term, code);
+    if (score) rows.push({ entry, score });
   }
-  let candidates = entries;
-  for (const term of terms) for (let i = 0; i + 2 < term.length; i++) {
-    const posting = index.get(term.slice(i, i + 3));
-    if (!posting) return [];
-    if (posting.length < candidates.length) candidates = posting;
-  }
-  return candidates;
+  cache.set(term, rows);
+  while (cache.size > 16) cache.delete(cache.keys().next().value!);
+  return rows;
 }
 const rankedQueries = new WeakMap<Entry[], Map<Parsed, { query: string; rows: RankedEntry[] }>>();
 const productNames = new Intl.Collator('sr-Latn', { numeric: true });
@@ -519,9 +513,26 @@ function rankEntries(entries: Entry[], parsed: Parsed, query: string): readonly 
   const known = cached.get(parsed);
   if (known?.query === query) return known.rows;
   const rows: RankedEntry[] = [];
-  for (const entry of keywordCandidates(entries, parsed)) {
-    const score = rank(entry, parsed, query);
-    if (score !== null) rows.push({ entry, score });
+  const whole = compact(query);
+  const terms = parsed.terms.map(text => ({ text, code: compact(text) })).sort((a, b) => b.text.length - a.text.length);
+  const [first, ...remaining] = terms;
+  const add = (entry: Entry, score: number) => {
+    if (!parsed.tests.every(test => test(entry.row))) return;
+    for (const { text, code } of remaining) {
+      const part = keywordScore(entry, text, code);
+      if (!part) return;
+      score += part;
+    }
+    if (entry.codes.includes(whole)) score += 5000;
+    else if (whole && entry.codes.some(code => code.startsWith(whole))) score += 4000;
+    rows.push({ entry, score: score + parsed.tests.length * 500 });
+  };
+  // Scan only for the most specific word first. A cold search no longer builds
+  // a trigram index for every description just to look up one model or word.
+  if (first) {
+    for (const { entry, score } of matchKeyword(entries, first.text, first.code)) add(entry, score);
+  } else {
+    for (const entry of entries) add(entry, 0);
   }
   cached.set(parsed, { query, rows });
   while (cached.size > 64) cached.delete(cached.keys().next().value!);
@@ -700,16 +711,63 @@ function formatSearchQuery(query:string,facets:Facet[],departmentHint?:string):s
   }
   return text.replace(/\s+/g,' ').trim();
 }
+type FacetsBySource = Map<string, Map<string, Facet[]>>;
+const completionFacets = new WeakMap<Facet[], {
+  departments: Map<string, FacetsBySource>;
+  matches: WeakMap<SearchRow, Set<Facet>>;
+}>();
+
+function countCompletionFacets(facets: Facet[], matching: readonly RankedEntry[]) {
+  let index = completionFacets.get(facets);
+  if (!index) {
+    const departments = new Map<string, FacetsBySource>();
+    for (const facet of facets) {
+      let sources = departments.get(facet.department);
+      if (!sources) { sources = new Map(); departments.set(facet.department, sources); }
+      for (const condition of facet.option.conditions) {
+        let byValue = sources.get(condition.source);
+        if (!byValue) { byValue = new Map(); sources.set(condition.source, byValue); }
+        for (const value of condition.values) {
+          let options = byValue.get(value);
+          if (!options) { options = []; byValue.set(value, options); }
+          options.push(facet);
+        }
+      }
+    }
+    index = { departments, matches: new WeakMap() };
+    completionFacets.set(facets, index);
+  }
+  const counts = new Map<Facet, number>();
+  for (const { entry: { row } } of matching) {
+    let options = index.matches.get(row);
+    if (!options) {
+      options = new Set();
+      const sources = index.departments.get(row.department);
+      if (sources) for (const [source, byValue] of sources) {
+        for (const value of values(row, source)) {
+          const matched = byValue.get(value);
+          if (matched) for (const facet of matched) options.add(facet);
+        }
+      }
+      index.matches.set(row, options);
+    }
+    for (const facet of options) counts.set(facet, (counts.get(facet) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function completionQueries(query:string,entries:Entry[],facets:Facet[],custom:SearchSynonym[]){
   const base=prepareQuery(query,custom),result:Array<{label:string;query:string;count:number}>=[];
   if(!base||/\b(?:bez|nije)\b/.test(base))return result;
   const baseParsed=parseQuery(base,facets,custom);
-  const matching=rankEntries(entries,baseParsed,base).map(result=>result.entry);
+  const matching=rankEntries(entries,baseParsed,base);
   if(!matching.length)return result;
-  const candidates=facets.map(facet=>({facet,count:matching.reduce((count,entry)=>count+Number(optionMatches(entry.row,facet)),0)})).filter(item=>item.count).sort((a,b)=>b.count-a.count).slice(0,12);
-  for(const {facet} of candidates){
+  const counts = countCompletionFacets(facets, matching);
+  const candidates = facets.filter(facet => counts.has(facet)).sort((a,b) => counts.get(b)! - counts.get(a)!).slice(0,12);
+  const canonicalBase = ` ${canonical(base)} `;
+  for(const facet of candidates){
     const value=/^(da|yes|true|1)$/i.test(facet.option.label)?facet.node.title:facet.option.label;
-    if(facet.aliases.some(a=>` ${canonical(base)} `.includes(` ${a} `)))continue;
+    if(facet.aliases.some(a=>canonicalBase.includes(` ${a} `)))continue;
     const token=canonical(value);
     const source=normalize(facet.option.conditions.map(condition=>condition.source).join(' '));
     const part=colors.has(token)?(/narukvic/.test(source)?'narukvica':/brojcanik/.test(source)?'brojcanik':/kucist/.test(source)?'kuciste':undefined):undefined;
@@ -819,7 +877,7 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
   timings?.push(`model;dur=${(performance.now() - started).toFixed(1)}`);
   if (exact) return exact;
   started = performance.now();
-  const data=await snapshot(pool,organizationId,staff);
+  const data=await snapshot(pool,organizationId,staff,timings);
   timings?.push(`snapshot;dur=${(performance.now() - started).toFixed(1)}`);
   started = performance.now();
   let cached = searchResults.get(data);
