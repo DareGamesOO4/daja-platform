@@ -735,6 +735,9 @@ export class StaffCatalogController {
 
   private supplierFilters(query:Record<string,string>) {
     return z.object({provider:z.enum(ALL_PROVIDERS).optional(),status:z.enum(['available','missing','unverified','disabled','checking','paused','waiting_confirmation']).optional(),search:z.string().max(240).optional(),
+      brandId:z.string().uuid().optional(),departmentId:z.string().uuid().optional(),
+      stock:z.enum(['in_stock','out_of_stock','unknown']).optional(),visibility:z.enum(['visible','hidden']).optional(),
+      alternative:z.enum(['true','false']).optional().transform(value=>value==='true'),
       attention:z.enum(['true','false']).optional().transform(value=>value==='true'),sort:z.enum(['name','number','last','next']).default('next'),direction:z.enum(['asc','desc']).default('asc'),page:z.coerce.number().int().min(1).max(100000).default(1)}).parse(query);
   }
 

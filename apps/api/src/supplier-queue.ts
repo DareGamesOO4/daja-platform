@@ -41,6 +41,7 @@ type QueueLink = {
   last_checked_at: Date | null;
   missing_count: number;
   legacy_due?: boolean;
+  stock_cycle_due?: boolean;
   order_requested_at?: Date | null;
 };
 type Lease = {
@@ -235,8 +236,10 @@ export const STATE_SELECT = `SELECT l.id, l.product_id AS "productId", l.provide
       AND (p.manual_pause_mode='all' OR l.initial_requested_at IS NULL) THEN 'paused'
     WHEN p.paused_until IS NOT NULL AND (p.interval_seconds IS NOT NULL OR p.paused_until>now()) AND l.initial_requested_at IS NULL THEN 'paused'
     WHEN l.initial_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL OR l.bulk_requested_at IS NOT NULL THEN 'checking'
-    WHEN l.negative_count>0 OR (l.missing_count>0 AND l.check_status<>'missing') THEN 'waiting_confirmation' ELSE l.check_status END AS status,
-  l.stock_status AS "stockStatus",
+    WHEN (l.negative_count>0 AND l.confirmation_due_at IS NOT NULL)
+      OR (l.missing_count>0 AND l.check_status<>'missing') THEN 'waiting_confirmation' ELSE l.check_status END AS status,
+  l.stock_status AS "stockStatus", l.out_of_stock_cycles AS "outOfStockCycles",
+  (l.negative_count>0) AS "stockConfirmationPending",
   CASE WHEN l.last_good_result->'regularPrice' = 'true'::jsonb THEN l.price_amount END AS "priceAmount",
   CASE WHEN l.last_good_result->'regularPrice' = 'true'::jsonb THEN l.price_currency END AS "priceCurrency",
   l.last_checked_at AS "lastCheckedAt", l.last_good_result AS "lastGoodResult", l.last_error AS "lastError",
@@ -363,7 +366,8 @@ export async function supplierProviderSummary(pool: pg.Pool, organizationId: str
       WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND l.checks_enabled AND NOT l.removed AND product.deleted_at IS NULL) AS "nextCheckAt",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND l.check_status='unverified') AS "unverified",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND (l.last_error IS NOT NULL OR l.negative_count>0 OR l.missing_count>0)) AS "problems",
-    (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND (l.negative_count>0 OR l.missing_count BETWEEN 1 AND 2)) AS "confirmations",
+    (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed
+      AND l.checks_enabled AND l.confirmation_due_at IS NOT NULL) AS "confirmations",
     (SELECT count(*)::integer FROM supplier_product_links l WHERE l.provider_code=p.provider_code AND l.organization_id=$1 AND NOT l.removed AND l.initial_requested_at IS NOT NULL) AS "initialPending",
     p.health_checked_at AS "healthCheckedAt", p.health_ok AS "healthOk", p.probe_requested_at AS "probeRequestedAt",
     CASE WHEN p.cycle_epoch>now() THEN p.cycle_epoch ELSE p.cycle_epoch + (floor(extract(epoch FROM now()-p.cycle_epoch)/p.cycle_seconds)::integer+1)*make_interval(secs => p.cycle_seconds) END AS "nextCycleAt",
@@ -479,60 +483,37 @@ async function healthProbe(
   return true;
 }
 
-async function finishLink(
-  database: Database,
-  adapters: Adapters,
-  logger: Logger,
-  lease: Lease,
-  link: QueueLink,
-  outcome: SupplierOutcome,
-  signal: AbortSignal,
-  duration: number
+const OUT_OF_STOCK_CYCLE_LIMIT = 10;
+
+async function updateOutOfStockCycles(
+  client: QueryClient, link: QueueLink, outcome: SupplierOutcome, countCycle: boolean
 ) {
-  const started = Date.now() - duration;
-  let probed = false;
-  const bad = outcome.status !== 'available' || outcome.stockStatus === 'out_of_stock';
-  const reason =
-    outcome.status === 'missing'
-      ? 'Stranica proizvoda ne postoji'
-      : outcome.status === 'error'
-        ? outcome.message || 'Pristup sajtu ili čitanje proizvoda nije uspelo'
-        : 'Artikal nije na stanju kod dobavljača';
-  let health: boolean | null = null;
-  if (bad && link.negative_count > 0 && link.first_problem_at) {
-    const cached = await database.pool.query<{
-      health_ok: boolean;
-      health_checked_at: Date | null;
-      paused_until: Date | null;
-      manual_pause_mode: string | null;
-      database_now: Date;
-    }>(
-      `SELECT health_ok,health_checked_at,paused_until,manual_pause_mode,now() AS database_now FROM supplier_provider_checks WHERE provider_code=$1`,
-      [link.provider_code]
+  if (outcome.status !== 'available') return;
+  if (outcome.stockStatus === 'in_stock') {
+    await client.query('UPDATE supplier_product_links SET out_of_stock_cycles=0 WHERE id=$1 AND out_of_stock_cycles>0', [link.id]);
+  } else if (outcome.stockStatus === 'out_of_stock' && countCycle) {
+    const updated = await client.query<{ disabled: boolean }>(
+      `UPDATE supplier_product_links SET
+        out_of_stock_cycles=LEAST(out_of_stock_cycles+1,$2),
+        checks_enabled=out_of_stock_cycles+1<$2,
+        disabled_at=CASE WHEN out_of_stock_cycles+1>=$2 THEN now() END,
+        disabled_reason=CASE WHEN out_of_stock_cycles+1>=$2 THEN $3 END
+       WHERE id=$1 AND checks_enabled RETURNING NOT checks_enabled AS disabled`,
+      [link.id, OUT_OF_STOCK_CYCLE_LIMIT, 'Nema na stanju tokom 10 redovnih ciklusa']
     );
-    const p = cached.rows[0];
-    if (
-      p &&
-      !p.paused_until &&
-      !p.manual_pause_mode &&
-      p.database_now.getTime() - new Date(link.first_problem_at).getTime() >= 86_400_000
-    ) {
-      try {
-        health =
-          p?.health_checked_at && p.database_now.getTime() - p.health_checked_at.getTime() < 300_000
-            ? p.health_ok
-            : await (async () => {
-                probed = true;
-                return healthProbe(database, adapters, logger, link.provider_code, signal, link.id);
-              })();
-      } catch {
-        health = false;
-      }
+    if (updated.rows[0]?.disabled) {
+      await recordSupplierStatistics(client, link.organization_id, link.provider_code, { disabled: 1 });
     }
   }
+}
+
+async function finishLink(
+  database: Database, lease: Lease, link: QueueLink, outcome: SupplierOutcome, duration: number
+) {
+  const started = Date.now() - duration;
   await supplierTransaction(database.pool, async (client) => {
-    const current = await client.query<QueueLink & { second_due: boolean }>(
-      `SELECT *,first_problem_at<=now()-interval '24 hours' AS second_due FROM supplier_product_links WHERE id=$1 AND generation=$2 AND NOT removed AND EXISTS (SELECT 1 FROM supplier_check_leases WHERE token=$3 AND expires_at>now()) FOR UPDATE`,
+    const current = await client.query<QueueLink>(
+      `SELECT * FROM supplier_product_links WHERE id=$1 AND generation=$2 AND NOT removed AND EXISTS (SELECT 1 FROM supplier_check_leases WHERE token=$3 AND expires_at>now()) FOR UPDATE`,
       [link.id, lease.generation, lease.token]
     );
     const row = current.rows[0];
@@ -548,11 +529,6 @@ async function finishLink(
           : outcome.status,
       duration: Date.now() - started
     });
-    if (probed)
-      await recordSupplierStatistics(client, 'site', row.provider_code, {
-        outcome: health ? 'available' : 'error',
-        duration: Date.now() - started - duration
-      });
     await client.query(
       `UPDATE supplier_product_links SET window_observed_at=now(), window_bad=$2 WHERE id=$1`,
       [row.id, pageAccessFailed(outcome)]
@@ -567,7 +543,7 @@ async function finishLink(
     let paused = provider.rows[0]?.paused_until != null;
     const manuallyPaused = provider.rows[0]?.manual_pause_mode != null;
     if (!paused && !manuallyPaused) paused = await pauseForAccessFailures(client, row.provider_code);
-    if (!bad && outcome.status === 'available') {
+    if (outcome.status === 'available') {
       await client.query(
         `UPDATE supplier_product_links SET check_status='available',stock_status=$2,price_amount=$3,price_currency=$4,
         negative_count=0,missing_count=0,first_problem_at=NULL,first_problem_reason=NULL,confirmation_due_at=NULL,
@@ -586,52 +562,19 @@ async function finishLink(
           })
         ]
       );
+      await updateOutOfStockCycles(client, row, outcome, Boolean(link.stock_cycle_due) && !paused && !manuallyPaused);
       return;
     }
-    const second = row.negative_count > 0 && row.second_due;
-    if (second && !paused && !manuallyPaused && health === true && row.checks_enabled) {
-      await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
-        disabled: 1
-      });
-      await client.query(
-        `UPDATE supplier_product_links SET checks_enabled=false,negative_count=2,disabled_at=now(),disabled_reason=$2,
-        check_status=$3,stock_status=$4,last_error=$5,last_checked_at=now() WHERE id=$1`,
-        [
-          row.id,
-          reason,
-          outcome.status === 'missing'
-            ? 'missing'
-            : outcome.status === 'available'
-              ? 'available'
-              : 'unverified',
-          outcome.status === 'error' ? null : 'out_of_stock',
-          outcome.status === 'error' ? reason : null
-        ]
-      );
-    } else {
-      await client.query(
-        `UPDATE supplier_product_links SET negative_count=1,first_problem_at=COALESCE(first_problem_at,now()),
-        first_problem_reason=COALESCE(first_problem_reason,$2),last_error=$2,last_checked_at=now(),
-        check_status=$3,stock_status=$4,
-        confirmation_due_at=CASE WHEN negative_count=0 AND checks_enabled THEN now()+interval '24 hours' ELSE confirmation_due_at END
-        WHERE id=$1`,
-        [
-          row.id,
-          reason,
-          outcome.status === 'missing'
-            ? 'missing'
-            : outcome.status === 'available'
-              ? 'available'
-              : 'unverified',
-          outcome.status === 'error' ? null : 'out_of_stock'
-        ]
-      );
-    }
-    if (health !== null && !paused && !manuallyPaused)
-      await client.query(
-        `UPDATE supplier_provider_checks SET health_ok=$2,health_checked_at=now() WHERE provider_code=$1`,
-        [row.provider_code, health]
-      );
+    const reason = outcome.status === 'missing' ? 'Stranica proizvoda ne postoji'
+      : outcome.message || 'Pristup sajtu ili čitanje proizvoda nije uspelo';
+    await client.query(
+      `UPDATE supplier_product_links SET negative_count=1,first_problem_at=COALESCE(first_problem_at,now()),
+       first_problem_reason=COALESCE(first_problem_reason,$2),last_error=$2,last_checked_at=now(),
+       check_status=$3,stock_status=NULL,
+       confirmation_due_at=CASE WHEN negative_count=0 AND checks_enabled THEN now()+interval '24 hours' ELSE confirmation_due_at END
+       WHERE id=$1`,
+      [row.id, reason, outcome.status === 'missing' ? 'missing' : 'unverified']
+    );
   });
 }
 
@@ -800,6 +743,8 @@ async function finishLegacy(
           [row.provider_code]
         );
     }
+    await updateOutOfStockCycles(client, row, outcome,
+      !paused && (isLinkel ? Boolean(link.legacy_due) : Boolean(link.stock_cycle_due)));
     return (await client.query(STATE_SELECT + ' WHERE l.id=$1', [row.id])).rows[0];
   });
   // Legacy clients retain their existing event protocol; numbered providers use current revisions only.
@@ -1088,7 +1033,7 @@ export function startNumberedSupplierChecks(
           };
         }
         if (NUMBERED_PROVIDERS.includes(link.provider_code as NumberedProvider))
-          await finishLink(database, adapters, logger, lease, link, outcome, signal, Date.now() - started);
+          await finishLink(database, lease, link, outcome, Date.now() - started);
         else
           await finishLegacy(
             database,
@@ -1210,7 +1155,13 @@ export function startNumberedSupplierChecks(
             `WITH eligible AS (SELECT l.*,order_check.order_requested_at,row_number() OVER (PARTITION BY l.provider_code ORDER BY
               CASE WHEN order_check.order_requested_at IS NOT NULL THEN 0 WHEN l.initial_requested_at IS NOT NULL THEN 1 WHEN l.manual_requested_at IS NOT NULL THEN 2 WHEN l.confirmation_due_at<=now() THEN 3 ELSE 4 END,
               order_check.order_requested_at,
-              LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,COALESCE(l.next_regular_at,l.next_check_at)),l.id) AS provider_position,(l.provider_code IN ('linkel','milano') AND l.next_check_at<=now()) AS legacy_due
+              LEAST(l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,COALESCE(l.next_regular_at,l.next_check_at)),l.id) AS provider_position,
+              (l.provider_code='milano' AND l.next_check_at<=now()) AS legacy_due,
+              CASE WHEN l.provider_code='milano' THEN l.next_check_at<=now() AND
+                l.next_check_at=supplier_regular_slot(p.cycle_epoch,p.phase_seconds,p.regular_interval_seconds,
+                  l.queue_position,l.next_check_at,p.cycle_seconds)
+              ELSE l.next_regular_at<=now() AND (l.first_problem_at IS NULL OR l.first_problem_at<=now()-interval '24 hours')
+              END AS stock_cycle_due
             FROM supplier_product_links l JOIN products product ON product.id=l.product_id
             JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
             ${ORDER_CHECK_REQUEST}

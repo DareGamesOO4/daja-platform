@@ -12,6 +12,11 @@ export type SupplierFilters = {
   status?: string | undefined;
   search?: string | undefined;
   attention?: boolean;
+  brandId?: string | undefined;
+  departmentId?: string | undefined;
+  stock?: string | undefined;
+  visibility?: string | undefined;
+  alternative?: boolean;
   sort?: string | undefined;
   direction?: string | undefined;
   page?: number;
@@ -139,13 +144,26 @@ export async function supplierLinkActions(
   });
 }
 
-const LINK_VIEW = `WITH links AS (${STATE_SELECT.replace('SELECT l.id,', 'SELECT product.name AS "productName", product.slug AS "productSlug", product.active AS "productActive", product.published AS "productPublished", l.id,')}
+const LINK_VIEW = `WITH links AS (${STATE_SELECT.replace('SELECT l.id,', `SELECT product.name AS "productName", product.slug AS "productSlug",
+ product.active AS "productActive", product.published AS "productPublished",
+ product.brand_id AS "brandId", product.department_id AS "departmentId", l.id,`)}
  JOIN products product ON product.id=l.product_id AND product.organization_id=l.organization_id AND product.deleted_at IS NULL
  WHERE l.organization_id=$1 AND NOT l.removed AND l.url IS NOT NULL)
  SELECT * FROM links WHERE ($2::text IS NULL OR "providerCode"=$2)
  AND ($3::text IS NULL OR status=$3)
  AND ($4::text IS NULL OR "productName" ILIKE '%'||$4||'%' OR url ILIKE '%'||$4||'%')
- AND (NOT $5::boolean OR status IN ('disabled','waiting_confirmation','unverified','missing') OR "lastError" IS NOT NULL)`;
+ AND (NOT $5::boolean OR status IN ('disabled','waiting_confirmation','unverified','missing') OR "lastError" IS NOT NULL OR "stockStatus"='out_of_stock')
+ AND ($6::uuid IS NULL OR "brandId"=$6)
+ AND ($7::uuid IS NULL OR "departmentId"=$7)
+ AND ($8::text IS NULL OR (CASE WHEN "stockConfirmationPending" OR "lastError" IS NOT NULL
+   THEN 'unknown' ELSE COALESCE("stockStatus",'unknown') END)=$8)
+ AND ($9::text IS NULL OR ("productActive" AND "productPublished")=($9='visible'))
+ AND (NOT $10::boolean OR EXISTS (
+   SELECT 1 FROM supplier_product_links alternative
+   WHERE alternative.organization_id=$1 AND alternative.product_id=links."productId"
+     AND alternative.id<>links.id AND NOT alternative.removed AND alternative.url IS NOT NULL
+     AND alternative.stock_status='in_stock' AND alternative.last_error IS NULL AND alternative.negative_count=0
+ ))`;
 export async function supplierLinksList(
   pool: pg.Pool,
   organizationId: string,
@@ -157,7 +175,12 @@ export async function supplierLinksList(
     filters.provider || null,
     filters.status || null,
     filters.search || null,
-    !!filters.attention
+    !!filters.attention,
+    filters.brandId || null,
+    filters.departmentId || null,
+    filters.stock || null,
+    filters.visibility || null,
+    !!filters.alternative
   ];
   const order =
     (
@@ -179,7 +202,17 @@ export async function supplierLinksList(
     values
   );
   const items = await pool.query(
-    LINK_VIEW + ` ORDER BY ${order} ${direction} NULLS LAST,id LIMIT 50 OFFSET $6`,
+    `SELECT page.*, COALESCE(siblings.items,'[]'::jsonb) AS "supplierLinks"
+     FROM (${LINK_VIEW} ORDER BY ${order} ${direction} NULLS LAST,id LIMIT 50 OFFSET $11) page
+     LEFT JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object('id', l.id, 'providerCode', l.provider_code, 'url', l.url,
+         'stockStatus', l.stock_status, 'checksEnabled', l.checks_enabled, 'checkStatus', l.check_status,
+         'lastCheckedAt', l.last_checked_at, 'lastError', l.last_error, 'stockConfirmationPending', l.negative_count>0)
+         ORDER BY l.provider_code) AS items
+       FROM supplier_product_links l
+       WHERE l.organization_id=$1 AND l.product_id=page."productId" AND NOT l.removed AND l.url IS NOT NULL
+     ) siblings ON true
+     ORDER BY page.${order} ${direction} NULLS LAST,page.id`,
     [...values, ((filters.page || 1) - 1) * 50]
   );
   return { items: items.rows, total: count.rows[0].total, page: filters.page || 1 };
