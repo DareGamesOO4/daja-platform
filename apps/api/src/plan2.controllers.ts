@@ -1097,6 +1097,29 @@ export class StaffCatalogController {
     return product;
   }
 
+  @Get('staff/catalog/search')
+  @Throttle({ default: { limit: 300, ttl: 60_000 } })
+  async staffCatalogSearch(@Req() request: Request, @Query() query: Record<string, string | undefined>,
+    @Res({ passthrough: true }) response: Response): Promise<CatalogSearchResponse> {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    response.setHeader('Cache-Control', 'private, no-store');
+    return searchPublicCatalog(this.database.pool, ctx.organizationId, parseWithSchema(publicSearchQuerySchema, query),
+      { contributorId: this.isCatalogContributor(ctx) ? ctx.userId : undefined });
+  }
+
+  @Get('staff/catalog/products/:slug')
+  async staffCatalogWatch(@Req() request: Request, @Param('slug') slug: string,
+    @Res({ passthrough: true }) response: Response) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'catalog.read');
+    response.setHeader('Cache-Control', 'private, no-store');
+    const product = await new CatalogRepository(this.database.pool).getPublicProductBySlug(
+      ctx, parseWithSchema(slugSchema, slug), { contributorId: this.isCatalogContributor(ctx) ? ctx.userId : undefined });
+    if (!product) throw new NotFoundException('Product not found');
+    return product;
+  }
+
   @Get('products')
   async listProducts(@Req() request: Request) {
     const ctx = resolveRequestContext(request);

@@ -58,7 +58,11 @@ export interface CatalogSearchResponse {
 interface Entry { row: SearchRow; codes: string[]; name: string; brand: string; category: string; specs: string; features: string; description: string }
 interface Snapshot { entries: Entry[]; facets: Facet[]; synonyms: SearchSynonym[]; expires: number }
 const snapshots = new Map<string, Promise<Snapshot>>();
-export function invalidateCatalogSearch(organizationId: string) { snapshots.delete(organizationId); }
+export function invalidateCatalogSearch(organizationId: string) {
+  for (const key of snapshots.keys()) {
+    if (key === organizationId || key.startsWith(`${organizationId}:`)) snapshots.delete(key);
+  }
+}
 const searchResults = new WeakMap<Snapshot, Map<string, { expires: number; promise: Promise<CatalogSearchResponse> }>>();
 const scopes = new WeakMap<Snapshot, Map<string, { entries: Entry[]; facets: Facet[] }>>();
 
@@ -209,14 +213,15 @@ function collectFacets(department: string, nodes: Node[], result: Facet[]) {
   }
 }
 
-async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
-  const cached = snapshots.get(organizationId);
+async function snapshot(pool: Pool, organizationId: string, staff?: { contributorId?: string | undefined }): Promise<Snapshot> {
+  const cacheKey = staff ? `${organizationId}:${staff.contributorId ?? 'staff'}` : organizationId;
+  const cached = snapshots.get(cacheKey);
   if (cached) {
     const value = await cached;
     // Another request may already have replaced this expired snapshot.
-    if (snapshots.get(organizationId) !== cached) return snapshot(pool, organizationId);
+    if (snapshots.get(cacheKey) !== cached) return snapshot(pool, organizationId, staff);
     if (value.expires > Date.now()) return value;
-    snapshots.delete(organizationId);
+    snapshots.delete(cacheKey);
   }
   const loading = (async () => {
     // Only lightweight searchable metadata is cached on the server. Images and
@@ -228,7 +233,8 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
         COALESCE(inv.quantity, 0) > 0 AS in_stock
         FROM products p
         JOIN LATERAL (SELECT * FROM product_variants pv WHERE pv.organization_id = p.organization_id AND pv.product_id = p.id
-          AND pv.deleted_at IS NULL AND pv.active AND pv.published ORDER BY pv.current_price_amount DESC, pv.id LIMIT 1) v ON true
+          AND pv.deleted_at IS NULL AND ((pv.active AND pv.published) OR ($3::boolean AND NOT (p.active AND p.published)))
+          ORDER BY (pv.active AND pv.published) DESC, pv.current_price_amount DESC, pv.id LIMIT 1) v ON true
         JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
         LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
         LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
@@ -236,7 +242,10 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
           AND vp.price_type = 'sale' AND vp.valid_from <= now() AND vp.cancelled_at IS NULL AND (vp.valid_until IS NULL OR vp.valid_until > now())
           ORDER BY vp.valid_from DESC, vp.created_at DESC LIMIT 1) sale ON true
         LEFT JOIN LATERAL (SELECT SUM(quantity) AS quantity FROM inventory_balances ib WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id) inv ON true
-        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.active AND p.published AND d.slug = ANY($2::text[])`, [organizationId, departments]),
+        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND d.slug = ANY($2::text[])
+          AND ((p.active AND p.published) OR ($3::boolean AND d.slug='satovi'
+            AND ($4::uuid IS NULL OR p.created_by_user_id=$4)))`,
+        [organizationId, departments, Boolean(staff), staff?.contributorId ?? null]),
       pool.query<{ department: string; published: { filters: Node[] } | null }>('SELECT department, published FROM catalog_filter_configurations WHERE organization_id = $1', [organizationId]),
       pool.query<{synonyms:SearchSynonym[]}>('SELECT synonyms FROM catalog_search_settings WHERE organization_id=$1',[organizationId]),
       pool.query<{ at: Date | null }>(`SELECT min(boundary) AS at FROM (
@@ -282,9 +291,9 @@ async function snapshot(pool: Pool, organizationId: string): Promise<Snapshot> {
     return { entries, facets, synonyms:searchSettings.rows[0]?.synonyms||[], expires: Math.min(Date.now() + 60_000, boundary) };
   })();
   // Bound the organization cache and deduplicate concurrent cold requests.
-  if (snapshots.size >= 20 && !snapshots.has(organizationId)) snapshots.delete(snapshots.keys().next().value ?? '');
-  snapshots.set(organizationId, loading);
-  try { return await loading; } catch (error) { if (snapshots.get(organizationId) === loading) snapshots.delete(organizationId); throw error; }
+  if (snapshots.size >= 20 && !snapshots.has(cacheKey)) snapshots.delete(snapshots.keys().next().value ?? '');
+  snapshots.set(cacheKey, loading);
+  try { return await loading; } catch (error) { if (snapshots.get(cacheKey) === loading) snapshots.delete(cacheKey); throw error; }
 }
 
 function amount(value: string): number {
@@ -758,17 +767,18 @@ async function indexedModelSuggestions(pool: Pool, organizationId: string, input
   };
 }
 
-export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery): Promise<CatalogSearchResponse> {
-  const exact = await indexedModelSuggestions(pool, organizationId, input);
+export async function searchPublicCatalog(pool: Pool, organizationId: string, input: SearchQuery,
+  staff?: { contributorId?: string | undefined }): Promise<CatalogSearchResponse> {
+  const exact = staff ? null : await indexedModelSuggestions(pool, organizationId, input);
   if (exact) return exact;
-  const data=await snapshot(pool,organizationId);
+  const data=await snapshot(pool,organizationId,staff);
   let cached = searchResults.get(data);
   if (!cached) { cached = new Map(); searchResults.set(data, cached); }
   const { seed: _seed, ...searchInput } = input;
   const key = JSON.stringify(searchInput);
   const known = cached.get(key);
   if (known && known.expires > Date.now()) return known.promise;
-  const entry = { expires: data.expires, promise: searchSnapshot(pool, organizationId, input, data) };
+  const entry = { expires: data.expires, promise: searchSnapshot(pool, organizationId, input, data, staff) };
   cached.set(key, entry);
   while (cached.size > 64) cached.delete(cached.keys().next().value!);
   try {
@@ -782,7 +792,8 @@ export async function searchPublicCatalog(pool: Pool, organizationId: string, in
     return result;
   } catch (error) { if (cached.get(key) === entry) cached.delete(key); throw error; }
 }
-async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQuery, data: Snapshot): Promise<CatalogSearchResponse> {
+async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQuery, data: Snapshot,
+  staff?: { contributorId?: string | undefined }): Promise<CatalogSearchResponse> {
   let departmentsCache = scopes.get(data);
   if (!departmentsCache) { departmentsCache = new Map(); scopes.set(data, departmentsCache); }
   const scopeKey = input.department || '';
@@ -836,7 +847,8 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
     if(input.sort!=='relevance'&&price)return input.sort==='price_asc'?price:-price;
     return b.score-a.score||Number(b.entry.row.in_stock)-Number(a.entry.row.in_stock)||productNames.compare(a.entry.row.name,b.entry.row.name)||a.entry.row.id.localeCompare(b.entry.row.id);
   });
-  const key=createHash('sha256').update(JSON.stringify([organizationId,input.q,effective,input.department,input.sort,input.literal])).digest('hex').slice(0,24);
+  const key=createHash('sha256').update(JSON.stringify([organizationId,input.q,effective,input.department,input.sort,input.literal,
+    ...(staff ? [staff.contributorId ?? 'staff'] : [])])).digest('hex').slice(0,24);
   const offset=input.mode==='results'?cursorOffset(input.cursor,key):0,size=input.mode==='results'?24:6;
   const selected=ranked.slice(offset,offset+size).map(v=>v.entry.row.id);
   // Similar products relax exactly one explicit condition. Never silently relax codes or words.
@@ -855,7 +867,8 @@ async function searchSnapshot(pool: Pool, organizationId: string, input: SearchQ
   }
   alternatives.sort((a,b)=>b.score-a.score);const nearby=alternatives.slice(0,6);
   const ids=[...new Set([...selected,...nearby.map(a=>a.id)])];
-  const cards=ids.length?(await new CatalogRepository(pool).listPublicProducts({organizationId},{productIds:ids,limit:ids.length})).items:[];
+  const cards=ids.length?(await new CatalogRepository(pool).listPublicProducts({organizationId},
+    {productIds:ids,limit:ids.length,hiddenWatches:staff})).items:[];
   const byId=new Map(cards.map(card=>[card.productId,card]));
   const ordered=(keys:string[])=>keys.flatMap(id=>byId.has(id)?[byId.get(id)!]:[]);
   const groups=suggestions(facets,raw?ranked.map(v=>v.entry):scope,canonical(effective));

@@ -87,17 +87,23 @@ export class CatalogRepository {
       productIds?: string[] | undefined;
       relatedTo?: string | undefined;
       includeHidden?: boolean | undefined;
+      hiddenWatches?: { contributorId?: string | undefined } | undefined;
     }
   ): Promise<{ items: PublicProductCard[]; nextCursor: string | null }> {
     const params: unknown[] = [ctx.organizationId, filters.limit + 1];
     const where = [
       'p.organization_id = $1',
       'p.deleted_at IS NULL',
-      'v.deleted_at IS NULL',
-      'v.active',
-      'v.published'
+      'v.deleted_at IS NULL'
     ];
-    if (!filters.includeHidden) where.push('p.active', 'p.published');
+    if (filters.hiddenWatches) {
+      params.push(filters.hiddenWatches.contributorId ?? null);
+      where.push(`((p.active AND p.published AND v.active AND v.published) OR (NOT (p.active AND p.published) AND d.slug='satovi'
+        AND ($${params.length}::uuid IS NULL OR p.created_by_user_id=$${params.length})))`);
+    } else {
+      where.push('v.active', 'v.published');
+      if (!filters.includeHidden) where.push('p.active', 'p.published');
+    }
     if (filters.relatedTo) {
       const source = (await this.client.query<{
         id: string; brand_id: string | null; department_id: string | null;
@@ -195,8 +201,8 @@ export class CatalogRepository {
          SELECT *
          FROM product_variants pv
          WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
-           AND pv.deleted_at IS NULL AND pv.active AND pv.published
-         ORDER BY pv.current_price_amount ${orderDirection}, pv.id
+           AND pv.deleted_at IS NULL AND ((pv.active AND pv.published)${filters.hiddenWatches ? ' OR NOT (p.active AND p.published)' : ''})
+         ORDER BY (pv.active AND pv.published) DESC, pv.current_price_amount ${orderDirection}, pv.id
          LIMIT 1
        ) v ON true
        LEFT JOIN LATERAL (
@@ -259,7 +265,8 @@ export class CatalogRepository {
     };
   }
 
-  async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string) {
+  async getPublicProductBySlug(ctx: Pick<RequestContext, 'organizationId'>, slug: string,
+    hiddenWatches?: { contributorId?: string | undefined }) {
     const result = await this.client.query(
       `SELECT p.id, p.name, p.slug, p.description, p.brand_id, p.primary_category_id,
               p.active, p.published, p.version, p.created_at, p.updated_at,
@@ -288,8 +295,8 @@ export class CatalogRepository {
          SELECT pv.*
          FROM product_variants pv
          WHERE pv.product_id = p.id AND pv.organization_id = p.organization_id
-           AND pv.deleted_at IS NULL AND pv.active AND pv.published
-         ORDER BY pv.current_price_amount, pv.id
+           AND pv.deleted_at IS NULL AND ((pv.active AND pv.published)${hiddenWatches ? ' OR NOT (p.active AND p.published)' : ''})
+         ORDER BY (pv.active AND pv.published) DESC, pv.current_price_amount, pv.id
          LIMIT 1
        ) v ON true
        LEFT JOIN LATERAL (
@@ -356,10 +363,12 @@ export class CatalogRepository {
          ) thumb ON true
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
-       WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL AND p.published
-         AND (p.active OR d.slug = 'satovi')
+       WHERE p.organization_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL
+         AND ${hiddenWatches
+           ? "(d.slug='satovi' AND ($4::uuid IS NULL OR p.created_by_user_id=$4))"
+           : "(p.published AND (p.active OR d.slug='satovi'))"}
        LIMIT 1`,
-      [ctx.organizationId, slug, INTERNAL_CATALOG_ATTRIBUTE_KEYS]
+      [ctx.organizationId, slug, INTERNAL_CATALOG_ATTRIBUTE_KEYS, ...(hiddenWatches ? [hiddenWatches.contributorId ?? null] : [])]
     );
     const product = result.rows[0] as Record<string, unknown> | undefined;
     if (!product) return null;
