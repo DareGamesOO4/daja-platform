@@ -251,13 +251,14 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
   const rawParams = new URLSearchParams(input.params);
   const params = input.pathname ? publicListingParams(rawParams, data.configuration, input.pathname) : rawParams;
   const selection = selectProducts(data, params, input.fixedGender, input.prepareOnly !== '1');
+  const sort = params.get('sort') || 'newest';
   const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key === 'landing' || key.startsWith('cf_')));
+  orderParams.set('sort', sort);
   orderParams.sort();
   const orderKey = JSON.stringify([input.fixedGender, orderParams.toString()]);
   const preparedOrder = data.orders.get(orderKey);
   const filtered = preparedOrder || [...selection.products];
   const collator = new Intl.Collator('sr-RS',{sensitivity:'base'});
-  const sort = params.get('sort') || 'popular';
   if (!preparedOrder) filtered.sort((a,b) => {
     if (includeHidden) {
       const aHidden = !a.active || !a.published;
