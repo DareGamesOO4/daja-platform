@@ -886,6 +886,7 @@ export class StorefrontContentController {
       channel: z.enum(['email', 'whatsapp']),
       language: z.enum(['sr', 'en']).default('sr'),
       policyVersion: z.string().trim().min(1).max(120).optional(),
+      phone: z.string().regex(/^\+381[1-9]\d{6,11}$/).optional(),
       accepted: z.literal(true)
     }), body);
     return this.wishlistAlerts.enable(customer, input);

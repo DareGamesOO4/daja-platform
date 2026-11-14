@@ -51,7 +51,7 @@ export class WishlistAlertService {
     return { channels: result.rows.map(row => row.channel) };
   }
 
-  async enable(customer: CustomerPrincipal, input: { channel: Channel; language: 'sr' | 'en'; policyVersion?: string | undefined }) {
+  async enable(customer: CustomerPrincipal, input: { channel: Channel; language: 'sr' | 'en'; policyVersion?: string | undefined; phone?: string | undefined }) {
     return this.transaction(customer, async client => {
       if (input.channel === 'whatsapp' && customer.phone) await this.whatsapp.lockWishlistPhone(client, customer.phone);
       if (input.channel === 'email' && customer.email) {
@@ -60,7 +60,7 @@ export class WishlistAlertService {
       const contacts = await this.contacts(client, customer);
       const contact = contacts[input.channel];
       if (!contact || (input.channel === 'email' && contact !== customer.email?.toLowerCase()) ||
-        (input.channel === 'whatsapp' && (contact !== customer.phone || !/^\+381[1-9]\d{6,11}$/.test(contact)))) {
+        (input.channel === 'whatsapp' && (contact !== customer.phone || (input.phone !== undefined && contact !== input.phone) || !/^\+381[1-9]\d{6,11}$/.test(contact)))) {
         throw new ValidationFailedError(input.channel === 'email'
           ? 'Potvrdite email adresu naloga pre uključivanja email obaveštenja.'
           : 'Potvrdite broj telefona u profilu pre uključivanja WhatsApp obaveštenja.');
