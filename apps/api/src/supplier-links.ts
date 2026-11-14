@@ -7,7 +7,8 @@ export function normalizeEkkaUrl(value: string | null): string | null {
   let url: URL;
   try { url = new URL(value.trim()); }
   catch { throw new ValidationFailedError('Ekka link nije ispravna URL adresa'); }
-  if (url.protocol !== 'https:' || !['ekka.rs', 'www.ekka.rs'].includes(url.hostname.toLowerCase()) || url.username || url.password || url.port || url.pathname.split('/').filter(Boolean).length < 2) {
+  const productPath = /^\/(?:[1-9]\d*-[^/]+\.html|proizvodi\/[^/]+\/?)$/i;
+  if (url.protocol !== 'https:' || !['ekka.rs', 'www.ekka.rs'].includes(url.hostname.toLowerCase()) || url.username || url.password || url.port || !productPath.test(url.pathname)) {
     throw new ValidationFailedError('Ekka link mora biti direktna HTTPS adresa artikla sa ekka.rs');
   }
   url.hash = '';

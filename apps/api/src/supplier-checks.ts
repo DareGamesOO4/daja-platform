@@ -24,23 +24,27 @@ function explicitStock(markup: string): 'in_stock' | 'out_of_stock' | null {
   return null;
 }
 
-function ekkaStock(body: string): 'in_stock' | 'out_of_stock' | null {
-  // PrestaShop includes its out-of-stock placeholder even when the whole
-  // availability paragraph is hidden. Anonymous quantities can also be zero
-  // while ordering is enabled, so neither is evidence that stock is absent.
-  const paragraph = body.match(/<p\b[^>]*id=["']availability_statut["'][^>]*>[\s\S]*?<\/p>/i)?.[0] || '';
-  const value = paragraph.match(/<span\b[^>]*id=["']availability_value["'][^>]*>[\s\S]*?<\/span>/i)?.[0] || '';
-  const hidden = (element: string): boolean => {
-    const tag = element.match(/^<[^>]*>/)?.[0] || '';
-    const style = tag.match(/\bstyle\s*=\s*(["'])([\s\S]*?)\1/i)?.[2] || '';
-    const classes = tag.match(/\bclass\s*=\s*(["'])([\s\S]*?)\1/i)?.[2] || '';
-    return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i.test(style)
-      || /\shidden(?:\s|=|>)/i.test(tag)
-      || /(?:^|\s)(?:hidden|hide|d-none)(?:\s|$)/i.test(classes);
-  };
-  const metadata = body.match(/<[^>]*(?:itemprop=["']availability["']|property=["']product:availability["'])[^>]*>/gi)?.join(' ') || '';
-  const visibleValue = paragraph && value && !hidden(paragraph) && !hidden(value) ? value : '';
-  return explicitStock(metadata + visibleValue);
+function ekkaProduct(body: string): Outcome {
+  const head = body.split(/<\/head>/i, 1)[0] ?? '';
+  const stockMeta = head.match(/<[^>]*(?:itemprop=["']availability["']|property=["']product:availability["'])[^>]*>/gi)?.join(' ') ?? '';
+  const availability = body.match(/<(?:span|div|p)\b(?=[^>]*\bid=["']product-availability["'])(?![^>]*\shidden(?:\s|=|>))[^>]*>([\s\S]*?)<\/(?:span|div|p)>/i)?.[1] ?? '';
+  const stockStatus = explicitStock(stockMeta) ?? explicitStock(availability) ?? 'in_stock';
+
+  const prices = body.match(/<div\b[^>]*\bclass=["'][^"']*\bjs-product-prices\b[^"']*["'][^>]*>[\s\S]*?(?=<div\b[^>]*\bclass=["'][^"']*\bproduct__actions\b)/i)?.[0] ?? '';
+  if (/\bekka-b2b-price-lock\b/i.test(prices)) return { status: 'available', stockStatus };
+
+  const currency = (metaPrice(head, 'product:price:currency') ?? metaPrice(prices, 'priceCurrency') ?? 'RSD').toUpperCase();
+  if (currency !== 'RSD' && currency !== 'EUR') return { status: 'available', stockStatus };
+
+  const regular = prices.match(/<(?:span|s)\b[^>]*\bclass=["'][^"']*\bregular-price\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:span|s)>/i)?.[1];
+  const current = metaPrice(head, 'product:price:amount') ?? metaPrice(prices, 'price') ?? '';
+  const discounted = /\b(?:has-discount|product-discount|discount-percentage|discount-amount)\b/i.test(prices);
+  const price = regular !== undefined || discounted
+    ? priceFromMarkup(regular, currency)
+    : /^\d+(?:\.\d+)?$/.test(current) ? Number(current) : null;
+  return price !== null && Number.isFinite(price) && price > 0
+    ? { status: 'available', stockStatus, priceAmount: price, priceCurrency: currency }
+    : { status: 'available', stockStatus };
 }
 
 async function ekkaPage(urlValue: string): Promise<Outcome> {
@@ -62,19 +66,13 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
     if (!response.ok) return { status: 'error', accessFailed: true };
     if (!(response.headers.get('content-type') ?? '').includes('text/html')) return { status: 'error' };
     const body = (await response.text()).slice(0, 500_000);
-    if (!/<h1\b[^>]*>[^<]+<\/h1>/i.test(body) || !/Referenca/i.test(body) || !/Stanje proizvoda/i.test(body)) return { status: 'error' };
-    const price = metaPrice(body, 'product:price:amount');
-    const currency = metaPrice(body, 'product:price:currency')?.toUpperCase() ?? null;
-    const oldPrice = body.match(/<span\b[^>]*\bid=["']old_price_display["'][^>]*>([\s\S]*?)<\/span>/i)?.[1];
-    const discounted = /\bspecific_price\s*=\s*\{|\bid=["'](?:reduction_percent_display|reduction_amount_display)["'][^>]*>\s*-\s*[1-9]/i.test(body);
-    const regular = priceFromMarkup(oldPrice, 'RSD');
-    // Ekka hides stock from anonymous visitors. When no visible stock value
-    // is supplied, a confirmed valid product page is the availability fallback.
-    return {
-      status: 'available', stockStatus: ekkaStock(body) ?? 'in_stock',
-      priceAmount: regular ?? (!discounted && price && Number.isFinite(Number(price)) ? Number(price) : null),
-      priceCurrency: regular === null ? currency : 'RSD'
-    };
+    if (/<body\b[^>]*\bid=["']pagenotfound["']/i.test(body)) return { status: 'missing' };
+    if (redirects > 0 && /^\/\d+-[^/]+\/?$/.test(url.pathname)
+      && /<body\b[^>]*\bid=["']category["']/i.test(body)) return { status: 'missing' };
+    const id = url.pathname.match(/^\/([1-9]\d*)-[^/]+\.html$/i)?.[1];
+    const pageId = body.match(/<input\b(?=[^>]*\bid=["']product_page_product_id["'])[^>]*\bvalue=["'](\d+)["']/i)?.[1];
+    if (!id || pageId !== id || !/<body\b[^>]*\bid=["']product["']/i.test(body)) return { status: 'error' };
+    return ekkaProduct(body);
   }
   return { status: 'error', accessFailed: true };
 }
@@ -82,7 +80,7 @@ async function ekkaPage(urlValue: string): Promise<Outcome> {
 async function ekkaHomeHealthy(): Promise<boolean> {
   try {
     const response = await fetch('https://ekka.rs/', { signal: supplierSignal(), headers: { 'user-agent': 'DajaShop supplier availability check (+https://dajashop.rs)' } });
-    return response.ok && (await response.text()).includes('Kategorije');
+    return response.ok && /<body\b[^>]*\bid=["']index["']/i.test(await response.text());
   } catch { return false; }
 }
 
