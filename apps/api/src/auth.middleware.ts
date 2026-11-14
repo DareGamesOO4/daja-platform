@@ -53,6 +53,7 @@ function isCustomerRoute(path: string): boolean {
     normalized.startsWith('/promotions/validate') ||
     /^\/products\/[^/]+\/reviews$/.test(normalized) ||
     /^\/products\/[^/]+\/alerts(?:\/status)?$/.test(normalized) ||
+    /^\/product-alerts\/wishlist\/?$/.test(normalized) ||
     normalized.startsWith('/newsletter/subscribe') ||
     normalized.startsWith('/newsletter/confirm') ||
     normalized.startsWith('/privacy/current') ||
