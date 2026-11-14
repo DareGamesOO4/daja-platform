@@ -171,11 +171,15 @@ export class CatalogRepository {
       );
     }
     const orderDirection = filters.sort === 'price_asc' ? 'ASC' : 'DESC';
-    const cursor = decodeCursor(filters.cursor);
+    const publicationDate = 'COALESCE(p.published_at, p.created_at)';
+    const newest = filters.sort === 'newest';
+    const orderDate = newest ? publicationDate : 'p.updated_at';
+    const cursorKey = newest ? 'publishedAt' : 'updatedAt';
+    const cursor = decodeCursor(filters.cursor, cursorKey);
     if (cursor) {
-      params.push(cursor.updatedAt, cursor.id);
+      params.push(cursor.date, cursor.id);
       where.push(
-        `(p.updated_at, p.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+        `(${orderDate}, p.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
       );
     }
     params.push(INTERNAL_CATALOG_ATTRIBUTE_KEYS);
@@ -195,7 +199,8 @@ export class CatalogRepository {
               COALESCE(media.items, '[]'::jsonb) AS images,
               media.primary_image_url,
               media.thumbnail_url,
-              p.updated_at
+              to_char(${publicationDate} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS published_at,
+              p.updated_at::text AS updated_at
        FROM products p
        JOIN LATERAL (
          SELECT *
@@ -253,7 +258,7 @@ export class CatalogRepository {
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
        ) media ON true
        WHERE ${where.join(' AND ')}
-       ORDER BY p.updated_at DESC, p.id DESC
+       ORDER BY ${orderDate} DESC, p.id DESC
        LIMIT $2`,
       params
     );
@@ -261,7 +266,9 @@ export class CatalogRepository {
     const lastRow = rows.at(-1);
     return {
       items: rows.map(row => publicCatalogValue(mapPublicProduct(row)) as ReturnType<typeof mapPublicProduct>),
-      nextCursor: result.rows.length > filters.limit && lastRow ? encodeCursor(lastRow) : null
+      nextCursor: result.rows.length > filters.limit && lastRow
+        ? encodeCursor(cursorKey, newest ? lastRow.published_at : lastRow.updated_at, lastRow.product_id)
+        : null
     };
   }
 
@@ -798,6 +805,7 @@ export interface PublicProductCard {
   marketingFlags: string[];
   isVisible: boolean;
   published: boolean;
+  publishedAt: string;
   features?: ProductRecord['features'];
   brand: string | null;
   category: string | null;
@@ -848,7 +856,8 @@ interface PublicProductRow {
   images: PublicProductImage[];
   primary_image_url: string | null;
   thumbnail_url: string | null;
-  updated_at: Date;
+  published_at: string;
+  updated_at: string;
 }
 
 interface ProductRow {
@@ -958,6 +967,7 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     marketingFlags: row.marketing_flags ?? [],
     isVisible: row.product_active,
     published: row.product_published,
+    publishedAt: row.published_at,
     features: (row.features ?? []).filter((feature) => feature.title && !feature.title.startsWith('_') && !/^rfid\b/i.test(feature.title)),
     brand: row.brand,
     category: row.category,
@@ -974,22 +984,19 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
   };
 }
 
-function encodeCursor(row: PublicProductRow): string {
-  return Buffer.from(
-    JSON.stringify({ updatedAt: row.updated_at.toISOString(), id: row.product_id })
-  ).toString('base64url');
+function encodeCursor(key: 'publishedAt' | 'updatedAt', date: string, id: string): string {
+  return Buffer.from(JSON.stringify({ [key]: date, id })).toString('base64url');
 }
 
-function decodeCursor(cursor: string | undefined): { updatedAt: string; id: string } | null {
+function decodeCursor(cursor: string | undefined, key: 'publishedAt' | 'updatedAt'): { date: string; id: string } | null {
   if (!cursor) {
     return null;
   }
   try {
-    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
-      updatedAt: string;
-      id: string;
-    };
-    return parsed.updatedAt && parsed.id ? parsed : null;
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    return typeof parsed?.[key] === 'string' && typeof parsed?.id === 'string'
+      ? { date: parsed[key], id: parsed.id }
+      : null;
   } catch {
     throw new ValidationFailedError('Invalid cursor');
   }

@@ -14,7 +14,7 @@ export interface Configuration { schemaVersion: number; filters: Node[] }
 interface Product {
   id: string; name: string; slug: string; department: string; brand: string | null; category: string | null;
   gender: string | null; price: number; attributes: Record<string, unknown>; features: Array<{title: string}>;
-  active: boolean; published: boolean; createdAt: string; updatedAt: string;
+  active: boolean; published: boolean; publicationTime: number;
 }
 export const catalogPageSchema = z.object({
   department: z.enum(['satovi', 'daljinski', 'baterije', 'naocare']).default('satovi'),
@@ -93,7 +93,7 @@ async function productsSnapshot(pool: Pool, organizationId: string, department?:
     b.name AS brand, c.name AS category, v.gender, v.current_price_amount::double precision / 100 AS price,
     COALESCE(v.attributes,'{}'::jsonb) AS attributes, COALESCE(p.features,'[]'::jsonb) AS features,
     p.active, p.published,
-    p.created_at AS "createdAt", p.updated_at AS "updatedAt"
+    EXTRACT(EPOCH FROM COALESCE(p.published_at, p.created_at))::double precision AS "publicationTime"
     FROM products p
     JOIN LATERAL (SELECT pv.gender, pv.current_price_amount, pv.attributes FROM product_variants pv
       WHERE pv.organization_id=p.organization_id AND pv.product_id=p.id AND pv.deleted_at IS NULL AND pv.active AND pv.published
@@ -263,6 +263,9 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
       const aHidden = !a.active || !a.published;
       const bHidden = !b.active || !b.published;
       if (aHidden !== bHidden) return aHidden ? 1 : -1;
+    }
+    if (sort === 'newest') {
+      return b.publicationTime - a.publicationTime || b.id.localeCompare(a.id);
     }
     return sort === 'price-asc' ? a.price-b.price : sort === 'price-desc' ? b.price-a.price : sort === 'name' ? collator.compare(a.name,b.name) : 0;
   });
