@@ -39,6 +39,7 @@ import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
 import { PromotionsService } from './promotions.service.js';
+import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
 import { WhatsAppOtpService } from './whatsapp-otp.service.js';
 import { PhoneOtpService } from './phone-otp.service.js';
 
@@ -151,7 +152,7 @@ const productAlertStatusQuerySchema = z.object({
   managementToken: z.string().trim().min(24).max(160).optional()
 });
 const productAlertUnsubscribeSchema = z.object({
-  type: z.enum(['back_in_stock', 'price_change']),
+  type: z.enum(['back_in_stock', 'price_change']).optional(),
   variantId: uuidSchema,
   managementToken: z.string().trim().min(24).max(160).optional()
 });
@@ -591,24 +592,11 @@ export class CustomerController {
   @Delete('wishlist/:productId')
   async removeWishlist(@Req() request: Request, @Param('productId') productId: string) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
-    const result = await new StorefrontRepository(this.database.pool).removeWishlistItem({
+    return new StorefrontRepository(this.database.pool).removeWishlistItem({
       organizationId: customer.organizationId,
       customerId: customer.customerId,
-      email: customer.emailVerified ? customer.email : null,
       productId: parseWithSchema(uuidSchema, productId)
     });
-    await Promise.all(
-      result.alertIds.map((subscriptionId) =>
-        this.privacy.revokeProductAlertSubscription({
-          organizationId: customer.organizationId,
-          subscriptionId,
-          customerId: customer.customerId,
-          customerEmail: customer.emailVerified ? customer.email : null,
-          source: 'wishlist_removed'
-        })
-      )
-    );
-    return result.wishlist;
   }
 }
 
@@ -852,6 +840,7 @@ export class StorefrontContentController {
     @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
     @Inject(PromotionsService) private readonly promotions: PromotionsService,
     private readonly productAlerts: ProductAlertService,
+    @Inject(WhatsAppNotificationsService) private readonly whatsappAlerts: WhatsAppNotificationsService,
     private readonly privacy: PrivacyService,
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
@@ -889,6 +878,23 @@ export class StorefrontContentController {
     return review;
   }
 
+  @Post('product-alerts/wishlist')
+  @Throttle({ default: { limit: 6, ttl: 60_000 } })
+  async subscribeWishlistAlerts(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(z.object({
+      channel: z.enum(['email', 'whatsapp']),
+      language: z.enum(['sr', 'en']).default('sr'),
+      policyVersion: z.string().trim().min(1).max(120).optional(),
+      accepted: z.literal(true)
+    }), body);
+    const targets = await this.productAlerts.wishlistTargets(customer.organizationId, customer.customerId);
+    if (input.channel === 'whatsapp') {
+      return this.whatsappAlerts.subscribeWishlist(customer, targets, input);
+    }
+    return this.productAlerts.subscribeWishlist(customer, targets, input.policyVersion);
+  }
+
   @Post('products/:productId/alerts')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async subscribeProductAlert(
@@ -902,12 +908,15 @@ export class StorefrontContentController {
     if (input.deliveryChannel === 'whatsapp') {
       throw new ValidationFailedError('WhatsApp obaveštenja još nisu dostupna. Za sada izaberite Email.');
     }
-    const email = input.deliveryChannel === 'email' ? customer?.email ?? input.email : undefined;
+    const organizationId = publicOrganizationId(this.config);
+    const owner = customer?.organizationId === organizationId && !input.managementToken &&
+      (!input.email || input.email.toLowerCase() === customer.email?.toLowerCase()) ? customer : null;
+    const email = input.deliveryChannel === 'email' ? input.email ?? owner?.email ?? undefined : undefined;
     return this.productAlerts.subscribe({
-      organizationId: publicOrganizationId(this.config),
+      organizationId,
       productId: parseWithSchema(uuidSchema, productId),
       variantId: input.variantId,
-      ...(customer?.customerId ? { customerId: customer.customerId } : {}),
+      ...(owner?.customerId ? { customerId: owner.customerId } : {}),
       email,
       phone: input.deliveryChannel === 'sms' ? input.phone : undefined,
       managementToken: input.managementToken,
@@ -928,6 +937,17 @@ export class StorefrontContentController {
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
     const input = parseWithSchema(productAlertUnsubscribeSchema, body);
+    if (!input.type) {
+      const organizationId = publicOrganizationId(this.config);
+      const contact = input.managementToken ? await this.privacy.alertContactByToken(organizationId, input.managementToken) : null;
+      const unsubscribed = await this.privacy.unsubscribeEmailAlerts({
+        organizationId,
+        ...(customer?.organizationId === organizationId ? { customerId: customer.customerId } : {}),
+        email: customer?.organizationId === organizationId && customer.emailVerified ? customer.email : contact?.email ?? null,
+        productId: parseWithSchema(uuidSchema, productId), variantId: input.variantId, source: 'storefront'
+      });
+      return { ok: true, unsubscribed: unsubscribed > 0 };
+    }
     const unsubscribed = await this.productAlerts.unsubscribe({
       organizationId: publicOrganizationId(this.config),
       productId: parseWithSchema(uuidSchema, productId),
@@ -951,15 +971,19 @@ export class StorefrontContentController {
     const input = parseWithSchema(productAlertStatusQuerySchema, body);
     const token = bearerToken(request);
     const customer = token ? await this.auth.authenticateAccessToken(token).catch(() => null) : null;
-    return this.productAlerts.activeTypes({
-      organizationId: publicOrganizationId(this.config),
-      productId: parseWithSchema(uuidSchema, productId),
-      variantId: input.variantId,
-      ...(customer?.customerId ? { customerId: customer.customerId } : {}),
-      email: customer?.email,
-      phone: customer?.phone,
-      managementToken: input.managementToken
-    });
+    const watch = { productId: parseWithSchema(uuidSchema, productId), variantId: input.variantId };
+    const [status, whatsapp] = await Promise.all([
+      this.productAlerts.activeTypes({
+        organizationId: publicOrganizationId(this.config),
+        ...watch,
+        ...(customer?.customerId ? { customerId: customer.customerId } : {}),
+        email: customer?.email,
+        phone: customer?.phone,
+        managementToken: input.managementToken
+      }),
+      customer ? this.whatsappAlerts.accountAlerts(customer, watch) : []
+    ]);
+    return { ...status, whatsappTypes: [...new Set(whatsapp.map(alert => alert.type))] };
   }
 
   @Post('newsletter/subscribe')

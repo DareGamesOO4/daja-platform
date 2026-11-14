@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { ResourceConflictError, ValidationFailedError } from '@daja/security';
+import { ResourceConflictError, ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import { Inject, Injectable } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
 import type { Logger } from '@daja/observability';
@@ -48,16 +48,68 @@ export class ProductAlertService {
     if (input.deliveryChannel === 'sms') {
       throw new ValidationFailedError('SMS obaveštenja trenutno nisu dostupna. Izaberite email.');
     }
-    if (input.deliveryChannel === 'email' && input.customerId && !await this.verifiedCustomer(input.organizationId, input.customerId)) {
-      throw new ValidationFailedError('Potvrdite email adresu naloga pre uključivanja email obaveštenja.');
-    }
     if (input.deliveryChannel === 'email' && !input.customerId && !input.managementToken) {
       return this.requestConfirmation(input);
     }
-    return new TransactionManager(this.database.pool, this.logger).run(client => this.activate(input, client));
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      if (input.customerId && input.deliveryChannel === 'email') {
+        const owner = await client.query<{ email: string }>(
+          `SELECT email FROM customers WHERE organization_id=$1 AND id=$2 AND active
+            AND deleted_at IS NULL AND email_verified AND email IS NOT NULL FOR UPDATE`,
+          [input.organizationId, input.customerId]
+        );
+        const email = owner.rows[0]?.email;
+        if (!email || email.toLowerCase() !== input.email?.trim().toLowerCase()) {
+          throw new ValidationFailedError('Potvrdite email adresu naloga pre uključivanja email obaveštenja.');
+        }
+      }
+      return this.activate(input, client, true);
+    });
   }
 
-  private async activate(input: AlertInput, client: DbClient) {
+  async wishlistTargets(organizationId: string, customerId: string) {
+    const result = await this.database.pool.query<{ productId: string; variantId: string | null }>(
+      `SELECT w.product_id AS "productId", variant.id AS "variantId"
+       FROM customer_wishlist_items w
+       LEFT JOIN products p ON p.id = w.product_id AND p.organization_id = w.organization_id
+       LEFT JOIN LATERAL (
+         SELECT v.id FROM product_variants v
+         WHERE v.organization_id = p.organization_id AND v.product_id = p.id
+           AND v.active AND v.published AND v.deleted_at IS NULL
+           AND (NULLIF(w.item_snapshot->>'variantId', '') IS NULL OR v.id::text = w.item_snapshot->>'variantId')
+           AND p.active AND p.published AND p.deleted_at IS NULL
+         ORDER BY v.current_price_amount, v.id LIMIT 1
+       ) variant ON true
+       WHERE w.organization_id = $1 AND w.customer_id = $2
+       ORDER BY p.id`, [organizationId, customerId]
+    );
+    return result.rows;
+  }
+
+  async subscribeWishlist(customer: { organizationId: string; customerId: string }, targets: Array<{ productId: string; variantId: string | null }>, policyVersion?: string) {
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const owner = await client.query<{ email: string }>(
+        `SELECT email FROM customers WHERE organization_id=$1 AND id=$2 AND active AND deleted_at IS NULL
+          AND email_verified AND email IS NOT NULL FOR UPDATE`, [customer.organizationId, customer.customerId]);
+      const email = owner.rows[0]?.email;
+      if (!email) throw new ValidationFailedError('Potvrdite email adresu naloga pre uključivanja email obaveštenja.');
+
+      let active = 0;
+      for (const { productId, variantId } of targets) {
+        if (!variantId) continue;
+        try {
+          await this.activate({ ...customer, email, productId, variantId, policyVersion,
+            deliveryChannel: 'email', type: 'price_change' }, client, true);
+          active++;
+        } catch (error) {
+          if (!(error instanceof ResourceNotFoundError)) throw error;
+        }
+      }
+      return { active, skipped: targets.length - active };
+    });
+  }
+
+  private async activate(input: AlertInput, client: DbClient, preserveActive = false) {
     const usesEmail = input.deliveryChannel === 'email';
     const contact = !usesEmail || input.customerId
       ? null
@@ -68,6 +120,17 @@ export class ProductAlertService {
     if (!usesEmail && !phone) throw new Error('Unesite broj telefona u međunarodnom formatu, npr. +381601234567.');
     const contactValue = email ?? phone;
     if (!contactValue) throw new Error('Kontakt za obaveštenje nije dostupan.');
+    if (preserveActive) {
+      const active = await client.query<{ id: string }>(
+        `SELECT id FROM product_alert_subscriptions WHERE organization_id=$1 AND variant_id=$2 AND product_id=$3
+         AND delivery_channel='email' AND normalized_email=lower($4) AND alert_type=$5
+         AND active AND revoked_at IS NULL AND consent_status='explicit' FOR UPDATE`,
+        [input.organizationId, input.variantId, input.productId, email, input.type]
+      );
+      if (active.rows[0]) return { id: active.rows[0].id, email: email ?? null, phone: null,
+        deliveryChannel: input.deliveryChannel, type: input.type, active: true, contactId: contact?.id ?? null,
+        ...(contact ? { managementToken: contact.managementToken, maskedEmail: contact.maskedEmail } : {}) };
+    }
     const subscription = await new StorefrontRepository(client).subscribeProductAlert({
       organizationId: input.organizationId,
       productId: input.productId,
@@ -215,7 +278,7 @@ export class ProductAlertService {
     newsletterSubscribed: boolean;
   }> {
     if (input.customerId && !await this.verifiedCustomer(input.organizationId, input.customerId)) {
-      input = { ...input, customerId: undefined, email: undefined, phone: undefined };
+      input = { ...input, email: undefined, phone: undefined };
     }
     const contact = input.managementToken
       ? await this.privacy.alertContactByToken(input.organizationId, input.managementToken)
@@ -234,6 +297,7 @@ export class ProductAlertService {
         organizationId: input.organizationId,
         productId: input.productId,
         variantId: input.variantId,
+        deliveryChannel: 'email',
         ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
         ...(email ? { email } : {}),
         ...(phone ? { phone } : {})

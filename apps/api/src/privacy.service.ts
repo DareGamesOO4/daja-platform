@@ -352,32 +352,72 @@ export class PrivacyService {
     return true;
   }
 
-  async unsubscribeProductAlertToken(token: string): Promise<boolean> {
+  async unsubscribeEmailAlerts(input: {
+    organizationId: string; customerId?: string; email?: string | null; productId?: string; variantId?: string;
+    source: string;
+  }, transaction?: DbClient): Promise<number> {
+    const revoke = async (client: DbClient) => {
+      if (input.email) {
+        await client.query(`UPDATE product_alert_confirmations SET expires_at=now()
+          WHERE organization_id=$1 AND email=lower($2) AND used_at IS NULL AND expires_at>now()
+            AND ($3::text IS NULL OR intent->>'productId'=$3)
+            AND ($4::text IS NULL OR intent->>'variantId'=$4)`,
+          [input.organizationId, input.email, input.productId ?? null, input.variantId ?? null]);
+      }
+      const rows = await client.query<{ id: string; email: string }>(
+        `UPDATE product_alert_subscriptions
+         SET active=false, revoked_at=now(), updated_at=now()
+         WHERE id IN (
+           SELECT id FROM product_alert_subscriptions
+           WHERE organization_id=$1 AND delivery_channel='email' AND revoked_at IS NULL
+             AND (customer_id=$2 OR normalized_email=lower($3))
+             AND ($4::uuid IS NULL OR product_id=$4) AND ($5::uuid IS NULL OR variant_id=$5)
+           ORDER BY product_id, variant_id, id FOR UPDATE
+         )
+         RETURNING id,email`,
+        [input.organizationId, input.customerId ?? null, input.email ?? null, input.productId ?? null, input.variantId ?? null]
+      );
+      for (const row of rows.rows) {
+        await this.recordMarketingEvent({
+          organizationId: input.organizationId, contact: row.email, customerId: input.customerId,
+          productAlertSubscriptionId: row.id, purpose: 'product_alert', action: 'revoked', source: input.source
+        }, client);
+      }
+      return rows.rows.length;
+    };
+    return transaction ? revoke(transaction) : new TransactionManager(this.database.pool, this.logger).run(revoke);
+  }
+
+  async unsubscribeProductAlertToken(token: string, scope: 'subscription' | 'watch' | 'all' = 'subscription'): Promise<boolean> {
     const subscriptionId = this.verifySignedToken('product_alert', token);
-    const result = await this.database.pool.query<{ organization_id: string }>(
-      `SELECT organization_id FROM product_alert_subscriptions WHERE id = $1 LIMIT 1`,
-      [subscriptionId]
-    );
-    const organizationId = result.rows[0]?.organization_id;
-    if (!organizationId) return false;
-    return this.revokeProductAlertSubscription({
-      organizationId,
-      subscriptionId,
-      source: 'email_unsubscribe'
+    const result = await this.database.pool.query<{
+      organization_id: string; email: string | null; product_id: string; variant_id: string;
+    }>(`SELECT organization_id,email,product_id,variant_id FROM product_alert_subscriptions
+        WHERE id=$1`, [subscriptionId]);
+    const row = result.rows[0];
+    if (!row) return false;
+    if (scope === 'subscription') return this.revokeProductAlertSubscription({
+      organizationId: row.organization_id, subscriptionId, source: 'email_unsubscribe'
     });
+    if (!row.email) return false;
+    return (await this.unsubscribeEmailAlerts({
+      organizationId: row.organization_id, email: row.email,
+      ...(scope === 'watch' ? { productId: row.product_id, variantId: row.variant_id } : {}),
+      source: scope === 'all' ? 'email_unsubscribe_all' : 'email_unsubscribe'
+    })) > 0;
   }
 
   async customerSnapshot(input: { organizationId: string; customerId: string; email: string | null }) {
     const [newsletter, alerts] = await Promise.all([
       this.newsletterStatus({ organizationId: input.organizationId, email: input.email }),
-      input.email
-        ? this.database.pool.query<{
+      this.database.pool.query<{
             id: string;
             product_id: string;
             variant_id: string;
             alert_type: 'back_in_stock' | 'price_change';
             created_at: Date;
             product_name: string;
+            variant_name: string | null;
             product_slug: string;
             brand_name: string | null;
             price: number | null;
@@ -385,7 +425,7 @@ export class PrivacyService {
             image_url: string | null;
           }>(
             `SELECT alert.id, alert.product_id, alert.variant_id, alert.alert_type, alert.created_at,
-                    product.name AS product_name, product.slug AS product_slug, brand.name AS brand_name,
+                    product.name AS product_name, variant.name AS variant_name, product.slug AS product_slug, brand.name AS brand_name,
                     COALESCE(active_sale.amount_minor, variant.current_price_amount)::double precision / 100 AS price,
                     variant.currency, product_image.public_url AS image_url
              FROM product_alert_subscriptions alert
@@ -413,22 +453,22 @@ export class PrivacyService {
                ORDER BY link.is_primary DESC, link.position ASC, link.id
                LIMIT 1
              ) product_image ON true
-             WHERE alert.organization_id = $1 AND alert.active
+             WHERE alert.organization_id = $1 AND alert.active AND alert.delivery_channel='email' AND alert.revoked_at IS NULL
                AND (alert.customer_id = $2 OR alert.normalized_email = lower($3))
              ORDER BY alert.created_at DESC`,
             [input.organizationId, input.customerId, input.email]
           )
-        : Promise.resolve({ rows: [] as Array<never> })
     ]);
     return {
       newsletter,
       alerts: alerts.rows.map((row) => ({
         id: row.id,
+        channel: 'email' as const,
         productId: row.product_id,
         variantId: row.variant_id,
         type: row.alert_type,
         createdAt: row.created_at,
-        name: row.product_name,
+        name: [row.product_name, row.variant_name !== row.product_name ? row.variant_name : null].filter(Boolean).join(' — '),
         slug: row.product_slug,
         brand: row.brand_name,
         price: row.price,

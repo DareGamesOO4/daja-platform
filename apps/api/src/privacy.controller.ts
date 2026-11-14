@@ -12,12 +12,15 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
+import { TransactionManager, type Database } from '@daja/database';
+import type { Logger } from '@daja/observability';
 import type { AppConfig } from '@daja/config';
 import { requirePermission, ValidationFailedError } from '@daja/security';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService } from './customer-auth.service.js';
-import { CONFIG } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { PolicyPublicationService } from './policy-publication.service.js';
+import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
@@ -43,9 +46,12 @@ const publicationSchema = z.object({
 export class PrivacyController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(DATABASE) private readonly database: Database,
+    @Inject(LOGGER) private readonly logger: Logger,
     private readonly privacy: PrivacyService,
     private readonly customerAuth: CustomerAuthService,
-    private readonly publications: PolicyPublicationService
+    private readonly publications: PolicyPublicationService,
+    @Inject(WhatsAppNotificationsService) private readonly whatsappAlerts: WhatsAppNotificationsService
   ) {}
 
   @Get('current')
@@ -84,14 +90,37 @@ export class PrivacyController {
   async mine(@Req() request: Request) {
     const customer = await this.requiredCustomer(request);
     const organizationId = customer.organizationId;
-    return {
-      policy: await this.privacy.currentPolicy(organizationId),
-      ...(await this.privacy.customerSnapshot({
-        organizationId,
-        customerId: customer.customerId,
+    const [policy, snapshot, whatsapp] = await Promise.all([
+      this.privacy.currentPolicy(organizationId),
+      this.privacy.customerSnapshot({
+        organizationId, customerId: customer.customerId,
         email: customer.emailVerified ? customer.email : null
-      }))
-    };
+      }),
+      this.whatsappAlerts.accountAlerts(customer)
+    ]);
+    return { policy, ...snapshot, alerts: [...snapshot.alerts, ...whatsapp] };
+  }
+
+  @Post('me/alerts/unsubscribe')
+  async unsubscribeMyAlerts(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.requiredCustomer(request);
+    const input = parseWithSchema(z.object({
+      channel: z.enum(['email', 'whatsapp', 'both']),
+      scope: z.discriminatedUnion('kind', [
+        z.object({ kind: z.literal('all') }),
+        z.object({ kind: z.literal('watch'), productId: uuidSchema, variantId: uuidSchema })
+      ])
+    }), body);
+    const scope = input.scope.kind === 'watch'
+      ? { productId: input.scope.productId, variantId: input.scope.variantId } : {};
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const whatsapp = input.channel === 'email' ? 0 : await this.whatsappAlerts.unsubscribeAccountAlerts(customer, scope, client);
+      const email = input.channel === 'whatsapp' ? 0 : await this.privacy.unsubscribeEmailAlerts({
+        organizationId: customer.organizationId, customerId: customer.customerId,
+        email: customer.emailVerified ? customer.email : null, source: 'account', ...scope
+      }, client);
+      return { email, whatsapp };
+    });
   }
 
   @Delete('me/newsletter')
@@ -141,6 +170,16 @@ export class PrivacyController {
   @Post('unsubscribe/product-alert')
   async productAlertOneClickUnsubscribe(@Query('token') token: string | undefined) {
     return { unsubscribed: token ? await this.privacy.unsubscribeProductAlertToken(token) : false };
+  }
+
+  @Post('unsubscribe/product-alert-watch')
+  async unsubscribeEmailWatch(@Query('token') token: string | undefined) {
+    return { unsubscribed: token ? await this.privacy.unsubscribeProductAlertToken(token, 'watch') : false };
+  }
+
+  @Post('unsubscribe/product-alert-all')
+  async unsubscribeAllEmailProductAlerts(@Query('token') token: string | undefined) {
+    return { unsubscribed: token ? await this.privacy.unsubscribeProductAlertToken(token, 'all') : false };
   }
 
   @Get('unsubscribe/product-alert')

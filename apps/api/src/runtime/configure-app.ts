@@ -45,7 +45,7 @@ export function configureApiApp(app: INestApplication, config: AppConfig, logger
     // APIs may return customer data, staff records or signed download URLs.
     // Public handlers can explicitly opt into caching when appropriate.
     res.setHeader('Cache-Control', 'no-store');
-    if (/^\/api\/v1\/(?:customer-auth(?:\/|$)|privacy\/(?:me|unsubscribe)(?:\/|$)|newsletter(?:\/|$)|products\/[^/]+\/alerts(?:\/|$)|product-alerts\/confirm(?:\/|$)|admin\/emails(?:\/|$)|contact(?:\/|$))/.test(req.path)) {
+    if (/^\/api\/v1\/(?:customer-auth(?:\/|$)|privacy\/(?:me|unsubscribe)(?:\/|$)|newsletter(?:\/|$)|products\/[^/]+\/alerts(?:\/|$)|product-alerts\/(?:confirm|wishlist)(?:\/|$)|admin\/emails(?:\/|$)|contact(?:\/|$))/.test(req.path)) {
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
     }

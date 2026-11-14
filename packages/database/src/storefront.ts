@@ -885,33 +885,12 @@ export class StorefrontRepository {
     return this.listWishlist(input);
   }
 
-  async removeWishlistItem(input: {
-    organizationId: string;
-    customerId: string;
-    email?: string | null;
-    productId: string;
-  }) {
-    const removedAlerts = await this.client.query<{ id: string }>(
-      `WITH removed_wishlist_item AS (
-         DELETE FROM customer_wishlist_items
-         WHERE organization_id = $1 AND customer_id = $2 AND product_id = $3
-         RETURNING product_id
-       )
-       SELECT alert.id
-       FROM product_alert_subscriptions alert
-       JOIN removed_wishlist_item removed ON alert.product_id = removed.product_id
-       WHERE alert.organization_id = $1 AND alert.product_id = removed.product_id
-         AND alert.active
-         AND (
-           alert.customer_id = $2
-           OR ($4::text IS NOT NULL AND alert.normalized_email = lower($4))
-         )`,
-      [input.organizationId, input.customerId, input.productId, input.email ?? null]
+  async removeWishlistItem(input: { organizationId: string; customerId: string; productId: string }) {
+    await this.client.query(
+      `DELETE FROM customer_wishlist_items WHERE organization_id=$1 AND customer_id=$2 AND product_id=$3`,
+      [input.organizationId, input.customerId, input.productId]
     );
-    return {
-      wishlist: await this.listWishlist(input),
-      alertIds: removedAlerts.rows.map((row) => row.id)
-    };
+    return this.listWishlist(input);
   }
 
   /**
@@ -1381,6 +1360,7 @@ export class StorefrontRepository {
     organizationId: string;
     productId: string;
     variantId: string;
+    deliveryChannel?: ProductAlertDeliveryChannel;
     customerId?: string | null;
     email?: string | null;
     phone?: string | null;
@@ -1396,7 +1376,8 @@ export class StorefrontRepository {
            OR normalized_email = lower($5)
            OR normalized_phone = regexp_replace($6, '[^0-9+]', '', 'g')
          )
-         AND active = TRUE
+         AND active = TRUE AND revoked_at IS NULL
+         AND ($7::text IS NULL OR delivery_channel = $7)
        ORDER BY alert_type`,
       [
         input.organizationId,
@@ -1404,7 +1385,8 @@ export class StorefrontRepository {
         input.variantId,
         input.customerId ?? null,
         input.email ?? null,
-        input.phone ?? null
+        input.phone ?? null,
+        input.deliveryChannel ?? null
       ]
     );
     return result.rows.map((row) => row.alert_type);
