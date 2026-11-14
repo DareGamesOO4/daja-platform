@@ -31,9 +31,12 @@ exact subscription. The database stores only the SHA-256 token hash. A short
 confirmation reply is queued in the customer's language for a fresh inbound opt-in.
 
 The account and wishlist expose separate controls per exact watch and channel.
-Bulk wishlist opt-in creates independent price alerts for the current wishlist
-only. It requires the verified contact on the signed-in account. Favorites can be
-removed without changing notification consent. In WhatsApp, reply to a specific
+Wishlist opt-in follows current and future favorites on the selected verified
+contact. Removing a favorite revokes only alerts created by wishlist tracking.
+An individually enabled alert stays active until explicitly revoked. A per-watch
+opt-out stays in effect while the watch remains on the list. Removing and adding
+the watch again is a new wishlist entry. All-watch opt-out turns off automatic
+tracking for that channel. Historic subscriptions retain their previous scope. In WhatsApp, reply to a specific
 watch notification with `STOP SAT` or `STOP WATCH` to revoke alerts for that watch.
 Send `STOP SATOVI` or `STOP WATCHES` to revoke all watch alerts without revoking
 newsletters. The current approved templates still carry the generic STOP text.

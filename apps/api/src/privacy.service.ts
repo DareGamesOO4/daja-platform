@@ -358,6 +358,12 @@ export class PrivacyService {
   }, transaction?: DbClient): Promise<number> {
     const revoke = async (client: DbClient) => {
       if (input.email) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+          ['wishlist-email:' + input.organizationId + ':' + input.email.toLowerCase()]);
+        if (!input.productId && !input.variantId) {
+          await client.query(`DELETE FROM wishlist_alert_preferences
+            WHERE organization_id=$1 AND channel='email' AND contact=lower($2)`, [input.organizationId,input.email]);
+        }
         await client.query(`UPDATE product_alert_confirmations SET expires_at=now()
           WHERE organization_id=$1 AND email=lower($2) AND used_at IS NULL AND expires_at>now()
             AND ($3::text IS NULL OR intent->>'productId'=$3)

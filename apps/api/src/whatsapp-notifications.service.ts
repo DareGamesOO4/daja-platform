@@ -87,26 +87,33 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
     return result;
   }
 
-  async subscribeWishlist(customer: AlertOwner, targets: Array<{ productId: string; variantId: string | null }>,
-    input: { language: 'sr' | 'en'; policyVersion?: string | undefined }) {
+  lockWishlistPhone(client: DbClient, phone: string) { return this.lock(client, phone); }
+
+  assertWishlistAvailable(customer: VerifiedAccount) {
     if (!this.available() || customer.organizationId !== this.org()) throw new ValidationFailedError(unavailable);
-    const phone = this.alertPhone(customer);
-    if (!phone) throw new ValidationFailedError('Potvrdite broj telefona u profilu pre uključivanja WhatsApp obaveštenja.');
-    return this.transaction(async client => {
-      await this.lock(client, phone);
-      if (!await this.verifiedPhone(client, customer, phone)) {
-        throw new ValidationFailedError('Potvrdite broj telefona u profilu pre uključivanja WhatsApp obaveštenja.');
-      }
-      let active = 0;
-      for (const { productId, variantId } of targets) {
-        if (!variantId) continue;
-        const product = await this.product(client, variantId);
-        if (!product || product.product_id !== productId) continue;
-        await this.activatePriceAlert(client, phone, product, variantId, input.language, input.policyVersion);
-        active++;
-      }
-      return { active, skipped: targets.length - active };
-    });
+  }
+
+  async subscribeWishlist(customer: VerifiedAccount, targets: Array<{ productId: string; variantId: string | null }>,
+    input: { language: 'sr' | 'en'; policyVersion?: string | undefined }, phone: string, client: DbClient) {
+    if (customer.organizationId !== this.org()) return { active: 0, skipped: targets.length };
+    let active = 0;
+    for (const { productId, variantId } of targets) {
+      if (!variantId) continue;
+      const product = await this.product(client, variantId);
+      if (!product || product.product_id !== productId) continue;
+      await this.activatePriceAlert(client, phone, product, variantId, input.language, input.policyVersion, customer.customerId);
+      active++;
+    }
+    return { active, skipped: targets.length - active };
+  }
+
+  async removeWishlistProductAlerts(client: DbClient, customer: VerifiedAccount, productId: string, keepVariant: string | null) {
+    const result = await client.query<{ id: string }>(`UPDATE whatsapp_subscriptions
+      SET active=false,revoked_at=now(),updated_at=now()
+      WHERE organization_id=$1 AND wishlist_customer_id=$2 AND product_id=$3 AND revoked_at IS NULL
+        AND variant_id IS DISTINCT FROM $4::uuid RETURNING id`,
+      [customer.organizationId, customer.customerId, productId, keepVariant]);
+    await this.cancelQueued(client, result.rows.map(row => row.id));
   }
 
   async accountAlerts(customer: AlertOwner, watch?: { productId: string; variantId: string }) {
@@ -155,15 +162,18 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
   }
 
   private async activatePriceAlert(client: DbClient, phone: string, product: Product, variantId: string,
-    language: 'sr' | 'en', policyVersion?: string) {
+    language: 'sr' | 'en', policyVersion?: string, wishlistCustomerId?: string) {
+    if (!wishlistCustomerId) await client.query(`UPDATE whatsapp_subscriptions SET wishlist_customer_id=NULL
+      WHERE organization_id=$1 AND phone=$2 AND purpose='price_change' AND variant_id=$3
+        AND active AND revoked_at IS NULL AND wishlist_customer_id IS NOT NULL`, [this.org(),phone,variantId]);
     await client.query(`INSERT INTO whatsapp_subscriptions
         (organization_id,phone,purpose,product_id,variant_id,policy_version,source,token_hash,language,
-         expires_at,confirmed_at,active,last_price)
-      SELECT $1,$2,'price_change',$3,$4,$5,'site_verified_account',$6,$7,now(),now(),true,$8
+         expires_at,confirmed_at,active,last_price,wishlist_customer_id)
+      SELECT $1,$2,'price_change',$3,$4,$5,'site_verified_account',$6,$7,now(),now(),true,$8,$9
       WHERE NOT EXISTS (SELECT 1 FROM whatsapp_subscriptions WHERE organization_id=$1 AND phone=$2
         AND purpose='price_change' AND variant_id=$4 AND active AND revoked_at IS NULL)`,
       [this.org(), phone, product.product_id, variantId, policyVersion ?? '2026-09-01-draft',
-        hash(randomBytes(24).toString('hex')), language, product.price]);
+        hash(randomBytes(24).toString('hex')), language, product.price, wishlistCustomerId ?? null]);
   }
 
   private async revokeProductAlerts(client: DbClient, phone: string,
@@ -174,11 +184,14 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         AND ($3::uuid IS NULL OR product_id=$3) AND ($4::uuid IS NULL OR variant_id=$4)
         AND ($5::timestamptz IS NULL OR (created_at<=$5 AND (confirmed_at IS NULL OR confirmed_at<=$5)))
       RETURNING id`, [this.org(), phone, scope.productId ?? null, scope.variantId ?? null, scope.before ?? null]);
-    if (result.rows.length) {
-      await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',updated_at=now()
-        WHERE subscription_id=ANY($1::uuid[]) AND state='queued'`, [result.rows.map(row => row.id)]);
-    }
+    await this.cancelQueued(client, result.rows.map(row => row.id));
     return result.rows.length;
+  }
+
+  private async cancelQueued(client: DbClient, ids: string[]) {
+    if (!ids.length) return;
+    await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',updated_at=now()
+      WHERE subscription_id=ANY($1::uuid[]) AND state='queued'`, [ids]);
   }
 
   async status(token: string) {
@@ -223,6 +236,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         if (!Number.isFinite(eventAt.getTime()) || eventAt.getTime() > Date.now() + 300_000) return;
         const before = new Date(eventAt.getTime() + 999);
         if (/^(STOP SATOVI|STOP WATCHES)$/i.test(text)) {
+          await this.disableWishlistTracking(client, phone, before);
           await this.revokeProductAlerts(client, phone, { before });
           return;
         }
@@ -238,6 +252,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
           return;
         }
         if (/^(STOP|ODJAVA|UNSUBSCRIBE|PREKINI)$/i.test(text)) {
+          await this.disableWishlistTracking(client, phone, before);
           await client.query(`UPDATE whatsapp_subscriptions SET active=false,revoked_at=now(),updated_at=now()
             WHERE organization_id=$1 AND phone=$2 AND revoked_at IS NULL AND created_at<=$3
               AND (confirmed_at IS NULL OR confirmed_at<=$3)`, [this.org(), phone, new Date(eventAt.getTime() + 999)]);
@@ -402,6 +417,11 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
     await this.db.pool.query(`DELETE FROM whatsapp_webhook_receipts WHERE received_at<now()-interval '30 days'`);
     await this.db.pool.query(`DELETE FROM whatsapp_delivery_statuses WHERE updated_at<now()-interval '30 days'`);
     await this.db.pool.query(`DELETE FROM whatsapp_subscriptions WHERE confirmed_at IS NULL AND expires_at<now()-interval '1 day'`);
+  }
+
+  private async disableWishlistTracking(client: DbClient, phone: string, before: Date) {
+    await client.query(`DELETE FROM wishlist_alert_preferences
+      WHERE organization_id=$1 AND channel='whatsapp' AND contact=$2 AND created_at<=$3`, [this.org(),phone,before]);
   }
 
   private org() { return this.config.PUBLIC_ORGANIZATION_ID; }

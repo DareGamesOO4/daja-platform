@@ -31,6 +31,7 @@ import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
+import { WishlistAlertService } from './wishlist-alert.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { CatalogDeliveryService } from './catalog-delivery.service.js';
@@ -478,6 +479,7 @@ export class CustomerController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     private readonly privacy: PrivacyService,
+    @Inject(WishlistAlertService) private readonly wishlistAlerts: WishlistAlertService,
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
@@ -582,21 +584,13 @@ export class CustomerController {
   async addWishlist(@Req() request: Request, @Body() body: unknown) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
     const input = parseWithSchema(wishlistSchema, body);
-    return new StorefrontRepository(this.database.pool).addWishlistItem({
-      organizationId: customer.organizationId,
-      customerId: customer.customerId,
-      item: input.item
-    });
+    return this.wishlistAlerts.add(customer, input.item);
   }
 
   @Delete('wishlist/:productId')
   async removeWishlist(@Req() request: Request, @Param('productId') productId: string) {
     const customer = await this.auth.requireCustomer(bearerToken(request));
-    return new StorefrontRepository(this.database.pool).removeWishlistItem({
-      organizationId: customer.organizationId,
-      customerId: customer.customerId,
-      productId: parseWithSchema(uuidSchema, productId)
-    });
+    return this.wishlistAlerts.remove(customer, parseWithSchema(uuidSchema, productId));
   }
 }
 
@@ -840,6 +834,7 @@ export class StorefrontContentController {
     @Inject(NovostiEmailService) private readonly novostiEmail: NovostiEmailService,
     @Inject(PromotionsService) private readonly promotions: PromotionsService,
     private readonly productAlerts: ProductAlertService,
+    @Inject(WishlistAlertService) private readonly wishlistAlerts: WishlistAlertService,
     @Inject(WhatsAppNotificationsService) private readonly whatsappAlerts: WhatsAppNotificationsService,
     private readonly privacy: PrivacyService,
     @Inject(LOGGER) private readonly logger: Logger
@@ -878,6 +873,11 @@ export class StorefrontContentController {
     return review;
   }
 
+  @Get('product-alerts/wishlist')
+  async wishlistAlertStatus(@Req() request: Request) {
+    return this.wishlistAlerts.status(await this.auth.requireCustomer(bearerToken(request)));
+  }
+
   @Post('product-alerts/wishlist')
   @Throttle({ default: { limit: 6, ttl: 60_000 } })
   async subscribeWishlistAlerts(@Req() request: Request, @Body() body: unknown) {
@@ -888,11 +888,7 @@ export class StorefrontContentController {
       policyVersion: z.string().trim().min(1).max(120).optional(),
       accepted: z.literal(true)
     }), body);
-    const targets = await this.productAlerts.wishlistTargets(customer.organizationId, customer.customerId);
-    if (input.channel === 'whatsapp') {
-      return this.whatsappAlerts.subscribeWishlist(customer, targets, input);
-    }
-    return this.productAlerts.subscribeWishlist(customer, targets, input.policyVersion);
+    return this.wishlistAlerts.enable(customer, input);
   }
 
   @Post('products/:productId/alerts')

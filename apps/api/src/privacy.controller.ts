@@ -21,6 +21,7 @@ import { CustomerAuthService } from './customer-auth.service.js';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { PolicyPublicationService } from './policy-publication.service.js';
 import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
+import { WishlistAlertService } from './wishlist-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
@@ -49,6 +50,7 @@ export class PrivacyController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
     private readonly privacy: PrivacyService,
+    @Inject(WishlistAlertService) private readonly wishlistAlerts: WishlistAlertService,
     private readonly customerAuth: CustomerAuthService,
     private readonly publications: PolicyPublicationService,
     @Inject(WhatsAppNotificationsService) private readonly whatsappAlerts: WhatsAppNotificationsService
@@ -114,11 +116,16 @@ export class PrivacyController {
     const scope = input.scope.kind === 'watch'
       ? { productId: input.scope.productId, variantId: input.scope.variantId } : {};
     return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      await this.wishlistAlerts.lockAccount(client, customer);
       const whatsapp = input.channel === 'email' ? 0 : await this.whatsappAlerts.unsubscribeAccountAlerts(customer, scope, client);
       const email = input.channel === 'whatsapp' ? 0 : await this.privacy.unsubscribeEmailAlerts({
         organizationId: customer.organizationId, customerId: customer.customerId,
         email: customer.emailVerified ? customer.email : null, source: 'account', ...scope
       }, client);
+      if (input.scope.kind === 'all') {
+        await client.query(`DELETE FROM wishlist_alert_preferences WHERE organization_id=$1 AND customer_id=$2
+          AND ($3='both' OR channel=$3)`, [customer.organizationId,customer.customerId,input.channel]);
+      }
       return { email, whatsapp };
     });
   }

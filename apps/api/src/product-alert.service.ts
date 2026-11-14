@@ -23,6 +23,7 @@ type AlertInput = {
     productId: string;
     variantId: string;
     customerId?: string | null | undefined;
+    wishlist?: boolean;
     email?: string | undefined;
     phone?: string | undefined;
     managementToken?: string | undefined;
@@ -67,8 +68,8 @@ export class ProductAlertService {
     });
   }
 
-  async wishlistTargets(organizationId: string, customerId: string) {
-    const result = await this.database.pool.query<{ productId: string; variantId: string | null }>(
+  async wishlistTargets(organizationId: string, customerId: string, client: DbClient = this.database.pool, productId?: string) {
+    const result = await client.query<{ productId: string; variantId: string | null }>(
       `SELECT w.product_id AS "productId", variant.id AS "variantId"
        FROM customer_wishlist_items w
        LEFT JOIN products p ON p.id = w.product_id AND p.organization_id = w.organization_id
@@ -80,33 +81,27 @@ export class ProductAlertService {
            AND p.active AND p.published AND p.deleted_at IS NULL
          ORDER BY v.current_price_amount, v.id LIMIT 1
        ) variant ON true
-       WHERE w.organization_id = $1 AND w.customer_id = $2
-       ORDER BY p.id`, [organizationId, customerId]
+       WHERE w.organization_id = $1 AND w.customer_id = $2 AND ($3::uuid IS NULL OR w.product_id=$3)
+       ORDER BY p.id`, [organizationId, customerId, productId ?? null]
     );
     return result.rows;
   }
 
-  async subscribeWishlist(customer: { organizationId: string; customerId: string }, targets: Array<{ productId: string; variantId: string | null }>, policyVersion?: string) {
-    return new TransactionManager(this.database.pool, this.logger).run(async client => {
-      const owner = await client.query<{ email: string }>(
-        `SELECT email FROM customers WHERE organization_id=$1 AND id=$2 AND active AND deleted_at IS NULL
-          AND email_verified AND email IS NOT NULL FOR UPDATE`, [customer.organizationId, customer.customerId]);
-      const email = owner.rows[0]?.email;
-      if (!email) throw new ValidationFailedError('Potvrdite email adresu naloga pre uključivanja email obaveštenja.');
-
-      let active = 0;
-      for (const { productId, variantId } of targets) {
-        if (!variantId) continue;
-        try {
-          await this.activate({ ...customer, email, productId, variantId, policyVersion,
-            deliveryChannel: 'email', type: 'price_change' }, client, true);
-          active++;
-        } catch (error) {
-          if (!(error instanceof ResourceNotFoundError)) throw error;
-        }
+  async subscribeWishlist(customer: { organizationId: string; customerId: string },
+    targets: Array<{ productId: string; variantId: string | null }>, email: string,
+    policyVersion: string | undefined, client: DbClient) {
+    let active = 0;
+    for (const { productId, variantId } of targets) {
+      if (!variantId) continue;
+      try {
+        await this.activate({ ...customer, email, productId, variantId, policyVersion,
+          wishlist: true, deliveryChannel: 'email', type: 'price_change' }, client, true);
+        active++;
+      } catch (error) {
+        if (!(error instanceof ResourceNotFoundError)) throw error;
       }
-      return { active, skipped: targets.length - active };
-    });
+    }
+    return { active, skipped: targets.length - active };
   }
 
   private async activate(input: AlertInput, client: DbClient, preserveActive = false) {
@@ -127,9 +122,14 @@ export class ProductAlertService {
          AND active AND revoked_at IS NULL AND consent_status='explicit' FOR UPDATE`,
         [input.organizationId, input.variantId, input.productId, email, input.type]
       );
-      if (active.rows[0]) return { id: active.rows[0].id, email: email ?? null, phone: null,
+      if (active.rows[0]) {
+        if (!input.wishlist) await client.query(
+          'UPDATE product_alert_subscriptions SET wishlist_customer_id=NULL WHERE id=$1 AND wishlist_customer_id IS NOT NULL', [active.rows[0].id]
+        );
+        return { id: active.rows[0].id, email: email ?? null, phone: null,
         deliveryChannel: input.deliveryChannel, type: input.type, active: true, contactId: contact?.id ?? null,
         ...(contact ? { managementToken: contact.managementToken, maskedEmail: contact.maskedEmail } : {}) };
+      }
     }
     const subscription = await new StorefrontRepository(client).subscribeProductAlert({
       organizationId: input.organizationId,
@@ -144,9 +144,9 @@ export class ProductAlertService {
     });
     await client.query(
       `UPDATE product_alert_subscriptions
-       SET consent_status = 'explicit', consent_version = $2, consented_at = now(), revoked_at = NULL
+       SET consent_status = 'explicit', consent_version = $2, consented_at = now(), revoked_at = NULL, wishlist_customer_id=$3
        WHERE id = $1`,
-      [subscription.id, input.policyVersion ?? '2026-09-01-draft']
+      [subscription.id, input.policyVersion ?? '2026-09-01-draft', input.wishlist ? input.customerId : null]
     );
     await this.privacy.recordProductAlertConsent({
       organizationId: input.organizationId,
@@ -154,7 +154,7 @@ export class ProductAlertService {
       customerId: input.customerId,
       subscriptionId: subscription.id,
       policyVersion: input.policyVersion,
-      source: input.customerId ? 'authenticated_alert_modal' : 'guest_email_confirmation'
+      source: input.wishlist ? 'wishlist_tracking' : input.customerId ? 'authenticated_alert_modal' : 'guest_email_confirmation'
     }, client);
     if (input.acceptedSmsMarketing && phone) {
       await new StorefrontRepository(client).subscribeSmsMarketing({
