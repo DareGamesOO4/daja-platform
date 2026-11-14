@@ -21,7 +21,11 @@ The storefront newsletter forms and product-alert dialog use
 `POST /whatsapp/subscriptions/request` (phone, language sr/en, purpose newsletter /
 price_change / back_in_stock, explicit consent, policy version; product/variant IDs
 required for product alerts). Only Serbian recipient numbers are accepted initially.
-The server returns a 30-minute `wa.me` link. No outbound message is sent to an
+Price alerts on the product page can also be activated by an explicit request from the
+authenticated account that owns the exact verified number. The server checks the current
+customer record. New numbers can be verified using the existing phone code flow.
+
+For the inbound confirmation flow, the server returns a 30-minute `wa.me` link. No outbound message is sent to an
 unverified number. Sending `DAJA <token>` from the entered number activates that
 exact subscription. The database stores only the SHA-256 token hash. A short
 confirmation reply is queued in the customer's language for a fresh inbound opt-in.

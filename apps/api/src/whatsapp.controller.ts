@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { CONFIG } from './tokens.js';
 import { equalSecret } from './runtime/edge-ingress.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import { CustomerAuthService } from './customer-auth.service.js';
 import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
 
 const subscriptionSchema = z.object({
@@ -23,14 +24,28 @@ const subscriptionSchema = z.object({
 @Controller()
 export class WhatsAppController {
   constructor(@Inject(CONFIG) private readonly config: AppConfig,
-    private readonly notifications: WhatsAppNotificationsService) {}
+    private readonly notifications: WhatsAppNotificationsService,
+    @Inject(CustomerAuthService) private readonly auth: CustomerAuthService) {}
 
   @Get('whatsapp/capabilities')
   capabilities() { return { available: this.notifications.available(), backInStockAvailable: this.notifications.available() && this.config.WHATSAPP_STOCK_ALERTS_ENABLED }; }
 
   @Post('whatsapp/subscriptions/request')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  request(@Body() body: unknown) { return this.notifications.request(parseWithSchema(subscriptionSchema, body)); }
+  request(@Body() body: unknown) {
+    return this.notifications.request(parseWithSchema(subscriptionSchema, body));
+  }
+
+  @Post('whatsapp/subscriptions/verified-account')
+  @Throttle({ default: { limit: 8, ttl: 60_000 } })
+  async requestVerifiedAccount(@Req() request: Request, @Body() body: unknown) {
+    const input = parseWithSchema(subscriptionSchema, body);
+    const authorization = request.headers.authorization;
+    const customer = await this.auth.requireCustomer(
+      authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : undefined
+    );
+    return this.notifications.request(input, customer);
+  }
 
   @Post('whatsapp/subscriptions/status')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })

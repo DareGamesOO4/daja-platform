@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import type { RedisConnection } from '@daja/database';
 
+type VerifiedAccount = { customerId: string; organizationId: string };
+
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const unavailable = 'WhatsApp obaveštenja još nisu dostupna. Za sada izaberite Email.';
 const webhookSchema = z.object({ object: z.literal('whatsapp_business_account'), entry: z.array(z.object({
@@ -45,7 +47,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
   }
 
   async request(input: { phone: string; purpose: Purpose; productId?: string | undefined;
-    variantId?: string | undefined; policyVersion?: string | undefined; source?: string | undefined; language: 'sr' | 'en' }) {
+    variantId?: string | undefined; policyVersion?: string | undefined; source?: string | undefined; language: 'sr' | 'en' }, customer?: VerifiedAccount) {
     if (!this.available()) throw new ValidationFailedError(unavailable);
     if (input.purpose === 'back_in_stock' && !this.config.WHATSAPP_STOCK_ALERTS_ENABLED) {
       throw new ValidationFailedError('WhatsApp obaveštenje o povratku na stanje nije uključeno.');
@@ -53,14 +55,37 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
     const phone = input.phone.replace(/[\s()-]/g, '');
     if (!/^\+381[1-9]\d{6,11}$/.test(phone)) throw new ValidationFailedError('Unesite broj telefona u međunarodnom formatu, npr. +381601234567.');
     const token = randomBytes(24).toString('hex');
-    await this.transaction(async client => {
+    const result = await this.transaction(async client => {
       await this.lock(client, phone);
       const recent = await client.query<{ count: number }>(`SELECT count(*)::int AS count FROM whatsapp_subscriptions
         WHERE organization_id=$1 AND phone=$2 AND created_at>now()-interval '1 hour'`, [this.org(), phone]);
       if ((recent.rows[0]?.count ?? 0) >= 5) throw new ValidationFailedError('Sačekajte pre ponovne prijave na WhatsApp.');
-      if (input.purpose !== 'newsletter') {
-        const p = await this.product(client, input.variantId ?? '');
-        if (!p || p.product_id !== input.productId) throw new ValidationFailedError('Artikal više nije dostupan.');
+      const product = input.purpose === 'newsletter' ? undefined : await this.product(client, input.variantId ?? '');
+      if (input.purpose !== 'newsletter' && (!product || product.product_id !== input.productId)) {
+        throw new ValidationFailedError('Artikal više nije dostupan.');
+      }
+
+      if (customer) {
+        if (input.purpose !== 'price_change' || customer.organizationId !== this.org()) {
+          throw new ValidationFailedError('Ova WhatsApp prijava nije dostupna.');
+        }
+        const account = await client.query(`SELECT id FROM customers
+          WHERE organization_id=$1 AND id=$2 AND phone=$3 AND phone_verified=true AND active AND deleted_at IS NULL FOR UPDATE`,
+          [this.org(), customer.customerId, phone]);
+        if (!account.rowCount) return { active: false, requiresPhoneVerification: true } as const;
+
+        const existing = await client.query(`SELECT id FROM whatsapp_subscriptions
+          WHERE organization_id=$1 AND phone=$2 AND purpose=$3 AND variant_id=$4 AND active`,
+          [this.org(), phone, input.purpose, input.variantId]);
+        if (!existing.rowCount) {
+          await client.query(`INSERT INTO whatsapp_subscriptions
+            (organization_id,phone,purpose,product_id,variant_id,policy_version,source,token_hash,language,
+             expires_at,confirmed_at,active,last_price)
+            VALUES ($1,$2,$3,$4,$5,$6,'site_verified_account', $7,$8,now(),now(),true,$9)`,
+            [this.org(), phone, input.purpose, input.productId, input.variantId,
+              input.policyVersion ?? '2026-09-01-draft', hash(token), input.language, product?.price]);
+        }
+        return { active: true } as const;
       }
       await client.query(`INSERT INTO whatsapp_subscriptions
         (organization_id,phone,purpose,product_id,variant_id,policy_version,source,token_hash,language,expires_at)
@@ -68,6 +93,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         [this.org(), phone, input.purpose, input.productId ?? null, input.variantId ?? null,
           input.policyVersion ?? '2026-09-01-draft', input.source ?? 'site', hash(token), input.language]);
     });
+    if (result) return result;
     // Sending this message from WhatsApp proves control of the requested number.
     return { active: false, requiresWhatsAppConfirmation: true, confirmationToken: token,
       whatsappUrl: `https://wa.me/${this.config.WHATSAPP_BUSINESS_PHONE.slice(1)}?text=${encodeURIComponent('DAJA ' + token)}` };
