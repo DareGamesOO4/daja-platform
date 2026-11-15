@@ -520,8 +520,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         let state = 'unknown'; let providerId: string | null = null; let errorCode: string | null = null;
         try {
           const hasNewsletterLink = item.template_name === NEWSLETTER_TEMPLATE && item.language === 'sr';
-          const buttonPayloads = item.template_name === NEWSLETTER_TEMPLATE && !hasNewsletterLink ? ['STOP NEWS','STOP ALL'] :
-            item.template_name === PRICE_TEMPLATE ? [`STOP WATCH ${subscription.watch_code}`,'STOP ALL'] : [];
+          const buttonPayloads = item.template_name === NEWSLETTER_TEMPLATE && !hasNewsletterLink ? ['STOP NEWS','STOP ALL'] : [];
           const buttons = buttonPayloads.map((payload, index) => ({ type: 'button', sub_type: 'quick_reply',
             index: String(index), parameters: [{ type: 'payload', payload }] }));
           const bodyParameters = hasNewsletterLink ? item.parameters.slice(0, 1) : item.parameters;

@@ -95,27 +95,39 @@ Send STOP for the newsletter or STOP ALL for all WhatsApp subscriptions.
 
 ### daja_price_change_v2 — Marketing
 
-Izaberi iste jezike i vrstu dugmadi. Poruka pokriva i rast i pad cene.
+Izaberi **Marketing → Default** i numeričke promenljive. Media sample je **None**. Ostavi Header i Buttons prazne. Poruka pokriva i rast i pad cene.
 
 **Serbian**
 
 ```text
-DajaShop · Traženo obaveštenje o ceni
-Cena artikla {{1}} promenjena je sa {{2}} na {{3}}. Detalji: {{4}}.
-Pošaljite STOP SAT {{5}} za ovaj sat, STOP CENE za sva praćenja cena ili STOP SVE za sve WhatsApp pretplate.
+DajaShop · Promena cene
+
+Cena sata koji pratiš se promenila: {{1}}
+
+Prethodna cena: {{2}}
+Nova cena: {{3}}
+Pogledaj sat: {{4}}
+
+Za odjavu ovog sata pošalji STOP SAT {{5}}.
 ```
 
-- Dugmad redom su **Odjavi ovaj sat** i **Odjavi sve**.
+- Footer je `STOP CENE za sve cene · STOP SVE za sve pretplate`.
 
 **English**
 
 ```text
-DajaShop · Requested price alert
-The price of {{1}} changed from {{2}} to {{3}}. Details: {{4}}.
-Send STOP WATCH {{5}} for this watch, STOP PRICES for all price alerts or STOP ALL for all WhatsApp subscriptions.
+DajaShop · Price update
+
+The price of a watch you follow has changed: {{1}}
+
+Previous price: {{2}}
+New price: {{3}}
+View watch: {{4}}
+
+To unsubscribe from this watch, send STOP WATCH {{5}}.
 ```
 
-- Dugmad redom su **Unsubscribe this watch** i **Unsubscribe from all**.
+- Footer je `STOP PRICES for price alerts · STOP ALL to unsubscribe`.
 - Za oba jezika, primeri za `{{1}}`–`{{5}}` redom su `Casio MTP`, `5.000,00 RSD`, `4.500,00 RSD`, `https://dajashop.rs/catalog` i `1042`.
 
 ### daja_back_in_stock_v1 — iskljuceno, ne kreirati sada
