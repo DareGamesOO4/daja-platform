@@ -63,6 +63,7 @@ import {
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { catalogPageSchema, catalogPreparationSchema, prepareCatalogPages, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
+import { PublicBrandCacheService } from './public-brand-cache.service.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
@@ -283,7 +284,8 @@ export class PublicCatalogController {
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
     @Inject(REDIS) private readonly redis: RedisConnection,
-    @Inject(LOGGER) private readonly logger: Logger
+    @Inject(LOGGER) private readonly logger: Logger,
+    private readonly brandCache: PublicBrandCacheService
   ) {}
 
   @Get('search')
@@ -314,8 +316,11 @@ export class PublicCatalogController {
   async catalogPage(@Req() request: Request, @Query() query: Record<string, string | undefined>,
     @Res({ passthrough: true }) response: Response) {
     const started = performance.now();
-    const result = await publicCatalogPage(this.database.pool, this.publicContext(request).organizationId, parseWithSchema(catalogPageSchema, query));
-    response.setHeader('Server-Timing', `catalog;dur=${(performance.now() - started).toFixed(1)}`);
+    const organizationId = this.publicContext(request).organizationId;
+    const input = parseWithSchema(catalogPageSchema, query);
+    const cached = this.brandCache.get(organizationId, input);
+    const result = cached ?? await publicCatalogPage(this.database.pool, organizationId, input);
+    response.setHeader('Server-Timing', `catalog;dur=${(performance.now() - started).toFixed(1)}, catalog_cache;desc="${cached ? 'hit' : 'miss'}"`);
     return result;
   }
 

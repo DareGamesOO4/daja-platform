@@ -1,5 +1,5 @@
 import { catalogLandings, catalogLanding, matchesLanding, withWatchSeries } from './catalog-landings.js';
-import { publicListingParams } from './catalog-page-params.js';
+import { catalogUrlSlug, publicListingParams } from './catalog-page-params.js';
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { CatalogRepository } from '@daja/database';
@@ -119,7 +119,7 @@ async function cards(pool: Pool, organizationId: string, ids: string[], includeH
 }
 type Facet = { values: Array<{value: string; label: string; color: string; image: string; count: number}>; selected: string[]; numbers: number[] };
 interface Selection { products: Product[]; facets?: Record<string, Facet> }
-interface Snapshot { products: Product[]; configuration: Configuration; version: string; nodes: Node[]; selections: Map<string, Selection>; orders: Map<string, Product[]> }
+interface Snapshot { products: Product[]; brands: string[]; configuration: Configuration; version: string; nodes: Node[]; selections: Map<string, Selection>; orders: Map<string, Product[]> }
 // Reuse source-value posting lists across all combinations of facets.
 const sourcePostings = new WeakMap<Snapshot, Map<string, Map<string, Set<Product>>>>();
 const optionPostings = new WeakMap<Snapshot, Map<Option, Set<Product>>>();
@@ -178,7 +178,7 @@ async function loadSnapshot(pool: Pool, organizationId: string, department: stri
     }
     return known;
   })};
-  return { products: derived.products, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
+  return { products: derived.products, brands, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
     version: createHash('sha256').update(JSON.stringify(configuration)).digest('hex') };
 }
 function snapshot(pool: Pool, organizationId: string, department: string, includeHidden = false) {
@@ -246,16 +246,13 @@ function selectProducts(data: Snapshot, params: URLSearchParams, fixedGender?: s
   while (data.selections.size > 64) data.selections.delete(data.selections.keys().next().value!);
   return result;
 }
-export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query, includeHidden = false) {
-  const data = await snapshot(pool, organizationId, input.department, includeHidden);
-  const rawParams = new URLSearchParams(input.params);
-  const params = input.pathname ? publicListingParams(rawParams, data.configuration, input.pathname) : rawParams;
-  const selection = selectProducts(data, params, input.fixedGender, input.prepareOnly !== '1');
+function planCatalogPage(data: Snapshot, params: URLSearchParams, fixedGender?: string, includeHidden = false, withFacets = true) {
+  const selection = selectProducts(data, params, fixedGender, withFacets);
   const sort = params.get('sort') || 'newest';
   const orderParams = new URLSearchParams([...params].filter(([key]) => key === 'sort' || key === 'q' || key === 'landing' || key.startsWith('cf_')));
   orderParams.set('sort', sort);
   orderParams.sort();
-  const orderKey = JSON.stringify([input.fixedGender, orderParams.toString()]);
+  const orderKey = JSON.stringify([fixedGender, orderParams.toString()]);
   const preparedOrder = data.orders.get(orderKey);
   const filtered = preparedOrder || [...selection.products];
   const collator = new Intl.Collator('sr-RS',{sensitivity:'base'});
@@ -274,17 +271,79 @@ export async function publicCatalogPage(pool: Pool, organizationId: string, inpu
     data.orders.set(orderKey, filtered);
     while (data.orders.size > 64) data.orders.delete(data.orders.keys().next().value!);
   }
-  const total = filtered.length;
+  return { filtered, facets: selection.facets || {} };
+}
+
+const CATALOG_PAGE_SIZE = 32;
+function catalogPageMetadata(data: Snapshot, total: number, requestedPage: number, facets: Record<string, Facet>) {
+  const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / CATALOG_PAGE_SIZE)));
+  return { total, page, perPage: CATALOG_PAGE_SIZE, landingPages: availableLandings(data.products),
+    configurationVersion: data.version, facets };
+}
+type CachedBrandPage = ReturnType<typeof catalogPageMetadata> & { items: Awaited<ReturnType<typeof cards>> };
+type CachedBrandPages = Map<number, CachedBrandPage>;
+
+export async function publicCatalogPage(pool: Pool, organizationId: string, input: Query, includeHidden = false) {
+  const data = await snapshot(pool, organizationId, input.department, includeHidden);
+  const rawParams = new URLSearchParams(input.params);
+  const params = input.pathname ? publicListingParams(rawParams, data.configuration, input.pathname) : rawParams;
+  const { filtered, facets } = planCatalogPage(data, params, input.fixedGender, includeHidden, input.prepareOnly !== '1');
+  const metadata = catalogPageMetadata(data, filtered.length, input.page, facets);
+  const { page, perPage } = metadata;
   const hiddenCount = includeHidden
     ? filtered.filter(product => !product.active || !product.published).length
     : undefined;
-  const page = Math.min(input.page,Math.max(1,Math.ceil(total/32)));
-  const productIds = filtered.slice((page-1)*32,page*32).map(product => product.id);
+  const productIds = filtered.slice((page-1)*perPage,page*perPage).map(product => product.id);
   // Planning resolves membership/order only. No card, gallery or stock query.
   const items = input.prepareOnly === '1' ? [] : await cards(pool,organizationId,productIds,includeHidden);
-  return {items,total,page,perPage:32,landingPages: availableLandings(data.products),configurationVersion:data.version, ...(input.pathname ? { pathname: input.pathname } : {}),
+  return { ...metadata, items, ...(input.pathname ? { pathname: input.pathname } : {}),
     ...(input.configurationVersion === data.version ? {} : {configuration:data.configuration}),
-    facets:selection.facets || {},...(input.prepareOnly === '1' ? {productIds} : {}),...(hiddenCount === undefined ? {} : {hiddenCount})};
+    ...(input.prepareOnly === '1' ? {productIds} : {}),...(hiddenCount === undefined ? {} : {hiddenCount})};
+}
+
+export async function prepareNewestBrandPages(pool: Pool, organizationId: string, signal: AbortSignal) {
+  const data = await snapshot(pool, organizationId, 'satovi');
+  const brandNodes = data.nodes.filter(node => node.sources.includes('brand'));
+  const paths = new Set(data.brands.map(brand => `/brend/${catalogUrlSlug(brand)}`));
+  for (const node of brandNodes) {
+    const optionSlugs = new Set<string>();
+    for (const option of node.options) {
+      const base = catalogUrlSlug(option.urlSlug || option.label);
+      let slug = base;
+      for (let suffix = 2; optionSlugs.has(slug); suffix++) slug = `${base}-${suffix}`;
+      optionSlugs.add(slug);
+      if (option.visible) paths.add(`/brend/${slug}`);
+    }
+  }
+  const pages = new Map<string, CachedBrandPages>();
+  const byFilter = new Map<string, CachedBrandPages>();
+  let expiresAt = Infinity;
+  for (const path of paths) {
+    signal.throwIfAborted();
+    const params = publicListingParams(new URLSearchParams(), data.configuration, path);
+    if (!brandNodes.some(node => params.has(`cf_${node.id}`))) continue;
+    params.sort();
+    const key = params.toString();
+    let brandPages = byFilter.get(key);
+    if (!brandPages) {
+      const { filtered, facets } = planCatalogPage(data, params);
+      const ids = filtered.slice(0, CATALOG_PAGE_SIZE * 2).map(product => product.id);
+      const itemsById = new Map((await cards(pool, organizationId, ids)).map(item => [item.productId, item]));
+      for (const item of itemsById.values()) {
+        if (item.saleValidUntil) expiresAt = Math.min(expiresAt, Date.parse(item.saleValidUntil));
+      }
+      brandPages = new Map();
+      for (const requestedPage of [1, 2]) {
+        const metadata = catalogPageMetadata(data, filtered.length, requestedPage, facets);
+        const start = (metadata.page - 1) * metadata.perPage;
+        const items = ids.slice(start, start + metadata.perPage).flatMap(id => itemsById.get(id) ?? []);
+        brandPages.set(requestedPage, { ...metadata, items });
+      }
+      byFilter.set(key, brandPages);
+    }
+    pages.set(path, brandPages);
+  }
+  return { pages, byFilter, configuration: data.configuration, expiresAt };
 }
 // Batch the options of an opened filter into bounded, read-only planning work.
 export async function prepareCatalogPages(pool: Pool, organizationId: string,

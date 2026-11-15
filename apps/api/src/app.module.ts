@@ -5,6 +5,7 @@ import { SharedRateStorage } from './runtime/shared-rate-storage.js';
 import { CatalogBulkController } from './catalog-bulk.controller.js';
 import { CatalogBulkService } from './catalog-bulk.service.js';
 import { CatalogDeliveryService } from './catalog-delivery.service.js';
+import { PublicBrandCacheService } from './public-brand-cache.service.js';
 import { MediaCleanupService } from './media-cleanup.service.js';
 import { MediaDerivativesService } from './media-derivatives.service.js';
 import { LocalMediaWorkerController } from './local-media-worker.controller.js';
@@ -135,6 +136,7 @@ const rateStorage = new SharedRateStorage(config);
     MediaUploadReaperService,
     CatalogBulkService,
     CatalogDeliveryService,
+    PublicBrandCacheService,
     BrowserSessionInterceptor,
     { provide: APP_GUARD, useClass: ApiRateGuard },
     { provide: SharedRateStorage, useValue: rateStorage },

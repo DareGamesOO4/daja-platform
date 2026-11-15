@@ -6,6 +6,7 @@ const cyrillic = 'абвгдђежзијклљмнњопрстћуфхцчџш';
 const latin = ['a','b','v','g','d','dj','e','z','z','i','j','k','l','lj','m','n','nj','o','p','r','s','t','c','u','f','h','c','c','dz','s'];
 const slug = (value: string) => value.toLowerCase().replace(/[а-яђјљњћџ]/g, char => latin[cyrillic.indexOf(char)] || char)
   .replace(/đ/g, 'dj').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ostalo';
+export { slug as catalogUrlSlug };
 const flatten = (nodes: Node[]): Node[] => nodes.flatMap(node => node.mode === 'group' ? flatten(node.children) : [node]);
 const movementRole = (node: Node) => {
   const labels = [...node.sources.map(source => source.replace(/^spec:/, '')), node.title]
