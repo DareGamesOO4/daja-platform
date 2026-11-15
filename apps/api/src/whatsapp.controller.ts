@@ -90,7 +90,8 @@ export class WhatsAppController {
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   campaign(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request); requirePermission(ctx, 'promotions.write');
-    const input = parseWithSchema(z.object({ campaignId: uuidSchema, text: z.string().trim().min(1).max(800), language: z.enum(['sr','en']).default('sr') }), body);
-    return this.notifications.campaign(ctx.organizationId, input.campaignId, input.text, input.language);
+    const input = parseWithSchema(z.object({ campaignId: uuidSchema, text: z.string().trim().min(1).max(800),
+      language: z.enum(['sr','en']).default('sr'), link: z.string().trim().url().max(2000).optional() }), body);
+    return this.notifications.campaign(ctx.organizationId, input.campaignId, input.text, input.language, input.link);
   }
 }

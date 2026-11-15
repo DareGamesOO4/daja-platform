@@ -12,6 +12,17 @@ import { whatsappPreferenceCommand } from './whatsapp-preference-command.js';
 const NEWSLETTER_TEMPLATE = 'daja_newsletter_v2';
 const PRICE_TEMPLATE = 'daja_price_change_v2';
 const WHATSAPP_NOTICE_VERSION = 'whatsapp-preferences-v2';
+const NEWSLETTER_LINK_ORIGIN = 'https://dajashop.rs';
+
+function newsletterLinkSuffix(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.origin !== NEWSLETTER_LINK_ORIGIN || url.username || url.password || url.href.length > 2000) return undefined;
+    return url.href.slice(NEWSLETTER_LINK_ORIGIN.length + 1);
+  } catch {
+    return undefined;
+  }
+}
 
 type VerifiedAccount = { customerId: string; organizationId: string };
 type AlertOwner = VerifiedAccount & { phone: string | null; phoneVerified: boolean };
@@ -372,21 +383,32 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
     }
   }
 
-  async campaign(organizationId: string, campaignId: string, text: string, language: 'sr' | 'en') {
+  async campaign(organizationId: string, campaignId: string, text: string, language: 'sr' | 'en', link?: string) {
     if (!this.available() || organizationId !== this.org()) throw new ValidationFailedError(unavailable);
+    const parameters = [text];
+    if (language === 'sr') {
+      const explicit = link ? newsletterLinkSuffix(link) : undefined;
+      if (link && !explicit) throw new ValidationFailedError('Unesite važeći link sa sajta https://dajashop.rs.');
+      const embedded = text.match(/https?:\/\/[^\s<>"']+/gi)?.map(value => newsletterLinkSuffix(value.replace(/[.,!;:)\]]+$/, ''))).find(Boolean);
+      parameters.push(explicit || embedded || 'catalog');
+    }
+    const previousContentHash = hash(language + ':' + text);
+    const contentHash = language === 'sr' ? hash(JSON.stringify([language, ...parameters])) : previousContentHash;
     return this.transaction(async client => {
     const campaign = await client.query(`INSERT INTO whatsapp_campaigns(organization_id,id,content_hash)
-      VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`, [organizationId,campaignId,hash(language + ':' + text)]);
+      VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`, [organizationId,campaignId,contentHash]);
     if (!campaign.rowCount) {
       const existing = await client.query<{ content_hash: string }>('SELECT content_hash FROM whatsapp_campaigns WHERE organization_id=$1 AND id=$2', [organizationId,campaignId]);
-      if (existing.rows[0]?.content_hash !== hash(language + ':' + text)) throw new ValidationFailedError('Za izmenjenu poruku napravite novu kampanju.');
+      if (existing.rows[0]?.content_hash !== contentHash && (link || existing.rows[0]?.content_hash !== previousContentHash)) {
+        throw new ValidationFailedError('Za izmenjenu poruku napravite novu kampanju.');
+      }
       return { queued: 0 };
     }
     const result = await client.query(`INSERT INTO whatsapp_deliveries(subscription_id,dedupe_key,template_name,parameters)
-      SELECT id,$2||':'||id::text,$3,jsonb_build_array($4::text) FROM whatsapp_subscriptions
+      SELECT id,$2||':'||id::text,$3,$4::jsonb FROM whatsapp_subscriptions
       WHERE organization_id=$1 AND purpose='newsletter' AND language=$5 AND active AND confirmed_at IS NOT NULL AND revoked_at IS NULL
       ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
-      [organizationId, 'campaign:' + campaignId, this.config.WHATSAPP_NEWSLETTER_TEMPLATE, text, language]);
+      [organizationId, 'campaign:' + campaignId, this.config.WHATSAPP_NEWSLETTER_TEMPLATE, JSON.stringify(parameters), language]);
     return { queued: result.rowCount ?? 0 };
     });
   }
@@ -497,10 +519,14 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         }
         let state = 'unknown'; let providerId: string | null = null; let errorCode: string | null = null;
         try {
-          const buttonPayloads = item.template_name === NEWSLETTER_TEMPLATE ? ['STOP NEWS','STOP ALL'] :
+          const hasNewsletterLink = item.template_name === NEWSLETTER_TEMPLATE && item.language === 'sr';
+          const buttonPayloads = item.template_name === NEWSLETTER_TEMPLATE && !hasNewsletterLink ? ['STOP NEWS','STOP ALL'] :
             item.template_name === PRICE_TEMPLATE ? [`STOP WATCH ${subscription.watch_code}`,'STOP ALL'] : [];
           const buttons = buttonPayloads.map((payload, index) => ({ type: 'button', sub_type: 'quick_reply',
             index: String(index), parameters: [{ type: 'payload', payload }] }));
+          const bodyParameters = hasNewsletterLink ? item.parameters.slice(0, 1) : item.parameters;
+          const linkButton = hasNewsletterLink ? [{ type: 'button', sub_type: 'url', index: '0',
+            parameters: [{ type: 'text', text: item.parameters[1] || 'catalog' }] }] : [];
           const response = await fetch(`https://graph.facebook.com/${this.config.WHATSAPP_GRAPH_API_VERSION}/${this.config.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
             method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
             headers: { Authorization: 'Bearer ' + this.config.WHATSAPP_ACCESS_TOKEN, 'Content-Type': 'application/json' },
@@ -508,7 +534,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
               ? { type: 'text', text: { body: item.parameters[0] } }
               : { type: 'template', template: {
               name: item.template_name, language: { code: item.language },
-              components: [{ type: 'body', parameters: item.parameters.map(text => ({ type: 'text', text })) }, ...buttons]
+              components: [{ type: 'body', parameters: bodyParameters.map(text => ({ type: 'text', text })) }, ...linkButton, ...buttons]
             } }) })
           });
           const data = await response.json() as { messages?: Array<{ id?: string }>; error?: { code?: number } };

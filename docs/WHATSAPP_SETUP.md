@@ -61,20 +61,24 @@ Detalji: WHATSAPP_OTP.md. Ne praviti ovaj predlozak kao Marketing.
 
 ### daja_newsletter_v2 — Marketing
 
-Izaberi **Serbian** (`sr`) i **English** (`en`, bez oznake US ili UK), numeričke promenljive i bez zaglavlja ili footera. Za svaku verziju dodaj dva dugmeta tipa **Quick Reply → Custom** po navedenom redosledu. Backend postavlja vrednosti dugmadi pri slanju.
+Izaberi **Serbian** (`sr`) i **English** (`en`, bez oznake US ili UK) i numeričke promenljive. Backend postavlja vrednosti dugmadi pri slanju. Srpska verzija ima jedno dugme sa dinamičkim linkom i odjavu u footeru. Ranije predati engleski šablon ima dva dugmeta za odjavu.
 
 **Serbian**
 
 ```text
-DajaShop komercijalna poruka · Novosti i ponude
+DajaShop novosti i ponude
+
+Možda je baš ovo sat koji nedostaje u tvojoj kolekciji.
 
 {{1}}
 
-Pošaljite STOP za novosti ili STOP SVE za sve WhatsApp pretplate.
+Otvori izdvojenu ponudu preko dugmeta ispod.
 ```
 
 - Primer za `{{1}}` je `Pogledajte novitete iz najnovije DajaShop kolekcije.`
-- Dugmad redom su **Odjavi novosti** i **Odjavi sve**.
+- Footer je `STOP za novosti · STOP SVE za sve WhatsApp pretplate`.
+- Jedino dugme je **Pogledaj ponudu** → **Visit website** → **Dynamic**, sa osnovom `https://dajashop.rs/`. Meta dodaje `{{1}}` desno od polja. Primer punog linka je `https://dajashop.rs/brend/orient`.
+- Admin uzima prvi link ka `https://dajashop.rs/` iz teksta kampanje ili koristi link iz polja za dugme. Kad nema linka, otvara se katalog.
 
 **English**
 
