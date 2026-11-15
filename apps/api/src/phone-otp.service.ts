@@ -8,13 +8,14 @@ import { ValidationFailedError } from '@daja/security';
 import { CONFIG, REDIS } from './tokens.js';
 import { consumeLoginAttempt } from './login-attempts.js';
 
-export type PhoneOtpPurpose = 'login' | 'link';
+export type PhoneOtpPurpose = 'login' | 'link' | 'password';
 type PhoneOtpInput = {
   organizationId: string;
   phone: string;
   purpose: PhoneOtpPurpose;
   customerId?: string;
   browserNonce?: string;
+  sessionId?: string;
 };
 
 @Injectable()
@@ -41,7 +42,8 @@ export class PhoneOtpService {
 
   private scope(input: PhoneOtpInput): string {
     return createHash('sha256').update(JSON.stringify([
-      input.organizationId, input.phone, input.purpose, input.customerId ?? '', input.browserNonce ?? ''
+      input.organizationId, input.phone, input.purpose, input.customerId ?? '', input.browserNonce ?? '',
+      ...(input.purpose === 'password' ? [input.sessionId] : [])
     ])).digest('hex');
   }
 

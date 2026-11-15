@@ -255,6 +255,40 @@ export class CustomerAuthService {
     });
   }
 
+  assertPasswordSetupAllowed(customer: CustomerPrincipal): void {
+    const age = Math.floor(Date.now() / 1000) - Number(customer.authenticatedAt ?? 0);
+    if (customer.googleLinked && (customer.authMethod !== 'google' || !customer.sessionId || age < 0 || age > 600)) {
+      throw new ValidationFailedError('Prijavite se ponovo preko Google-a i pokrenite dodavanje lozinke u roku od 10 minuta.');
+    }
+    if (!customer.sessionId || age < 0 || age > 600) {
+      throw new ValidationFailedError('Prijavite se ponovo i pokrenite dodavanje lozinke u roku od 10 minuta.');
+    }
+    if (!customer.email || !customer.emailVerified) {
+      throw new ValidationFailedError('Potvrdite email adresu pre dodavanja lozinke.');
+    }
+    if (customer.hasPassword) {
+      throw new ValidationFailedError('Lozinka već postoji. Za promenu unesite trenutnu lozinku.');
+    }
+  }
+
+  async addPasswordWithVerifiedPhone(input: { customer: CustomerPrincipal; phone: string; newPassword: string }) {
+    this.assertPasswordSetupAllowed(input.customer);
+    const passwordHash = await hash(input.newPassword, { type: argon2id });
+    return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      const repo = new StorefrontRepository(client);
+      await this.lockAuthenticatedCustomer(repo, input.customer);
+      const { organizationId, customerId, sessionFamilyId, sessionId } = input.customer;
+      const scope = { organizationId, customerId, sessionFamilyId, sessionId: sessionId! };
+      const current = await repo.buildCustomerPrincipal(scope);
+      this.assertPasswordSetupAllowed({ ...input.customer, ...current });
+      await repo.verifyCustomerPhone({ organizationId, customerId, phone: input.phone });
+      await repo.savePasswordIdentity({
+        organizationId, customerId, email: current.email, phone: input.phone, passwordHash
+      });
+      return repo.buildCustomerPrincipal(scope);
+    });
+  }
+
   async setPassword(input: {
     customer: CustomerPrincipal;
     currentPassword?: string | undefined;
@@ -268,10 +302,10 @@ export class CustomerAuthService {
         customerId: input.customer.customerId
       });
 
-      if (
-        passwordIdentity &&
-        (!input.currentPassword || !(await verify(passwordIdentity.passwordHash, input.currentPassword)))
-      ) {
+      if (!passwordIdentity) {
+        throw new ValidationFailedError('Potvrdite SMS kod pre dodavanja lozinke.');
+      }
+      if (!input.currentPassword || !(await verify(passwordIdentity.passwordHash, input.currentPassword))) {
         throw new InvalidCredentialsError();
       }
 

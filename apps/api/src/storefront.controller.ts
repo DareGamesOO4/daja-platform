@@ -56,13 +56,14 @@ const loginSchema = z.object({
 });
 const phoneOtpStartSchema = z.object({
   phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Unesite broj u međunarodnom formatu.'),
-  purpose: z.enum(['login', 'link']).optional(),
+  purpose: z.enum(['login', 'link', 'password']).optional(),
   channel: z.enum(['sms', 'whatsapp']).default('sms'),
   language: z.enum(['sr', 'en']).default('sr')
 });
 const phoneOtpVerifySchema = phoneOtpStartSchema.extend({
   firebaseIdToken: z.string().min(100).max(16384).optional(),
   code: z.string().regex(/^\d{6}$/).optional(),
+  newPassword: z.string().min(8).max(240).optional(),
   challengeToken: z.string().regex(/^[a-f0-9]{64}$/)
 }).refine(value => value.channel === 'whatsapp' ? Boolean(value.code) : Boolean(value.firebaseIdToken), {
   message: 'Kod je istekao ili nije ispravan. Zatražite novi kod.'
@@ -310,7 +311,11 @@ export class CustomerAuthController {
     const input = parseWithSchema(phoneOtpStartSchema, body);
     const purpose = input.purpose ?? 'login';
     const customer =
-      purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+      purpose !== 'login' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+    if (purpose === 'password' && customer) {
+      this.auth.assertPasswordSetupAllowed(customer);
+      if (input.channel !== 'sms') throw new ValidationFailedError('Za dodavanje lozinke koristite SMS.');
+    }
     const browserNonce = beginBrowserPhone(request, response);
     const otpInput = {
       ...(browserNonce ? { browserNonce } : {}),
@@ -319,8 +324,9 @@ export class CustomerAuthController {
       purpose,
       ...(customer ? { customerId: customer.customerId } : {})
     };
+    if (purpose === 'password') return this.phoneOtp.start({ ...otpInput, sessionId: customer!.sessionId! });
     return input.channel === 'whatsapp'
-      ? this.whatsappOtp.start({ ...otpInput, language: input.language })
+      ? this.whatsappOtp.start({ ...otpInput, purpose, language: input.language })
       : this.phoneOtp.start(otpInput);
   }
 
@@ -330,7 +336,7 @@ export class CustomerAuthController {
     const input = parseWithSchema(phoneOtpVerifySchema, body);
     const purpose = input.purpose ?? 'login';
     const customer =
-      purpose === 'link' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
+      purpose !== 'login' ? await this.auth.requireCustomer(bearerToken(request)) : undefined;
     const organizationId = customer?.organizationId ?? publicOrganizationId(this.config);
     const browserNonce = readBrowserPhone(request);
     const otpInput = {
@@ -341,7 +347,21 @@ export class CustomerAuthController {
       challengeToken: input.challengeToken,
       ...(customer ? { customerId: customer.customerId } : {})
     };
-    if (input.channel === 'whatsapp') await this.whatsappOtp.verify({ ...otpInput, code: input.code! });
+    if (purpose === 'password') {
+      this.auth.assertPasswordSetupAllowed(customer!);
+      if (input.channel !== 'sms' || !input.newPassword) {
+        throw new ValidationFailedError('Za dodavanje lozinke unesite novu lozinku i potvrdite SMS kod.');
+      }
+      await this.phoneOtp.verify({ ...otpInput, sessionId: customer!.sessionId!, firebaseIdToken: input.firebaseIdToken! });
+      if (browserNonce) clearBrowserPhone(response);
+      return {
+        status: 'verified' as const,
+        user: serializeCustomerPrincipal(await this.auth.addPasswordWithVerifiedPhone({
+          customer: customer!, phone: input.phone, newPassword: input.newPassword
+        }))
+      };
+    }
+    if (input.channel === 'whatsapp') await this.whatsappOtp.verify({ ...otpInput, purpose, code: input.code! });
     else await this.phoneOtp.verify({ ...otpInput, firebaseIdToken: input.firebaseIdToken! });
     if (browserNonce) clearBrowserPhone(response);
 
