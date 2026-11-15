@@ -1,5 +1,38 @@
 # WhatsApp notifications — 05.11.2026
 
+## Priprema prelaska na v2
+
+- `STOP` i `STOP NOVOSTI` gase novosti. `STOP CENE` gasi sva praćenja cena i
+  automatsko uključivanje budućih favorita. `STOP SVE` gasi sve WhatsApp pretplate.
+  Dosadašnji `STOP SATOVI` ostaje prečica za `STOP CENE`.
+- `STOP SAT <šifra>` radi i pre prve poruke o ceni. `MOJI SATOVI` prikazuje
+  aktivne šifre, po deset po strani. `STOP SAT` poslat kao odgovor radi za
+  konkretnu prijavu iz poruke. Nova prijava ima novu šifru. Šifre se prikazuju
+  i na nalogu sa potvrđenim brojem. Engleske komande su `STOP NEWS`,
+  `STOP PRICES`, `STOP ALL`, `STOP WATCH`, `MY WATCHES` i `HELP`.
+- Kupac može da zatraži odjavu i preko podrške. Osoblje sa pravom
+  `promotions.write` evidentira zahtev u WhatsApp admin panelu nakon
+  provere broja i obima zahteva. Ova radnja ne šalje reklamne poruke.
+- [Uputstvo za unos šablona v2 i redosled dugmadi](WHATSAPP_SETUP.md).
+  API dozvoljava nove prijave i slanje tek kada su postavljena oba v2 imena
+  i odobrenje šablona. Odjava iz dolaznog webhooka radi i dok slanje čeka.
+  Za primaoce starih poruka čuva se značenje odjave iz tih poruka.
+- Migracija 126 dodaje šifre, red odgovora i minimalnu evidenciju za
+  buduće ograničeno čuvanje. `WHATSAPP_RETENTION_APPROVED` ostaje false dok
+  rukovalac ne potvrdi svrhu, pravni osnov, rokove i pravila za konkretne
+  otvorene zahteve. Pre uključivanja postaviti zaseban
+  `WHATSAPP_RETENTION_HMAC_KEY` u secret store i uskladiti javno obaveštenje.
+  Mehanizam čuva tehničke zapise do 90 dana, a minimalni dokaz odjavljene
+  potvrđene saglasnosti do 12 meseci od odjave.
+- Na odobrenom test broju potvrdi newsletter, jedan ručno izabran sat
+  i praćenje Liste želja. Sa `MOJI SATOVI` uzmi šifru i odjavi jedan sat
+  pre prve promene cene. Proveri da pogrešna ili stara šifra ne dira drugu
+  prijavu. Proveri odvojeno obe akcije dugmadi, `STOP CENE` uz newsletter
+  koji ostaje aktivan i `STOP SVE`. Osveži nalog nakon odjave i proveri
+  pretplate i red. Test šablona se šalje samo na test broj.
+
+## Istorija v1
+
 13.11.2026: WhatsApp Manager lists both language versions of the newsletter and
 price-change templates as Active (Quality pending). The two notification flags
 were enabled on the Render API. Meta still refuses creation of the Authentication
@@ -73,7 +106,7 @@ unconfirmed expired subscription intents are removed after one day.
 Admin WhatsApp tab requires `promotions.write`. It shows subscriber counts and the
 last 30 outcomes, supports language-specific newsletter text, preview and explicit
 send to confirmed recipients of that language. `POST /admin/whatsapp/campaigns`
-accepts a UUID campaignId, language and text up to 900 characters. Repeating the
+accepts a UUID campaignId, language and campaign text. Repeating the
 same campaign ID cannot enqueue a second copy. No campaign was actually sent.
 
 ## Webhook

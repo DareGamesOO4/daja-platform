@@ -77,11 +77,20 @@ export class WhatsAppController {
     return this.notifications.summary(ctx.organizationId);
   }
 
+  @Post('admin/whatsapp/unsubscribe')
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  unsubscribe(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request); requirePermission(ctx, 'promotions.write');
+    const input = parseWithSchema(z.object({ phone: z.string().regex(/^\+381[1-9]\d{6,11}$/),
+      scope: z.enum(['all','prices','newsletter']) }), body);
+    return this.notifications.unsubscribeFromSupport(ctx.organizationId,input.phone,input.scope,ctx.userId);
+  }
+
   @Post('admin/whatsapp/campaigns')
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   campaign(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request); requirePermission(ctx, 'promotions.write');
-    const input = parseWithSchema(z.object({ campaignId: uuidSchema, text: z.string().trim().min(1).max(900), language: z.enum(['sr','en']).default('sr') }), body);
+    const input = parseWithSchema(z.object({ campaignId: uuidSchema, text: z.string().trim().min(1).max(800), language: z.enum(['sr','en']).default('sr') }), body);
     return this.notifications.campaign(ctx.organizationId, input.campaignId, input.text, input.language);
   }
 }

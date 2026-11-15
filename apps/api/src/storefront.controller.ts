@@ -980,7 +980,8 @@ export class StorefrontContentController {
       }),
       customer ? this.whatsappAlerts.accountAlerts(customer, watch) : []
     ]);
-    return { ...status, whatsappTypes: [...new Set(whatsapp.map(alert => alert.type))] };
+    return { ...status, whatsappTypes: [...new Set(whatsapp.map(alert => alert.type))],
+      whatsappWatchCode: whatsapp.find(alert => alert.type === 'price_change')?.watchCode ?? null };
   }
 
   @Post('newsletter/subscribe')

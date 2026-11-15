@@ -59,24 +59,60 @@ Oba jezika, Meta-generisan OTP tekst, Copy code dugme, sigurnosna preporuka,
 istek i validity 5 minuta. Jedan kod je body parametar {{1}} i OTP URL dugme 0.
 Detalji: WHATSAPP_OTP.md. Ne praviti ovaj predlozak kao Marketing.
 
-### daja_newsletter_v1 — Marketing
+### daja_newsletter_v2 — Marketing
 
-sr: DajaShop novosti: {{1}}. Za odjavu odgovorite STOP.
-en: DajaShop news: {{1}}. Reply STOP to unsubscribe.
+Izaberi **Serbian** (`sr`) i **English** (`en`, bez oznake US ili UK), numeričke promenljive i bez zaglavlja ili footera. Za svaku verziju dodaj dva dugmeta tipa **Quick Reply → Custom** po navedenom redosledu. Backend postavlja vrednosti dugmadi pri slanju.
 
-Primer {{1}}: Pogledajte novitete u nasoj ponudi na https://dajashop.rs/catalog
-(Engleski primer: See what is new at https://dajashop.rs/en/catalog.)
+**Serbian**
 
-### daja_price_change_v1 — prijavljena promena cene
+```text
+DajaShop komercijalna poruka · Novosti i ponude
 
-sr: DajaShop: cena artikla {{1}} promenjena je sa {{2}} na {{3}}. Detalji: {{4}}. Za odjavu odgovorite STOP.
-en: DajaShop: the price of {{1}} changed from {{2}} to {{3}}. Details: {{4}}. Reply STOP to unsubscribe.
+{{1}}
 
-Primeri parametara redom: Casio MTP; 5.000,00 RSD; 4.500,00 RSD;
-https://dajashop.rs/product/primer
-Ovaj predlozak pokriva i snizenje i povecanje cene. Stari daja_price_drop_v1
-nije zamena za ovaj tekst. Za kategoriju prihvati Metinu odluku; ne ukljucuj
-slanje pre odobrenja. Ne dodavati promocije u transakcioni predlozak.
+Pošaljite STOP za novosti ili STOP SVE za sve WhatsApp pretplate.
+```
+
+- Primer za `{{1}}` je `Pogledajte novitete iz najnovije DajaShop kolekcije.`
+- Dugmad redom su **Odjavi novosti** i **Odjavi sve**.
+
+**English**
+
+```text
+DajaShop commercial message · News and offers
+
+{{1}}
+
+Send STOP for the newsletter or STOP ALL for all WhatsApp subscriptions.
+```
+
+- Primer za `{{1}}` je `Explore highlights from the latest DajaShop collection.`
+- Dugmad redom su **Unsubscribe from news** i **Unsubscribe from all**.
+
+### daja_price_change_v2 — Marketing
+
+Izaberi iste jezike i vrstu dugmadi. Poruka pokriva i rast i pad cene.
+
+**Serbian**
+
+```text
+DajaShop · Traženo obaveštenje o ceni
+Cena artikla {{1}} promenjena je sa {{2}} na {{3}}. Detalji: {{4}}.
+Pošaljite STOP SAT {{5}} za ovaj sat, STOP CENE za sva praćenja cena ili STOP SVE za sve WhatsApp pretplate.
+```
+
+- Dugmad redom su **Odjavi ovaj sat** i **Odjavi sve**.
+
+**English**
+
+```text
+DajaShop · Requested price alert
+The price of {{1}} changed from {{2}} to {{3}}. Details: {{4}}.
+Send STOP WATCH {{5}} for this watch, STOP PRICES for all price alerts or STOP ALL for all WhatsApp subscriptions.
+```
+
+- Dugmad redom su **Unsubscribe this watch** i **Unsubscribe from all**.
+- Za oba jezika, primeri za `{{1}}`–`{{5}}` redom su `Casio MTP`, `5.000,00 RSD`, `4.500,00 RSD`, `https://dajashop.rs/catalog` i `1042`.
 
 ### daja_back_in_stock_v1 — iskljuceno, ne kreirati sada
 
@@ -98,8 +134,8 @@ WHATSAPP_APP_SECRET=<App Secret iste Meta aplikacije>
 WHATSAPP_WEBHOOK_VERIFY_TOKEN=<nasumicna tajna najmanje 32 znaka>
 WHATSAPP_OTP_SECRET=<zasebna nasumicna tajna najmanje 32 znaka>
 WHATSAPP_OTP_TEMPLATE_NAME=daja_verification_v1
-WHATSAPP_NEWSLETTER_TEMPLATE=daja_newsletter_v1
-WHATSAPP_PRICE_TEMPLATE=daja_price_change_v1
+WHATSAPP_NEWSLETTER_TEMPLATE=daja_newsletter_v2
+WHATSAPP_PRICE_TEMPLATE=daja_price_change_v2
 WHATSAPP_STOCK_TEMPLATE=daja_back_in_stock_v1
 WHATSAPP_OTP_DAILY_LIMIT=100
 WHATSAPP_NOTIFICATION_DAILY_LIMIT=100
@@ -113,6 +149,9 @@ WHATSAPP_STOCK_ALERTS_ENABLED=false
 
 OTP zastavice ukljuciti nakon odobrenja oba OTP jezika. Notification zastavice
 ukljuciti nakon odobrenja newsletter i price-change predlozaka u oba jezika i webhooka.
+Verzije v1 se više ne koriste za nove prijave i slanje. Pre uključivanja
+pregledaj aktivne pretplate, red slanja i istoriju isporuke. Odjavu proveri samo
+sa odobrenog test broja. Ne pokreći kampanju radi provere.
 Stock predlozak nije potreban dok je WHATSAPP_STOCK_ALERTS_ENABLED=false.
 Nijedna tajna nije potrebna u web projektu. Postojeci PUBLIC_ORGANIZATION_ID,
 PostgreSQL i Redis koriste se i za ovaj tok. Migracija 103 ide uz standardni API
