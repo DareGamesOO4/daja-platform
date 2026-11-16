@@ -39,7 +39,7 @@ SES event publishing is connected to SNS `dajashop-email-feedback` and the same-
 ### Firebase and iCloud fallback
 
 - In the Firebase project `dajashop-sms`, configure the default Firestore database. Deny client access to `dajaEmailReceipts` and configure Firestore TTL on its `expiresAt` field. Receipts contain a delivery ID, status and expiry.
-- Set `DAJA_SMTP_USER` to the primary iCloud Mail address and `DAJA_SMTP_PASSWORD` to its app-specific password in Google Cloud Secret Manager. That account must be authorized to send as both configured DAJA sender addresses. Set `FIREBASE_EMAIL_SECRET` to a shared random secret.
+- Set `DAJA_SMTP_USER` to the primary iCloud Mail address and `DAJA_SMTP_PASSWORD` to its app-specific password in Google Cloud Secret Manager. That account must be authorized to send as both configured DAJA sender addresses. Set `DAJA_EMAIL_REQUEST_SECRET` to a shared random secret in Google Cloud Secret Manager.
 - From the repository root deploy with `firebase deploy --project dajashop-sms --only functions:email`. Set `FIREBASE_EMAIL_URL` to the deployed HTTPS URL and `FIREBASE_EMAIL_SECRET` to the same secret on the service running the email consumer.
 - Eligible order and account messages can use Firebase when SES mode prevents a send or SES definitively rejects the first attempt. The queue records the transport before calling it. SMTP acceptance marks the email sent. An ambiguous SMTP outcome holds the Firestore receipt in `sending` and requires reconciliation before an operator reopens delivery. SES feedback applies to SES messages.
 

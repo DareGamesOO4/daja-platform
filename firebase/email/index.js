@@ -9,7 +9,7 @@ initializeApp();
 
 const smtpUser = defineSecret('DAJA_SMTP_USER');
 const smtpPassword = defineSecret('DAJA_SMTP_PASSWORD');
-const requestSecret = defineSecret('FIREBASE_EMAIL_SECRET');
+const requestSecret = defineSecret('DAJA_EMAIL_REQUEST_SECRET');
 const sender = /^(?:(?:nalog|porudzbine)@dajashop\.rs|DajaShop <(?:nalog|porudzbine)@dajashop\.rs>)$/i;
 const address = /^[^\s<>,@;:"()\\]+@[^\s<>,@;:"()\\]+\.[^\s<>,@;:"()\\]+$/;
 
