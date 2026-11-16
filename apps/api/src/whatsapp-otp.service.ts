@@ -43,7 +43,7 @@ export class WhatsAppOtpService {
       .update(JSON.stringify([token, scope, code])).digest('hex');
   }
 
-  async start(input: Input & { language: 'sr' | 'en' }) {
+  async start(input: Input) {
     if (!this.available()) throw new ValidationFailedError(unavailable);
     if (!/^\+381[1-9]\d{6,11}$/.test(input.phone)) {
       throw new ValidationFailedError('WhatsApp potvrda je trenutno dostupna samo za brojeve iz Srbije.');
@@ -81,7 +81,7 @@ export class WhatsAppOtpService {
           messaging_product: 'whatsapp', to: input.phone.slice(1), type: 'template',
           template: {
             name: this.config.WHATSAPP_OTP_TEMPLATE_NAME,
-            language: { code: input.language },
+            language: { code: 'sr' },
             components: [
               { type: 'body', parameters: [{ type: 'text', text: code }] },
               { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: code }] }

@@ -191,7 +191,7 @@ WHATSAPP_NOTIFICATIONS_ENABLED=false
 WHATSAPP_NOTIFICATION_TEMPLATES_APPROVED=false
 WHATSAPP_STOCK_ALERTS_ENABLED=false
 
-OTP zastavice ukljuciti nakon odobrenja oba OTP jezika. Notification zastavice
+OTP zastavice ukljuciti nakon odobrenja srpskog OTP šablona. Notification zastavice
 ukljuciti nakon odobrenja newsletter predlozaka u oba jezika i webhooka.
 Za akcijske i opšte cenovne poruke uključiti odgovarajuću zastavicu odobrenja.
 Verzije v1 se više ne koriste za nove prijave i slanje. Pre uključivanja

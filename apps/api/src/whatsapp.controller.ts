@@ -31,7 +31,7 @@ export class WhatsAppController {
   capabilities() {
     const available = this.notifications.available();
     return { available, backInStockAvailable: available && this.config.WHATSAPP_STOCK_ALERTS_ENABLED,
-      priceAlertLanguages: (['sr','en'] as const).filter(language => this.notifications.priceAlertAvailable(language)) };
+      priceAlertLanguages: available ? ['sr'] : [] };
   }
 
   @Post('whatsapp/subscriptions/request')

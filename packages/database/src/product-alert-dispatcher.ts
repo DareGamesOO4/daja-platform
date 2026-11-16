@@ -132,10 +132,10 @@ export class ProductAlertDispatcher {
       JOIN customers c ON c.id = w.customer_id AND c.organization_id = e.organization_id
         AND c.active AND c.deleted_at IS NULL AND c.phone_verified
       JOIN wishlist_alert_preferences pref ON pref.organization_id = e.organization_id AND pref.customer_id = c.id
-        AND pref.channel = 'whatsapp' AND pref.contact = c.phone AND pref.language = 'sr'
+        AND pref.channel = 'whatsapp' AND pref.contact = c.phone
         AND pref.price_coupon_consent_at <= e.created_at AND pref.price_coupon_consent_version = $3
       JOIN whatsapp_subscriptions s ON s.organization_id = e.organization_id AND s.wishlist_customer_id = c.id
-        AND s.phone = c.phone AND s.variant_id = e.variant_id AND s.purpose = 'price_change' AND s.language = 'sr'
+        AND s.phone = c.phone AND s.variant_id = e.variant_id AND s.purpose = 'price_change'
         AND s.active AND s.revoked_at IS NULL AND s.confirmed_at IS NOT NULL AND s.watch_code IS NOT NULL
       WHERE NOT EXISTS (SELECT 1 FROM wishlist_price_coupons x WHERE x.price_event_id = e.id AND x.customer_id = c.id)
       ORDER BY c.id, s.id

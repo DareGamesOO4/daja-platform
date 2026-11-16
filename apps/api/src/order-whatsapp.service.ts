@@ -319,11 +319,16 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
             AND EXISTS (SELECT 1 FROM orders WHERE id = a.order_id AND deleted_at IS NULL)`, [order.order_id, order.attempts]);
         if (!claim.rowCount) return;
         stage = 'sending';
-        ({ state, code, providerId } = await this.sendTemplate(
-          this.config.WHATSAPP_ORDER_ALERT_PHONE, this.config.WHATSAPP_ORDER_ALERT_TEMPLATE, this.config.WHATSAPP_ORDER_ALERT_LANGUAGE, [
-            { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
-            { type: 'body', parameters: values.map(text => ({ type: 'text', text })) }
-          ]));
+        const components = [
+          { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
+          { type: 'body', parameters: values.map(text => ({ type: 'text', text })) }
+        ];
+        const { WHATSAPP_ORDER_ALERT_PHONE: phone, WHATSAPP_ORDER_ALERT_TEMPLATE: template,
+          WHATSAPP_ORDER_ALERT_LANGUAGE: fallbackLanguage } = this.config;
+        ({ state, code, providerId } = await this.sendTemplate(phone, template, 'sr', components));
+        if (code === '132001' && state === 'failed' && fallbackLanguage !== 'sr') {
+          ({ state, code, providerId } = await this.sendTemplate(phone, template, fallbackLanguage, components));
+        }
       }
     } catch {
       // A lost send response can follow acceptance; only preparation may be retried after an ambiguous request.

@@ -141,6 +141,8 @@ Provider references:
 
 - Serbian regular-price decreases use `daja_price_regular_decrease_v1` after the price event's debounce window.
 - Set `WHATSAPP_SALE_START_TEMPLATE_APPROVED=true` after Meta approves the Serbian `daja_price_sale_start_v1` template for this WhatsApp account.
-- Set `WHATSAPP_PRICE_CHANGE_V2_APPROVED=true` after Meta approves `daja_price_change_v2` in Serbian and English. Until then, English WhatsApp price tracking is unavailable for new subscriptions.
+- Set `WHATSAPP_PRICE_CHANGE_V2_APPROVED=true` after Meta approves the Serbian `daja_price_change_v2` template. Price alerts, sign-up confirmations and WhatsApp verification codes use Serbian on both storefront locales.
+- Newsletter campaigns target confirmed subscribers once per phone number. Serbian is the admin default. English remains a manual choice and uses the approved English newsletter template.
+- Templates with a product photo upload a JPEG to Meta and use the returned media ID. The API tries the primary product WebP derivative first, then the source image and the next product photo if needed.
 - After Meta approves `daja_price_regular_increase_coupon_v1`, set `WHATSAPP_WISHLIST_PRICE_COUPON_TEMPLATE_APPROVED=true` together with `WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED=true`. Coupon enrollment also requires separate customer consent.
 - Each recipient has a rolling 24-hour cap of five marketing attempts, one newsletter and one standard price alert per variant. Replies to inbound commands use their own limits. Obsolete prices and messages over the recipient limit are cancelled. Reaching the store-wide quota delays an otherwise eligible message until the quota resets or the message expires.

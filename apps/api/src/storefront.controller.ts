@@ -327,7 +327,7 @@ export class CustomerAuthController {
     };
     if (purpose === 'password') return this.phoneOtp.start({ ...otpInput, sessionId: customer!.sessionId! });
     return input.channel === 'whatsapp'
-      ? this.whatsappOtp.start({ ...otpInput, purpose, language: input.language })
+      ? this.whatsappOtp.start({ ...otpInput, purpose })
       : this.phoneOtp.start(otpInput);
   }
 
