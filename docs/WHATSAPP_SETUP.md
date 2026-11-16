@@ -130,6 +130,32 @@ To unsubscribe from this watch, send STOP WATCH {{5}}.
 - Footer je `STOP PRICES for price alerts · STOP ALL to unsubscribe`.
 - Za oba jezika, primeri za `{{1}}`–`{{5}}` redom su `Casio MTP`, `5.000,00 RSD`, `4.500,00 RSD`, `https://dajashop.rs/catalog` i `1042`.
 
+### daja_price_regular_increase_coupon_v1 — Marketing
+
+Serbian, numeričke promenljive, Header Image. Dugme **Pogledaj sat** je dinamički URL sa osnovom `https://dajashop.rs/`.
+
+```text
+DajaShop — lični kupon za sat sa liste želja
+
+Model: {{1}}
+Redovna cena pre promene: {{2}}
+Redovna cena na dan izdavanja: {{3}}
+Iznos popusta na dan izdavanja: {{4}}
+Lični promo kod: {{5}}
+Važi od {{6}} do {{7}}, po vremenu u Srbiji.
+
+Sa kodom plaćaš najviše cenu pre promene za jedan komad ovog modela. Ako je cena već niža, važi niža cena. Kod važi jednom, na tvom DajaShop nalogu, bez kombinovanja sa drugim promo kodom. Trošak dostave se obračunava u korpi.
+
+Za više detalja klikni na dugme „Pogledaj sat“ ispod.
+Za odjavu samo ovog sata pošalji STOP SAT {{8}}.
+```
+
+Footer: `STOP CENE za sve cene · STOP SVE za sve pretplate`.
+Primeri: `Orient RA-AC0M09E`, `34.990,00 RSD`, `39.990,00 RSD`, `5.000,00 RSD`, `DAJA-PRIMER72`, `16.11.2026. u 14:00:00`, `19.11.2026. u 14:00:00`, `1042`.
+Primer URL-a: `https://dajashop.rs/product/ra-ac0m09e`.
+
+Uključi `WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED` tek nakon odobrenja Meta šablona i pravne provere uslova ponude. Odvojena saglasnost je u podešavanjima WhatsApp praćenja liste želja. Samo događaj rasta redovne cene kreira ponudu, a potvrda dostave ili čitanja aktivira kupon uz rok od 72 sata od slanja.
+
 ### daja_back_in_stock_v1 — iskljuceno, ne kreirati sada
 
 sr: DajaShop: artikal {{1}} je ponovo na stanju. Cena: {{2}}. Detalji: {{3}}. Za odjavu odgovorite STOP.

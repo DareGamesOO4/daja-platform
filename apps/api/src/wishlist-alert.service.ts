@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { StorefrontRepository, TransactionManager, type CustomerPrincipal, type Database, type DbClient, type StorefrontItemSnapshot } from '@daja/database';
+import { StorefrontRepository, TransactionManager, WISHLIST_PRICE_COUPON_CONSENT, type CustomerPrincipal, type Database, type DbClient, type StorefrontItemSnapshot } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { ValidationFailedError } from '@daja/security';
 import { ProductAlertService } from './product-alert.service.js';
@@ -41,14 +41,36 @@ export class WishlistAlertService {
   }
 
   async status(customer: CustomerPrincipal) {
-    const result = await this.database.pool.query<{ channel: Channel }>(
-      `SELECT channel FROM wishlist_alert_preferences p JOIN customers c
+    const result = await this.database.pool.query<{ channel: Channel; coupon_consent: boolean }>(
+      `SELECT channel, (p.price_coupon_consent_at IS NOT NULL AND p.price_coupon_consent_version=$3)
+        AS coupon_consent FROM wishlist_alert_preferences p JOIN customers c
        ON c.organization_id=p.organization_id AND c.id=p.customer_id
        WHERE p.organization_id=$1 AND p.customer_id=$2 AND c.active AND c.deleted_at IS NULL
          AND ((channel='email' AND c.email_verified AND lower(c.email)=p.contact)
            OR (channel='whatsapp' AND c.phone_verified AND c.phone=p.contact))`,
-      [customer.organizationId, customer.customerId]);
-    return { channels: result.rows.map(row => row.channel) };
+      [customer.organizationId, customer.customerId, WISHLIST_PRICE_COUPON_CONSENT]);
+    return { channels: result.rows.map(row => row.channel),
+      couponAvailable: this.whatsapp.wishlistCouponsAvailable(),
+      couponConsent: result.rows.some(row => row.channel === 'whatsapp' && row.coupon_consent) };
+  }
+
+  async setCouponConsent(customer: CustomerPrincipal, accepted: boolean) {
+    if (accepted && !this.whatsapp.wishlistCouponsAvailable()) {
+      throw new ValidationFailedError('Lični WhatsApp kuponi trenutno nisu dostupni.');
+    }
+    return this.transaction(customer, async client => {
+      if (customer.phone) await this.whatsapp.lockWishlistPhone(client, customer.phone);
+      const result = await client.query(`UPDATE wishlist_alert_preferences p SET
+        price_coupon_consent_at=CASE WHEN $3 THEN CASE WHEN p.price_coupon_consent_version=$4
+          THEN coalesce(p.price_coupon_consent_at,now()) ELSE now() END END,
+        price_coupon_consent_version=CASE WHEN $3 THEN $4 END
+        FROM customers c WHERE p.organization_id=$1 AND p.customer_id=$2 AND p.channel='whatsapp'
+          AND c.id=p.customer_id AND c.organization_id=p.organization_id AND c.active AND c.deleted_at IS NULL
+          AND (NOT $3 OR (c.phone_verified AND c.phone=p.contact AND p.language='sr'))`,
+        [customer.organizationId, customer.customerId, accepted, WISHLIST_PRICE_COUPON_CONSENT]);
+      if (accepted && !result.rowCount) throw new ValidationFailedError('Uključite praćenje liste preko WhatsApp-a na srpskom i potvrdite broj.');
+      return { couponConsent: accepted };
+    });
   }
 
   async enable(customer: CustomerPrincipal, input: { channel: Channel; language: 'sr' | 'en'; policyVersion?: string | undefined; phone?: string | undefined }) {
@@ -75,7 +97,8 @@ export class WishlistAlertService {
       const result = await this.enroll(client, customer, preference, targets);
       await client.query(`INSERT INTO wishlist_alert_preferences(organization_id,customer_id,channel,contact,language,policy_version)
         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(organization_id,customer_id,channel) DO UPDATE
-        SET contact=EXCLUDED.contact,language=EXCLUDED.language,policy_version=EXCLUDED.policy_version,created_at=now()`,
+        SET contact=EXCLUDED.contact,language=EXCLUDED.language,policy_version=EXCLUDED.policy_version,created_at=now(),
+          price_coupon_consent_at=NULL,price_coupon_consent_version=NULL`,
         [customer.organizationId,customer.customerId,input.channel,contact,input.language,input.policyVersion ?? null]);
       return { ...result, alreadyEnabled: false };
     });

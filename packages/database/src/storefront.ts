@@ -131,6 +131,7 @@ export interface DueSalePriceAlert {
 }
 
 export interface DueRegularPriceAlert {
+  eventId: string;
   organizationId: string;
   variantId: string;
   previousPriceAmount: number;
@@ -1676,7 +1677,8 @@ export class StorefrontRepository {
        SET sent_at = now()
        FROM due_events
        WHERE event.id = due_events.id
-       RETURNING event.organization_id,
+       RETURNING event.id,
+                 event.organization_id,
                  event.variant_id,
                  event.previous_price_amount,
                  event.current_price_amount`,
@@ -1929,6 +1931,7 @@ interface DueSalePriceAlertRow {
 }
 
 interface DueRegularPriceAlertRow {
+  id: string;
   organization_id: string;
   variant_id: string;
   previous_price_amount: number;
@@ -2072,6 +2075,7 @@ function mapDueSalePriceAlert(row: DueSalePriceAlertRow): DueSalePriceAlert {
 
 function mapDueRegularPriceAlert(row: DueRegularPriceAlertRow): DueRegularPriceAlert {
   return {
+    eventId: row.id,
     organizationId: row.organization_id,
     variantId: row.variant_id,
     previousPriceAmount: row.previous_price_amount,

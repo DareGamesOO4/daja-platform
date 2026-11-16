@@ -916,6 +916,14 @@ export class StorefrontContentController {
     return this.wishlistAlerts.enable(customer, input);
   }
 
+  @Patch('product-alerts/wishlist/coupons')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async wishlistCouponConsent(@Req() request: Request, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const { accepted } = parseWithSchema(z.object({ accepted: z.boolean() }), body);
+    return this.wishlistAlerts.setCouponConsent(customer, accepted);
+  }
+
   @Post('products/:productId/alerts')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async subscribeProductAlert(

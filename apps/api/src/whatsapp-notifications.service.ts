@@ -1,13 +1,14 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Inject, Injectable, type OnModuleInit, type OnModuleDestroy } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
-import { TransactionManager, type Database, type DbClient } from '@daja/database';
+import { TransactionManager, WISHLIST_PRICE_COUPON_CONSENT, WISHLIST_PRICE_COUPON_TEMPLATE, type Database, type DbClient } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { ValidationFailedError } from '@daja/security';
 import { z } from 'zod';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import type { RedisConnection } from '@daja/database';
 import { whatsappPreferenceCommand } from './whatsapp-preference-command.js';
+import { fetchWhatsAppJpeg } from './order-whatsapp.service.js';
 
 const NEWSLETTER_TEMPLATE = 'daja_newsletter_v2';
 const PRICE_TEMPLATE = 'daja_price_change_v2';
@@ -66,6 +67,8 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         c.WHATSAPP_GRAPH_API_VERSION && c.WHATSAPP_BUSINESS_PHONE && c.WHATSAPP_APP_SECRET.length >= 32 &&
         c.WHATSAPP_WEBHOOK_VERIFY_TOKEN.length >= 32);
   }
+
+  wishlistCouponsAvailable() { return this.available() && this.config.WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED; }
 
   async request(input: { phone: string; purpose: Purpose; productId?: string | undefined;
     variantId?: string | undefined; policyVersion?: string | undefined; source?: string | undefined; language: 'sr' | 'en' }, customer?: VerifiedAccount) {
@@ -330,6 +333,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
         await this.db.pool.query(`UPDATE whatsapp_deliveries d SET state=s.state,error_code=s.error_code,updated_at=now()
           FROM whatsapp_delivery_statuses s WHERE d.provider_id=s.provider_id AND s.provider_id=$1 AND
           (d.state IN ('accepted','unknown') OR (d.state='sent' AND s.state IN ('delivered','read','failed')) OR (d.state='delivered' AND s.state='read'))`, [status.id]);
+        if (status.status === 'delivered' || status.status === 'read') await this.activateDeliveredCoupon(this.db.pool, status.id);
       }
       for (const message of value.messages ?? []) await this.transaction(async client => {
         const phone = '+' + message.from;
@@ -452,6 +456,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
       await this.expireHistory().catch(() => this.logger.warn('WhatsApp history cleanup failed'));
     }
     if (!this.available()) return;
+    if (this.config.WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED) await this.activateDeliveredCoupon(this.db.pool);
     await this.db.pool.query(`UPDATE whatsapp_deliveries d SET state=s.state,error_code=s.error_code,updated_at=now()
       FROM whatsapp_delivery_statuses s WHERE d.provider_id=s.provider_id AND
       (d.state IN ('accepted','unknown') OR (d.state='sent' AND s.state IN ('delivered','read','failed')) OR (d.state='delivered' AND s.state='read'))`);
@@ -494,7 +499,8 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
          AND s.active AND s.revoked_at IS NULL AND s.confirmed_at IS NOT NULL
          AND (d.kind='text' OR d.template_name=ANY($2::text[]))
          ORDER BY d.created_at LIMIT 1 FOR UPDATE OF d SKIP LOCKED`,
-        [this.org(),[NEWSLETTER_TEMPLATE,PRICE_TEMPLATE,this.config.WHATSAPP_STOCK_TEMPLATE]]);
+        [this.org(),[NEWSLETTER_TEMPLATE,PRICE_TEMPLATE,this.config.WHATSAPP_STOCK_TEMPLATE,
+          ...(this.config.WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED ? [WISHLIST_PRICE_COUPON_TEMPLATE] : [])]]);
       const item = picked.rows[0];
       if (!item) return;
       const redis = this.redis.client;
@@ -526,6 +532,12 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
           const bodyParameters = hasNewsletterLink ? item.parameters.slice(0, 1) : item.parameters;
           const linkButton = hasNewsletterLink ? [{ type: 'button', sub_type: 'url', index: '0',
             parameters: [{ type: 'text', text: item.parameters[1] || 'catalog' }] }] : [];
+          const coupon = item.template_name === WISHLIST_PRICE_COUPON_TEMPLATE
+            ? await this.prepareWishlistCoupon(client, item.id, item.parameters) : null;
+          if (item.template_name === WISHLIST_PRICE_COUPON_TEMPLATE && !coupon) {
+            await client.query(`UPDATE whatsapp_deliveries SET state='cancelled',error_code='coupon_no_longer_eligible',updated_at=now() WHERE id=$1`, [item.id]);
+            return;
+          }
           const response = await fetch(`https://graph.facebook.com/${this.config.WHATSAPP_GRAPH_API_VERSION}/${this.config.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
             method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
             headers: { Authorization: 'Bearer ' + this.config.WHATSAPP_ACCESS_TOKEN, 'Content-Type': 'application/json' },
@@ -533,7 +545,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
               ? { type: 'text', text: { body: item.parameters[0] } }
               : { type: 'template', template: {
               name: item.template_name, language: { code: item.language },
-              components: [{ type: 'body', parameters: bodyParameters.map(text => ({ type: 'text', text })) }, ...linkButton, ...buttons]
+              components: coupon ?? [{ type: 'body', parameters: bodyParameters.map(text => ({ type: 'text', text })) }, ...linkButton, ...buttons]
             } }) })
           });
           const data = await response.json() as { messages?: Array<{ id?: string }>; error?: { code?: number } };
@@ -542,12 +554,86 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
           errorCode = data.error?.code?.toString() ?? null;
         } catch { errorCode = 'ambiguous_provider_response'; }
         await client.query(`UPDATE whatsapp_deliveries SET state=$2,provider_id=$3,error_code=$4,updated_at=now() WHERE id=$1`, [item.id,state,providerId,errorCode]);
+        if (state === 'accepted' && providerId && item.template_name === WISHLIST_PRICE_COUPON_TEMPLATE) {
+          await this.activateDeliveredCoupon(client, providerId);
+        }
         if (state === 'accepted' && item.kind === 'template') await client.query(`UPDATE whatsapp_subscriptions SET active=false,updated_at=now() WHERE id=$1 AND purpose='back_in_stock'`, [item.subscription_id]);
       });
     });
     await this.db.pool.query(`DELETE FROM whatsapp_webhook_receipts WHERE received_at<now()-interval '30 days'`);
     await this.db.pool.query(`DELETE FROM whatsapp_delivery_statuses WHERE updated_at<now()-interval '30 days'`);
     await this.db.pool.query(`DELETE FROM whatsapp_subscriptions WHERE confirmed_at IS NULL AND expires_at<now()-interval '1 day'`);
+  }
+
+  private async activateDeliveredCoupon(client: DbClient, providerId?: string) {
+    await client.query(`WITH delivered AS (
+      UPDATE wishlist_price_coupons c SET activated_at=now()
+      FROM whatsapp_deliveries d JOIN whatsapp_delivery_statuses s ON s.provider_id=d.provider_id,
+        promotions p WHERE p.id=c.promotion_id AND d.id=c.delivery_id AND c.activated_at IS NULL
+        AND ($1::text IS NULL OR d.provider_id=$1) AND s.state IN ('delivered','read')
+        AND p.starts_at IS NOT NULL AND p.ends_at>now() AND p.deleted_at IS NULL
+      RETURNING c.promotion_id
+    ) UPDATE promotions p SET active=true, updated_at=now() FROM delivered WHERE p.id=delivered.promotion_id`,
+    [providerId ?? null]);
+  }
+
+  private async prepareWishlistCoupon(client: DbClient, id: string, parameters: Array<string | number>) {
+    const match = (await client.query<{ promotion_id: string; slug: string; image_url: string | null }>(`
+      SELECT coupon.promotion_id,p.slug,media.public_url AS image_url
+      FROM wishlist_price_coupons coupon
+      JOIN product_regular_price_alert_events e ON e.id=coupon.price_event_id
+      JOIN whatsapp_deliveries d ON d.id=coupon.delivery_id JOIN whatsapp_subscriptions s ON s.id=d.subscription_id
+      JOIN customers c ON c.id=coupon.customer_id AND c.organization_id=s.organization_id
+        AND c.active AND c.deleted_at IS NULL AND c.phone_verified AND c.phone=s.phone
+      JOIN wishlist_alert_preferences pref ON pref.organization_id=s.organization_id AND pref.customer_id=c.id
+        AND pref.channel='whatsapp' AND pref.contact=s.phone AND pref.price_coupon_consent_at<=e.created_at
+        AND pref.price_coupon_consent_version=$2
+      JOIN product_variants v ON v.id=coupon.variant_id AND v.organization_id=s.organization_id
+        AND v.current_price_amount=coupon.regular_price_at_issue AND v.currency='RSD'
+      JOIN products p ON p.id=v.product_id AND p.organization_id=s.organization_id
+      JOIN promotions code ON code.id=coupon.promotion_id AND code.deleted_at IS NULL AND code.starts_at IS NULL
+      JOIN LATERAL (
+        SELECT a.public_url FROM product_media m JOIN media_assets a ON a.id=m.media_asset_id
+        WHERE m.organization_id=s.organization_id AND m.product_id=p.id AND a.status='ready' AND a.public_url IS NOT NULL
+        ORDER BY m.is_primary DESC,m.position,m.id LIMIT 1
+      ) media ON true
+      WHERE d.id=$1 AND s.active AND s.revoked_at IS NULL AND s.wishlist_customer_id=c.id
+        AND v.active AND v.published AND v.deleted_at IS NULL AND p.active AND p.published AND p.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM customer_wishlist_items w WHERE w.organization_id=s.organization_id
+          AND w.customer_id=c.id AND w.product_id=p.id
+          AND (nullif(w.item_snapshot->>'variantId','') IS NULL OR w.item_snapshot->>'variantId'=v.id::text))
+        AND NOT EXISTS (SELECT 1 FROM variant_prices sale WHERE sale.organization_id=s.organization_id
+          AND sale.variant_id=v.id AND sale.price_type='sale' AND sale.cancelled_at IS NULL
+          AND sale.valid_from<=now() AND sale.valid_until>now() AND sale.amount_minor<v.current_price_amount)`,
+      [id, WISHLIST_PRICE_COUPON_CONSENT])).rows[0];
+    if (!match) return null;
+    const jpeg = await fetchWhatsAppJpeg(match.image_url ?? undefined,
+      new URL(this.config.MEDIA_PUBLIC_BASE_URL || 'https://cdn.dajashop.rs').origin, 768);
+    if (!jpeg) return null;
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('file', new Blob([Uint8Array.from(jpeg)], { type: 'image/jpeg' }), 'daja-sat.jpg');
+    const response = await fetch(`https://graph.facebook.com/${this.config.WHATSAPP_GRAPH_API_VERSION}/${this.config.WHATSAPP_PHONE_NUMBER_ID}/media`, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000), body: form,
+      headers: { Authorization: 'Bearer ' + this.config.WHATSAPP_ACCESS_TOKEN }
+    });
+    if (!response.ok) return null;
+    const media = await response.json() as { id?: string };
+    if (!media.id) return null;
+    const starts = new Date();
+    const ends = new Date(starts.getTime() + 72 * 60 * 60_000);
+    const dates = new Intl.DateTimeFormat('sr-Latn-RS', { timeZone: 'Europe/Belgrade', dateStyle: 'short', timeStyle: 'medium' });
+    const money = new Intl.NumberFormat('sr-Latn-RS', { style: 'currency', currency: 'RSD' });
+    const [name, oldPrice, newPrice, amount, code, watchCode] = parameters;
+    const values = [String(name), ...[oldPrice,newPrice,amount].map(value => money.format(Number(value)/100)),
+      String(code), dates.format(starts), dates.format(ends), String(watchCode)];
+    await client.query('UPDATE promotions SET starts_at=$2,ends_at=$3 WHERE id=$1 AND starts_at IS NULL',
+      [match.promotion_id, starts, ends]);
+    return [
+      { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
+      { type: 'body', parameters: values.map(text => ({ type: 'text', text })) },
+      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: 'product/' + encodeURIComponent(match.slug) }] }
+    ];
   }
 
   private async expireHistory() {

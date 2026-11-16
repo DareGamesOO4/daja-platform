@@ -7,6 +7,8 @@ import type { Database, DbClient } from './pool.js';
 import type { QueuedEmail } from './email.js';
 
 type PriceAlertEventKind = 'sale_started' | 'regular_price_drop' | 'regular_price_increase';
+export const WISHLIST_PRICE_COUPON_TEMPLATE = 'daja_price_regular_increase_coupon_v1';
+export const WISHLIST_PRICE_COUPON_CONSENT = 'wishlist-price-coupon-v1';
 
 interface PriceAlertEvent {
   kind: PriceAlertEventKind;
@@ -74,13 +76,20 @@ export class ProductAlertDispatcher {
       await new TransactionManager(this.database.pool, this.logger).run(async client => {
       const changes = await new StorefrontRepository(client).claimDueRegularPriceAlerts();
       await Promise.all(
-        changes.map((change) => this.sendPriceAlertEvent(change.organizationId, change.variantId, {
-          kind: change.previousPriceAmount > change.currentPriceAmount
-            ? 'regular_price_drop'
-            : 'regular_price_increase',
-          previousPriceAmount: change.previousPriceAmount,
-          currentPriceAmount: change.currentPriceAmount
-        }, client, sms))
+        changes.map(async (change) => {
+          if (this.config.WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED &&
+              change.organizationId === this.config.PUBLIC_ORGANIZATION_ID &&
+              change.previousPriceAmount > 0 && change.previousPriceAmount < change.currentPriceAmount) {
+            await this.queueWishlistPriceCoupons(client, change.eventId);
+          }
+          await this.sendPriceAlertEvent(change.organizationId, change.variantId, {
+            kind: change.previousPriceAmount > change.currentPriceAmount
+              ? 'regular_price_drop'
+              : 'regular_price_increase',
+            previousPriceAmount: change.previousPriceAmount,
+            currentPriceAmount: change.currentPriceAmount
+          }, client, sms);
+        })
       );
       });
       await Promise.all(sms.map(send => send()));
@@ -89,6 +98,68 @@ export class ProductAlertDispatcher {
     } finally {
       this.dispatchingDueRegularPrices = false;
     }
+  }
+
+  private async queueWishlistPriceCoupons(client: DbClient, eventId: string) {
+    await client.query(`WITH eligible_price AS (
+      SELECT e.*, v.product_id, v.name AS variant_name, v.currency, p.name,
+        e.current_price_amount - e.previous_price_amount AS discount
+      FROM product_regular_price_alert_events e
+      JOIN product_variants v ON v.id = e.variant_id AND v.organization_id = e.organization_id
+      JOIN products p ON p.id = v.product_id AND p.organization_id = e.organization_id
+      WHERE e.id = $1 AND v.current_price_amount = e.current_price_amount AND v.currency = 'RSD'
+        AND v.active AND v.published AND v.deleted_at IS NULL AND p.active AND p.published AND p.deleted_at IS NULL
+        AND p.published_at <= e.created_at - interval '30 days'
+        AND NOT EXISTS (
+          SELECT 1 FROM product_regular_price_alert_events h
+          WHERE h.organization_id = e.organization_id AND h.variant_id = e.variant_id
+            AND h.created_at BETWEEN e.created_at - interval '30 days' AND e.created_at
+            AND least(h.previous_price_amount, h.current_price_amount) < e.previous_price_amount
+        ) AND NOT EXISTS (
+          SELECT 1 FROM variant_prices sale WHERE sale.organization_id = e.organization_id AND sale.variant_id = e.variant_id
+            AND sale.price_type = 'sale' AND sale.valid_from <= now()
+            AND least(sale.valid_until, coalesce(sale.cancelled_at, sale.valid_until)) > e.created_at - interval '30 days'
+            AND (sale.amount_minor < e.previous_price_amount OR
+              (sale.cancelled_at IS NULL AND sale.valid_until > now() AND sale.amount_minor < e.current_price_amount))
+        )
+    ), candidates AS MATERIALIZED (
+      SELECT DISTINCT ON (c.id) e.*, c.id AS customer_id, s.id AS subscription_id, s.watch_code,
+        gen_random_uuid() AS promotion_id, 'DAJA-' || upper(replace(gen_random_uuid()::text, '-', '')) AS code
+      FROM eligible_price e
+      JOIN customer_wishlist_items w ON w.organization_id = e.organization_id AND w.product_id = e.product_id
+        AND (nullif(w.item_snapshot->>'variantId', '') IS NULL OR w.item_snapshot->>'variantId' = e.variant_id::text)
+      JOIN customers c ON c.id = w.customer_id AND c.organization_id = e.organization_id
+        AND c.active AND c.deleted_at IS NULL AND c.phone_verified
+      JOIN wishlist_alert_preferences pref ON pref.organization_id = e.organization_id AND pref.customer_id = c.id
+        AND pref.channel = 'whatsapp' AND pref.contact = c.phone AND pref.language = 'sr'
+        AND pref.price_coupon_consent_at <= e.created_at AND pref.price_coupon_consent_version = $3
+      JOIN whatsapp_subscriptions s ON s.organization_id = e.organization_id AND s.wishlist_customer_id = c.id
+        AND s.phone = c.phone AND s.variant_id = e.variant_id AND s.purpose = 'price_change' AND s.language = 'sr'
+        AND s.active AND s.revoked_at IS NULL AND s.confirmed_at IS NOT NULL AND s.watch_code IS NOT NULL
+      WHERE NOT EXISTS (SELECT 1 FROM wishlist_price_coupons x WHERE x.price_event_id = e.id AND x.customer_id = c.id)
+      ORDER BY c.id, s.id
+    ), codes AS (
+      INSERT INTO promotions (id, organization_id, code, name, active, discount_type, discount_value,
+        protected_unit_price, login_requirement, total_usage_limit, per_customer_usage_limit, product_rules)
+      SELECT promotion_id, organization_id, code, 'Lični kupon za sat sa liste želja', false, 'fixed', discount,
+        previous_price_amount, 'authenticated', 1, 1, jsonb_build_object('include', jsonb_build_object('variantIds', jsonb_build_array(variant_id)))
+      FROM candidates RETURNING id
+    ), targets AS (
+      INSERT INTO promotion_customer_targets (promotion_id, customer_id, target_type)
+      SELECT c.promotion_id, c.customer_id, 'include' FROM candidates c JOIN codes ON codes.id = c.promotion_id
+    ), messages AS (
+      INSERT INTO whatsapp_deliveries (subscription_id, dedupe_key, template_name, parameters, expires_at)
+      SELECT c.subscription_id, 'price-coupon:' || c.id || ':' || c.customer_id, $2,
+        jsonb_build_array(left(concat_ws(' — ', c.name, nullif(c.variant_name, c.name)), 160),
+          c.previous_price_amount, c.current_price_amount, c.discount, c.code, c.watch_code::text),
+        now() + interval '6 hours'
+      FROM candidates c JOIN codes ON codes.id = c.promotion_id
+      RETURNING id, dedupe_key
+    )
+    INSERT INTO wishlist_price_coupons (price_event_id, customer_id, promotion_id, delivery_id, variant_id, regular_price_at_issue)
+    SELECT c.id, c.customer_id, c.promotion_id, m.id, c.variant_id, c.current_price_amount FROM candidates c
+    JOIN messages m ON m.dedupe_key = 'price-coupon:' || c.id || ':' || c.customer_id`,
+    [eventId, WISHLIST_PRICE_COUPON_TEMPLATE, WISHLIST_PRICE_COUPON_CONSENT]);
   }
 
   async dispatchDueSaleStarts(): Promise<void> {

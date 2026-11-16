@@ -62,6 +62,7 @@ interface PromotionRow {
   active: boolean;
   discount_type: DiscountType;
   discount_value: number;
+  protected_unit_price: number | null;
   max_discount_amount: number | null;
   applies_to: 'eligible_items' | 'order';
   min_order_amount: number;
@@ -244,6 +245,9 @@ export class PromotionsService {
         [organizationId, promotionId]
       );
       if (!existing.rows[0]) throw new ValidationFailedError('Promo kod nije pronađen.');
+      if (existing.rows[0].protected_unit_price !== null) {
+        throw new ValidationFailedError('Lični kupon je vezan za već poslatu ponudu i ne može da se menja.');
+      }
       await this.assertCustomerTargets(client, organizationId, prepared.customerTargets);
       const result = await client.query<PromotionRow>(
         `UPDATE promotions
@@ -413,6 +417,15 @@ export class PromotionsService {
 
     const lines = pricedLines ?? await canonicalCartLines(client, input.organizationId, input.items);
     const subtotalMinor = lines.reduce((sum, item) => sum + item.priceMinor * item.quantity, 0);
+    const protectedPrice = promotion.protected_unit_price;
+    const coupon = protectedPrice === null ? undefined : (await client.query<{ variant_id: string }>(
+      `SELECT variant_id FROM wishlist_price_coupons
+       WHERE promotion_id=$1 AND customer_id=$2 AND activated_at IS NOT NULL`,
+      [promotion.id, input.customer?.customerId ?? null]
+    )).rows[0];
+    if (protectedPrice !== null && (!coupon || promotion.uses_count >= 1)) {
+      throw new ValidationFailedError('Lični promo kod nije dostupan na ovom nalogu.');
+    }
     const rules = parseProductRules(promotion.product_rules);
     const eligible = lines.filter((line) => isEligible(line, rules));
     const eligibleQuantity = eligible.reduce((sum, item) => sum + item.quantity, 0);
@@ -441,10 +454,18 @@ export class PromotionsService {
     if (promotion.discount_type === 'percentage') {
       discountAmountMinor = Math.round(discountBaseMinor * (promotion.discount_value / 100));
     }
-    if (promotion.discount_type === 'fixed') {
+    if (coupon && protectedPrice !== null) {
+      // A personal price-protection code covers exactly one eligible watch.
+      const watch = eligible.find(line => line.variantId === coupon.variant_id);
+      if (!watch) throw new ValidationFailedError('Lični promo kod važi samo za sat naveden u poruci.');
+      discountAmountMinor = Math.max(0, watch.priceMinor - protectedPrice);
+      if (discountAmountMinor === 0) {
+        throw new ValidationFailedError('Cena sata je već jednaka ili niža od cene koju garantuje promo kod.');
+      }
+    } else if (promotion.discount_type === 'fixed') {
       discountAmountMinor = Math.min(discountBaseMinor, promotion.discount_value);
     }
-    if (promotion.max_discount_amount !== null) {
+    if (!coupon && promotion.max_discount_amount !== null) {
       discountAmountMinor = Math.min(discountAmountMinor, promotion.max_discount_amount);
     }
 

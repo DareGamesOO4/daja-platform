@@ -76,7 +76,7 @@ function templateValues(order: OrderAlert): string[] {
   return values;
 }
 
-async function photo(urlValue: string | undefined, origin: string, size: number): Promise<Buffer | null> {
+export async function fetchWhatsAppJpeg(urlValue: string | undefined, origin: string, size: number): Promise<Buffer | null> {
   if (!urlValue) return null;
   try {
     const url = new URL(urlValue);
@@ -125,7 +125,7 @@ async function orderImage(order: OrderAlert, origin: string) {
   for (let offset = 0; offset < visible.length; offset += 4) {
     const batch = visible.slice(offset, offset + 4);
     const photos = await Promise.all(batch.map(async item =>
-      await photo(item.thumb, origin, tile - 56) ?? await photo(item.image, origin, tile - 56)));
+      await fetchWhatsAppJpeg(item.thumb, origin, tile - 56) ?? await fetchWhatsAppJpeg(item.image, origin, tile - 56)));
     batch.forEach((item, index) => {
       const position = offset + index;
       const left = (position % columns) * tile;
