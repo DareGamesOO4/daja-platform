@@ -2,10 +2,13 @@ import { Body, Controller, Inject, Post } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
+import { TransactionManager, type Database } from '@daja/database';
+import type { Logger } from '@daja/observability';
 import { brandedEmail, emailEscape } from '@daja/shared';
 import { parseWithSchema } from '@daja/validation';
 import { EmailDeliveryService } from './email-delivery.service.js';
-import { CONFIG } from './tokens.js';
+import { OrderWhatsAppService } from './order-whatsapp.service.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 
 const contactSchema = z.object({
   name: z.string().trim().min(2).max(160),
@@ -20,7 +23,10 @@ const contactSchema = z.object({
 export class ContactController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
-    @Inject(EmailDeliveryService) private readonly email: EmailDeliveryService
+    @Inject(EmailDeliveryService) private readonly email: EmailDeliveryService,
+    @Inject(DATABASE) private readonly db: Database,
+    @Inject(LOGGER) private readonly logger: Logger,
+    private readonly whatsapp: OrderWhatsAppService
   ) {}
 
   @Post()
@@ -29,7 +35,7 @@ export class ContactController {
     const input = parseWithSchema(contactSchema, body);
     if (input.website) return { status: 'accepted' };
     const details = `<p><strong>Ime:</strong> ${emailEscape(input.name)}<br><strong>Email:</strong> ${emailEscape(input.email)}<br><strong>Telefon:</strong> ${emailEscape(input.phone || 'Nije unet')}</p>`;
-    await this.email.send({
+    const email = {
       recipients: [this.config.CONTACT_NOTIFICATION_EMAIL],
       fromEmail: this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL,
       replyTo: [input.email],
@@ -46,6 +52,10 @@ export class ContactController {
       }),
       tag: 'contact-message',
       deduplicationKey: `contact:${input.requestId}`
+    };
+    await new TransactionManager(this.db.pool, this.logger).run(async client => {
+      await this.email.send(email, client);
+      await this.whatsapp.enqueueContact(client, input.requestId);
     });
     return { status: 'accepted' };
   }

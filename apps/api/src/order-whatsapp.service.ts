@@ -28,6 +28,12 @@ interface OrderAlert {
 const storefront = 'https://dajashop.rs';
 const maxPhotos = 16;
 const maxPhotoBytes = 8 * 1024 * 1024;
+const internalTemplates = {
+  contact: 'daja_kontakt_upit',
+  studio_offline: 'daja_racunar_offline'
+} as const;
+type InternalAlertKind = keyof typeof internalTemplates;
+type SendResult = { state: 'accepted' | 'queued' | 'failed' | 'unknown'; code: string | null; providerId: string | null };
 
 function line(value: unknown, max: number) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
@@ -164,6 +170,27 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
     await client.query('INSERT INTO order_whatsapp_alerts (order_id) VALUES ($1) ON CONFLICT DO NOTHING', [orderId]);
   }
 
+  async enqueueContact(client: DbClient, requestId: string) {
+    if (!this.enabled() || !this.config.WHATSAPP_CONTACT_ALERT_ENABLED) return;
+    await client.query(`INSERT INTO internal_whatsapp_alerts (organization_id, kind, event_key, expires_at)
+      VALUES ($1, 'contact', $2, now() + interval '1 hour') ON CONFLICT DO NOTHING`,
+      [this.config.PUBLIC_ORGANIZATION_ID, requestId]);
+  }
+
+  async enqueueStudioOffline(client: DbClient, organizationId: string) {
+    if (!this.enabled() || !this.config.WHATSAPP_STUDIO_ALERT_ENABLED ||
+        organizationId !== this.config.PUBLIC_ORGANIZATION_ID) return;
+    // The presence check holds the organization's settings row lock for this transaction.
+    await client.query(`INSERT INTO internal_whatsapp_alerts (organization_id, kind, event_key, expires_at)
+      SELECT s.organization_id, 'studio_offline', extract(epoch FROM s.studio_seen_at)::text, now() + interval '10 minutes'
+      FROM media_worker_settings s WHERE s.organization_id = $1
+        AND s.studio_seen_at <= now() - interval '5 minutes'
+        AND NOT EXISTS (SELECT 1 FROM internal_whatsapp_alerts a
+          WHERE a.organization_id = $1 AND a.kind = 'studio_offline' AND
+            (a.attempted_at > now() - interval '12 hours' OR (a.state = 'queued' AND a.expires_at > now())))
+      ON CONFLICT DO NOTHING`, [organizationId]);
+  }
+
   onModuleInit() {
     if (this.enabled()) this.schedule();
   }
@@ -184,6 +211,9 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async tick() {
+    if (this.config.WHATSAPP_CONTACT_ALERT_ENABLED || this.config.WHATSAPP_STUDIO_ALERT_ENABLED) {
+      await this.dispatchInternal().catch(() => this.logger.warn('Internal WhatsApp queue processing failed'));
+    }
     await this.db.pool.query(`UPDATE order_whatsapp_alerts SET state = 'unknown',
       error_code = 'interrupted_send', updated_at = now()
       WHERE state = 'sending' AND updated_at < now() - interval '2 minutes'`);
@@ -205,6 +235,58 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
     RETURNING a.order_id, a.attempts, o.display_id, o.customer_payload, o.items_payload,
       o.shipping_method, o.shipping_amount, o.total_amount, o.currency`, [this.config.PUBLIC_ORGANIZATION_ID]);
     if (result.rows[0]) await this.deliver(result.rows[0]);
+  }
+
+  private async dispatchInternal() {
+    const kinds: InternalAlertKind[] = [];
+    if (this.config.WHATSAPP_CONTACT_ALERT_ENABLED) kinds.push('contact');
+    if (this.config.WHATSAPP_STUDIO_ALERT_ENABLED) kinds.push('studio_offline');
+    await this.db.pool.query(`UPDATE internal_whatsapp_alerts SET state = 'unknown',
+      error_code = 'interrupted_send', updated_at = now() WHERE organization_id = $1 AND
+      state = 'sending' AND attempted_at < now() - interval '2 minutes'`, [this.config.PUBLIC_ORGANIZATION_ID]);
+    await this.db.pool.query(`UPDATE internal_whatsapp_alerts a SET state = 'cancelled',
+      error_code = 'expired_or_reconnected', updated_at = now() WHERE a.organization_id = $1 AND a.state = 'queued'
+        AND (a.expires_at <= now() OR (a.kind = 'studio_offline' AND NOT EXISTS (
+          SELECT 1 FROM media_worker_settings s WHERE s.organization_id = a.organization_id
+            AND extract(epoch FROM s.studio_seen_at)::text = a.event_key)))`, [this.config.PUBLIC_ORGANIZATION_ID]);
+    const claimed = await this.db.pool.query<{ id: string; kind: InternalAlertKind; attempts: number }>(`WITH next_alert AS (
+      SELECT a.id FROM internal_whatsapp_alerts a WHERE a.organization_id = $1 AND a.kind = ANY($2::text[])
+        AND a.state = 'queued' AND a.available_at <= now() AND a.expires_at > now()
+        AND (a.kind <> 'studio_offline' OR EXISTS (SELECT 1 FROM media_worker_settings s
+          WHERE s.organization_id = a.organization_id AND extract(epoch FROM s.studio_seen_at)::text = a.event_key))
+      ORDER BY a.available_at, a.id FOR UPDATE SKIP LOCKED LIMIT 1
+    ) UPDATE internal_whatsapp_alerts a SET state = 'sending', attempts = attempts + 1,
+      attempted_at = now(), updated_at = now() FROM next_alert WHERE a.id = next_alert.id
+      RETURNING a.id, a.kind, a.attempts`, [this.config.PUBLIC_ORGANIZATION_ID, kinds]);
+    const alert = claimed.rows[0];
+    if (!alert) return;
+    const { state, code, providerId } = await this.sendTemplate(internalTemplates[alert.kind], 'sr').catch((): SendResult =>
+      ({ state: 'unknown', code: 'send_unconfirmed', providerId: null }));
+    const outcome = state === 'queued' && alert.attempts >= 5 ? 'failed' : state;
+    await this.db.pool.query(`UPDATE internal_whatsapp_alerts SET state = $2, provider_id = $3, error_code = $4,
+      updated_at = now(), available_at = now() + $5 * interval '1 second'
+      WHERE id = $1 AND state = 'sending'`, [alert.id, outcome, providerId, code, 15 * 2 ** alert.attempts]);
+    this.logger.info({ alertId: alert.id, kind: alert.kind, state: outcome, errorCode: code }, 'Internal WhatsApp alert processed');
+  }
+
+  private async sendTemplate(name: string, language: string, components?: unknown[]): Promise<SendResult> {
+    const response = await fetch(`https://graph.facebook.com/${this.config.WHATSAPP_GRAPH_API_VERSION}/${this.config.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        messaging_product: 'whatsapp', to: this.config.WHATSAPP_ORDER_ALERT_PHONE.slice(1), type: 'template',
+        template: { name, language: { code: language }, ...(components ? { components } : {}) }
+      })
+    });
+    const body = await response.json() as { messages?: Array<{ id?: string }>; error?: { code?: number } };
+    const providerId = response.ok ? body.messages?.[0]?.id ?? null : null;
+    return {
+      providerId,
+      state: providerId ? 'accepted' : response.status === 429 ? 'queued' :
+        !response.ok && response.status < 500 ? 'failed' : 'unknown',
+      code: providerId ? null : String(body.error?.code ?? `send_http_${response.status}`)
+    };
   }
 
   private async deliver(order: OrderAlert) {
@@ -234,26 +316,11 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
             AND EXISTS (SELECT 1 FROM orders WHERE id = a.order_id AND deleted_at IS NULL)`, [order.order_id, order.attempts]);
         if (!claim.rowCount) return;
         stage = 'sending';
-        const response = await fetch(`${graph}/messages`, {
-          method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(15_000),
-          body: JSON.stringify({
-            messaging_product: 'whatsapp', to: this.config.WHATSAPP_ORDER_ALERT_PHONE.slice(1), type: 'template',
-            template: {
-              name: this.config.WHATSAPP_ORDER_ALERT_TEMPLATE,
-              language: { code: this.config.WHATSAPP_ORDER_ALERT_LANGUAGE },
-              components: [
-                { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
-                { type: 'body', parameters: values.map(text => ({ type: 'text', text })) }
-              ]
-            }
-          })
-        });
-        const body = await response.json() as { messages?: Array<{ id?: string }>; error?: { code?: number } };
-        providerId = response.ok ? body.messages?.[0]?.id ?? null : null;
-        state = providerId ? 'accepted' : response.status === 429 ? 'queued' :
-          !response.ok && response.status < 500 ? 'failed' : 'unknown';
-        code = providerId ? null : String(body.error?.code ?? `send_http_${response.status}`);
+        ({ state, code, providerId } = await this.sendTemplate(
+          this.config.WHATSAPP_ORDER_ALERT_TEMPLATE, this.config.WHATSAPP_ORDER_ALERT_LANGUAGE, [
+            { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
+            { type: 'body', parameters: values.map(text => ({ type: 'text', text })) }
+          ]));
       }
     } catch {
       // A lost send response can follow acceptance; only preparation may be retried after an ambiguous request.

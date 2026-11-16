@@ -5,6 +5,7 @@ import type { Logger } from '@daja/observability';
 import { defaultMediaWorkerProfile, mediaWorkerProfileSchema } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
+import { OrderWhatsAppService } from './order-whatsapp.service.js';
 
 const studioOffline = "coalesce(studio_seen_at < now()-interval '3 minutes',false)";
 const studioIssues = [
@@ -22,7 +23,8 @@ export class LocalMediaPresence implements OnModuleInit, OnModuleDestroy {
     @Inject(DATABASE) private readonly db: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(LOGGER) private readonly logger: Logger,
-    private readonly email: EmailDeliveryService
+    private readonly email: EmailDeliveryService,
+    private readonly whatsapp: OrderWhatsAppService
   ) {}
 
   onModuleInit() {
@@ -49,7 +51,9 @@ export class LocalMediaPresence implements OnModuleInit, OnModuleDestroy {
            FROM media_worker_settings WHERE organization_id=$1 AND studio_seen_at IS NOT NULL FOR UPDATE`,
           [organizationId]
         )).rows[0];
-        if (!studio || studio.mask === studio.notified) return;
+        if (!studio) return;
+        if ((studio.mask & 1) !== 0) await this.whatsapp.enqueueStudioOffline(client, organizationId);
+        if (studio.mask === studio.notified) return;
         const newIssues = studioIssues.filter(issue => (studio.mask & ~studio.notified & issue.bit) !== 0);
         const recipients = orderNotificationRecipients(this.config);
         if (newIssues.length && recipients.length) {

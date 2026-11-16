@@ -81,6 +81,8 @@ const envSchema = z.object({
   WHATSAPP_ORDER_ALERT_PHONE: z.string().trim().regex(/^(\+[1-9]\d{7,14})?$/).default(''),
   WHATSAPP_ORDER_ALERT_TEMPLATE: z.string().trim().regex(/^[a-z0-9_]{1,512}$/).default('daja_nova_porudzbina'),
   WHATSAPP_ORDER_ALERT_LANGUAGE: z.string().trim().regex(/^[a-z]{2,3}(?:_[A-Z]{2})?$/).default('sr'),
+  WHATSAPP_CONTACT_ALERT_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  WHATSAPP_STUDIO_ALERT_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   WHATSAPP_APP_SECRET: optionalPreparedSecret,
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: optionalPreparedSecret,
   WHATSAPP_NEWSLETTER_TEMPLATE: z.string().regex(/^[a-z0-9_]+$/).default('daja_newsletter_v1'),
