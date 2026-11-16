@@ -318,7 +318,7 @@ async function loadSnapshot(pool: Pool, organizationId: string,
         optionsBySource.set(source, options);
       }
       return options;
-    });
+    }, config.department);
     collectFacets(config.department, filters, facets);
   }
   const entries = products.rows.map((row): Entry => ({

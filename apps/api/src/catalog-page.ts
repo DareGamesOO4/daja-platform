@@ -177,7 +177,7 @@ async function loadSnapshot(pool: Pool, organizationId: string, department: stri
       sources.set(source, known);
     }
     return known;
-  })};
+  }, department)};
   return { products: derived.products, brands, configuration, nodes: leaves(configuration.filters), selections: new Map(), orders: new Map(),
     version: createHash('sha256').update(JSON.stringify(configuration)).digest('hex') };
 }

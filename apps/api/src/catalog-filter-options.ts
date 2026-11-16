@@ -4,18 +4,22 @@ interface Node { mode: string; sources: string[]; options: Option[]; children: N
 const optionNames = new Intl.Collator('sr-Latn', { numeric: true });
 
 /** Expand a response, never the stored draft. Hidden/merged conditions reserve their values too. */
-export function automaticFilterOptions<T extends Node>(nodes: T[], read: (source: string) => string[]): T[] {
+export function automaticFilterOptions<T extends Node>(nodes: T[], read: (source: string) => string[], department?: string): T[] {
   return nodes.map((node) => {
-    if (node.mode === 'group') return { ...node, children: automaticFilterOptions(node.children, read) };
-    if (node.autoAddOptions === false) return node;
+    if (node.mode === 'group') return { ...node, children: automaticFilterOptions(node.children, read, department) };
+    const sources = node.autoAddOptions === false
+      ? node.sources.filter((source) => department === 'satovi' && source === 'gender')
+      : node.sources;
+    if (!sources.length) return node;
     const reserved = new Map<string, Set<string>>();
     for (const option of node.options) for (const condition of option.conditions) {
       let values = reserved.get(condition.source);
       if (!values) { values = new Set(); reserved.set(condition.source, values); }
       for (const value of condition.values) values.add(value);
     }
-    const additions = node.sources.flatMap((source) => [...new Set(read(source))]
+    const additions = sources.flatMap((source) => [...new Set(read(source))]
       .filter((value) => value && !reserved.get(source)?.has(value))
+      .filter((value) => node.autoAddOptions !== false || value === 'Dečiji')
       .filter((value) => {
         if (node.style !== 'range') return true;
         const match = value.replace(',', '.').match(/^(\d+(?:\.\d+)?)\s*([^\d]*)$/);
