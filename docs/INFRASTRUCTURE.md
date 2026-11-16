@@ -1,5 +1,12 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: produkcijsko slanje mejlova, 16.11.2026.
+
+- SES u `eu-north-1` ima produkcijsku kvotu 50.000 primalaca u 24 sata i 14 slanja u sekundi.
+- SNS odredište `dajashop-feedback` u konfiguraciji `my-first-configuration-set` objavljuje i `SEND`, uz postojeće `DELIVERY`, `DELIVERY_DELAY`, `BOUNCE`, `COMPLAINT`, `REJECT` i `RENDERING_FAILURE`.
+- `daja-platform-api` ima podešenu vezu sa funkcijom `sendDajaEmail` u Firebase projektu `dajashop-sms`. Funkcija koristi iCloud SMTP. Backend preko SES oznake `daja_delivery_id` povezuje događaje sa redom i posle SES timeouta čeka 60 sekundi na potvrdu pre prelaska na iCloud. Produkcijska dostava preko rezerve nije isprobana.
+
+
 ## Dopuna: ravni folderi novih slika, 06.11.2026.
 
 - Novi upload i uvoz slike preko linka sa slug/index metapodacima koriste
