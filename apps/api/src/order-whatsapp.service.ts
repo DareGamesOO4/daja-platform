@@ -121,7 +121,7 @@ async function orderImage(order: OrderAlert, origin: string) {
   const tile = Math.floor(960 / columns);
   const footer = models.length > visible.length ? 54 : 0;
   const height = Math.max(1, Math.ceil(visible.length / columns)) * tile;
-  const layers: sharp.OverlayOptions[] = [];
+  const layers: Array<{ input: Buffer; left: number; top: number }> = [];
   for (let offset = 0; offset < visible.length; offset += 4) {
     const batch = visible.slice(offset, offset + 4);
     const photos = await Promise.all(batch.map(async item =>
