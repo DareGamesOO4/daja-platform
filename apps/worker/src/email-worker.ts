@@ -15,9 +15,14 @@ interface DeliveryRow {
   recipient: string;
   payload: QueuedEmail;
   attempts: number;
+  firebase_fallback: boolean;
 }
 
 type SesSendingMode = 'disabled' | 'sandbox' | 'production';
+const firebaseEmailTags = [
+  'order-confirmation', 'new-order-notification', 'order-status-update',
+  'potvrda-email-adrese', 'promena-lozinke'
+];
 
 export class EmailWorker {
   private client: SESv2Client | undefined;
@@ -48,8 +53,8 @@ export class EmailWorker {
   start(): void {
     if (this.started || this.stopping) return;
     this.started = true;
-    if (!this.isConfigured()) {
-      this.logger.warn('Amazon SES is not configured on the worker; messages remain queued');
+    if (!this.isConfigured() && !this.hasFirebaseFallback()) {
+      this.logger.warn('No email transport is configured on the worker; messages remain queued');
     }
     this.timer = setInterval(() => this.scheduleDispatch(), 1200);
     this.feedbackTimer = setInterval(() => this.scheduleFeedback(), 5000);
@@ -115,6 +120,11 @@ export class EmailWorker {
     );
   }
 
+  private hasFirebaseFallback(): boolean {
+    return Boolean(this.config.FIREBASE_EMAIL_URL && this.config.FIREBASE_EMAIL_SECRET &&
+      this.config.SES_ORDER_FROM_EMAIL && this.config.SES_ACCOUNT_FROM_EMAIL);
+  }
+
   private credentials() {
     return {
       accessKeyId: this.config.SES_ACCESS_KEY_ID,
@@ -143,7 +153,7 @@ export class EmailWorker {
         this.sendingMode = account.ProductionAccessEnabled === true ? 'production' : 'sandbox';
       }
     } catch (error) {
-      this.logger.warn({ errorName: (error as Error).name }, 'Could not read SES account status; email delivery remains queued');
+      this.logger.warn({ errorName: (error as Error).name }, 'Could not read SES account status');
     }
     return this.sendingMode;
   }
@@ -185,7 +195,7 @@ export class EmailWorker {
         await this.database.pool.query(`INSERT INTO email_worker_health
           (region, heartbeat_at, sender_configured, feedback_configured, product_alerts_configured) VALUES ($1, now(), $2, $3, $4)
           ON CONFLICT (region) DO UPDATE SET heartbeat_at = now(), sender_configured = $2, feedback_configured = $3, product_alerts_configured = $4`,
-          [this.config.SES_REGION, this.isConfigured(), Boolean(this.isConfigured() && this.config.SES_FEEDBACK_QUEUE_NAME),
+          [this.config.SES_REGION, this.isConfigured() || this.hasFirebaseFallback(), Boolean(this.isConfigured() && this.config.SES_FEEDBACK_QUEUE_NAME),
             Boolean(this.config.PRIVACY_TOKEN_SECRET || this.config.JWT_ACCESS_SECRET)]);
         const backlog = await this.database.pool.query<{ pending: number; oldest_seconds: number; oldest_security_seconds: number }>(`SELECT
           count(*)::int AS pending, COALESCE(EXTRACT(epoch FROM now() - min(created_at)), 0)::int AS oldest_seconds,
@@ -193,15 +203,16 @@ export class EmailWorker {
           FROM email_deliveries WHERE status IN ('pending','sending')`);
         const health = backlog.rows[0];
         if (health && (health.oldest_seconds > 900 || health.oldest_security_seconds > 60)) {
-          this.logger.warn({ ...health, senderConfigured: this.isConfigured() }, 'Email queue requires operator attention');
+          this.logger.warn({ ...health, senderConfigured: this.isConfigured() || this.hasFirebaseFallback() }, 'Email queue requires operator attention');
         }
         await this.database.pool.query(`DELETE FROM product_alert_confirmations WHERE expires_at < now() - interval '1 day'`);
         await this.database.pool.query(`DELETE FROM email_feedback_events WHERE created_at < now() - interval '90 days'`);
         this.maintenanceAt = Date.now() + 60_000;
       }
-      if (!this.isConfigured() || this.stopping) return;
-      const mode = await this.refreshSendingMode();
-      if (mode === 'disabled' || this.stopping) return;
+      const fallback = this.hasFirebaseFallback();
+      if (this.stopping || (!this.isConfigured() && !fallback)) return;
+      const mode = this.isConfigured() ? await this.refreshSendingMode() : 'disabled';
+      if (this.stopping || (mode === 'disabled' && !fallback)) return;
       // Keep the existing shared limit across worker replicas.
       const permit = await this.database.pool.query(
         `INSERT INTO email_sender_limits (region, next_attempt_at)
@@ -211,11 +222,16 @@ export class EmailWorker {
       );
       if (!permit.rowCount) return;
       const claimed = await this.database.pool.query<DeliveryRow>(`WITH candidate AS (
-        SELECT queued.id FROM email_deliveries queued
+        SELECT queued.id, (queued.payload->>'firebaseFallback' = 'true') IS TRUE OR NOT
+          ($1::text = 'production' OR ($1 = 'sandbox' AND queued.tag IN ('new-order-notification', 'studio-health-alert')
+            AND lower(queued.recipient) = ANY($2::text[]))) AS firebase_fallback
+        FROM email_deliveries queued
         WHERE expires_at > now() + minimum_validity_seconds * interval '1 second' AND available_at <= now()
           AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))
-          AND ($1::boolean OR (queued.tag IN ('new-order-notification', 'studio-health-alert')
-            AND lower(queued.recipient) = ANY($2::text[])))
+          AND (CASE WHEN queued.payload->>'firebaseFallback' = 'true' THEN $3::boolean
+            ELSE $1 = 'production' OR ($1 = 'sandbox' AND queued.tag IN ('new-order-notification', 'studio-health-alert')
+              AND lower(queued.recipient) = ANY($2::text[]))
+              OR ($3::boolean AND queued.attempts = 0 AND queued.tag = ANY($4::text[])) END)
           AND NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = queued.recipient)
           AND (queued.payload->>'linkTokenHash' IS NULL OR EXISTS (
             SELECT 1 FROM email_active_links l WHERE l.token_hash = queued.payload->>'linkTokenHash' AND l.tag = queued.tag
@@ -226,9 +242,10 @@ export class EmailWorker {
             SELECT 1 FROM product_alert_subscriptions s WHERE s.id::text = queued.payload->>'productAlertSubscriptionId' AND s.revoked_at IS NULL))
         ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1
       ) UPDATE email_deliveries d SET status = 'sending', attempts = attempts + 1,
+          payload = CASE WHEN candidate.firebase_fallback THEN d.payload || '{"firebaseFallback":true}'::jsonb ELSE d.payload END,
           locked_until = now() + interval '5 minutes'
-        FROM candidate WHERE d.id = candidate.id RETURNING d.id, d.recipient, d.payload, d.attempts`,
-        [mode === 'production', this.internalOrderRecipients]);
+        FROM candidate WHERE d.id = candidate.id RETURNING d.id, d.recipient, d.payload, d.attempts, candidate.firebase_fallback`,
+        [mode, this.internalOrderRecipients, fallback, firebaseEmailTags]);
       const row = claimed.rows[0];
       if (row) await this.deliver(row);
     } catch (error) {
@@ -238,7 +255,50 @@ export class EmailWorker {
     }
   }
 
+  private async deliverViaFirebase(row: DeliveryRow): Promise<void> {
+    const input = row.payload;
+    try {
+      const response = await fetch(this.config.FIREBASE_EMAIL_URL, {
+        method: 'POST',
+        redirect: 'error',
+        headers: {
+          Authorization: `Bearer ${this.config.FIREBASE_EMAIL_SECRET}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: row.id,
+          from: this.sender(input),
+          to: row.recipient,
+          subject: input.subject,
+          text: input.text,
+          html: input.html,
+          replyTo: input.replyTo?.length ? input.replyTo : this.config.SES_REPLY_TO_EMAIL || undefined
+        }),
+        signal: this.requestSignal()
+      });
+      if (response.status !== 204) throw new Error(`Firebase Email HTTP ${response.status}`);
+      await this.database.pool.query(
+        `UPDATE email_deliveries SET status = 'sent', sent_at = now(),
+          locked_until = NULL, last_error = NULL, payload = '{}'::jsonb WHERE id = $1`,
+        [row.id]
+      );
+      this.logger.info({ deliveryId: row.id, tag: input.tag }, 'Email accepted by Firebase SMTP');
+    } catch (error) {
+      const delay = Math.min(3600, 15 * 2 ** Math.min(row.attempts, 8));
+      await this.database.pool.query(
+        `UPDATE email_deliveries SET status = 'pending', locked_until = NULL,
+          available_at = now() + $2 * interval '1 second', last_error = $3 WHERE id = $1`,
+        [row.id, delay, 'Firebase SMTP acceptance unconfirmed']
+      );
+      this.logger.warn({ deliveryId: row.id, errorName: (error as Error).name }, 'Firebase SMTP acceptance unconfirmed');
+    }
+  }
+
   private async deliver(row: DeliveryRow): Promise<void> {
+    if (row.firebase_fallback) {
+      await this.deliverViaFirebase(row);
+      return;
+    }
     const input = row.payload;
     let accepted = false;
     let messageId: string | undefined;
@@ -297,6 +357,17 @@ export class EmailWorker {
         return;
       }
       const name = error instanceof Error ? error.name : 'UnknownError';
+      // Only a definitive service rejection on the first attempt can switch transports.
+      if (row.attempts === 1 && this.hasFirebaseFallback() && firebaseEmailTags.includes(input.tag) &&
+          ['TooManyRequestsException', 'AccountSuspendedException', 'SendingPausedException',
+            'MailFromDomainNotVerifiedException', 'ForbiddenException', 'NotFoundException', 'LimitExceededException'].includes(name)) {
+        await this.database.pool.query(
+          `UPDATE email_deliveries SET payload = payload || '{"firebaseFallback":true}'::jsonb WHERE id = $1`,
+          [row.id]
+        );
+        await this.deliverViaFirebase(row);
+        return;
+      }
       // Configuration and sandbox rejections can recover without replacing the message.
       const failed = name === 'BadRequestException';
       const retryable = failed && error instanceof Error && /configuration|verified|paused|account|sending disabled/i.test(error.message);

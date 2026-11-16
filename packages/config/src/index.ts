@@ -60,6 +60,8 @@ const envSchema = z.object({
   SES_REPLY_TO_EMAIL: optionalPreparedSecret,
   SES_CONFIGURATION_SET: z.string().default('my-first-configuration-set'),
   SES_FEEDBACK_QUEUE_NAME: z.string().default('dajashop-email-feedback'),
+  FIREBASE_EMAIL_URL: z.union([z.literal(''), z.string().url().startsWith('https://')]).default(''),
+  FIREBASE_EMAIL_SECRET: optionalPreparedSecret,
   CONTACT_NOTIFICATION_EMAIL: z.string().email().default('cvelenis42@yahoo.com'),
   ORDER_NOTIFICATION_EMAILS: optionalPreparedSecret,
   WHATSAPP_OTP_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
