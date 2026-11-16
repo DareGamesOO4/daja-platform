@@ -57,6 +57,7 @@ import { NovostiEmailService } from './novosti-email.service.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import { ContactController } from './contact.controller.js';
 import { OrderEmailService } from './order-email.service.js';
+import { OrderWhatsAppService } from './order-whatsapp.service.js';
 import { WishlistAlertService } from './wishlist-alert.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
@@ -156,6 +157,7 @@ const rateStorage = new SharedRateStorage(config);
     EmailDeliveryService,
     NovostiEmailService,
     OrderEmailService,
+    OrderWhatsAppService,
     ProductAlertService,
     WishlistAlertService,
     PrivacyService,

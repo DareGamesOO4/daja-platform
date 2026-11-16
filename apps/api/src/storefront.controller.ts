@@ -41,6 +41,7 @@ import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
 import { PromotionsService } from './promotions.service.js';
 import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
+import { OrderWhatsAppService } from './order-whatsapp.service.js';
 import { WhatsAppOtpService } from './whatsapp-otp.service.js';
 import { PhoneOtpService } from './phone-otp.service.js';
 
@@ -622,6 +623,7 @@ export class StorefrontOrdersController {
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService,
     @Inject(LOGGER) private readonly logger: Logger,
     private readonly orderEmail: OrderEmailService,
+    private readonly orderWhatsApp: OrderWhatsAppService,
     private readonly realtime: RealtimeGateway,
     private readonly promotions: PromotionsService,
     @Inject(EngravingService) private readonly engraving: EngravingService
@@ -684,6 +686,7 @@ export class StorefrontOrdersController {
         client
       );
       await this.orderEmail.sendOrderCreated(created, client);
+      await this.orderWhatsApp.enqueue(client, organizationId, created.docId);
       return created;
     });
     this.realtime.publish({
