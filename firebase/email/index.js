@@ -51,7 +51,9 @@ export const sendDajaEmail = onRequest({
   } catch (error) {
     if (error.code !== 6) throw error;
     // A request timeout cannot safely reopen a delivery whose SMTP outcome is unknown.
-    res.sendStatus((await delivery.get()).get('status') === 'accepted' ? 204 : 409);
+    const receipt = (await delivery.get()).data();
+    if (receipt?.acceptedAt) res.set('X-Daja-Accepted-At', receipt.acceptedAt.toDate().toISOString());
+    res.sendStatus(receipt?.status === 'accepted' ? 204 : 409);
     return;
   }
 
@@ -68,13 +70,19 @@ export const sendDajaEmail = onRequest({
     disableUrlAccess: true
   });
   try {
-    await smtp.sendMail({ from, to, subject, text, html, replyTo, messageId: `<${id}@dajashop.rs>` });
+    await smtp.sendMail({
+      from, to, subject, text, html, replyTo,
+      messageId: `<${id}@dajashop.rs>`,
+      dsn: { id, return: 'headers', notify: ['success', 'failure', 'delay'], recipient: to }
+    });
   } catch (error) {
     if (error.responseCode >= 400 && error.responseCode < 600) await delivery.delete();
     console.warn('iCloud SMTP did not confirm acceptance', { id, code: error.code });
     res.sendStatus(502);
     return;
   }
-  await delivery.update({ status: 'accepted' });
+  const acceptedAt = Timestamp.now();
+  await delivery.update({ status: 'accepted', acceptedAt });
+  res.set('X-Daja-Accepted-At', acceptedAt.toDate().toISOString());
   res.sendStatus(204);
 });

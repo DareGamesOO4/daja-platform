@@ -1147,11 +1147,17 @@ export class StorefrontRepository {
          SELECT jsonb_agg(jsonb_build_object('id', e.id, 'canRetry', e.can_retry,
            'tag', e.tag, 'recipient', e.recipient, 'status', e.status,
            'sentAt', e.sent_at, 'feedback', e.feedback_type, 'feedbackAt', e.feedback_at,
-           'attempts', e.attempts) ORDER BY e.tag, e.recipient) AS deliveries
-         FROM email_delivery_status e WHERE e.organization_id = o.organization_id
-           AND e.tag IN ('order-confirmation', 'new-order-notification')
+           'attempts', e.attempts, 'queuedAt', d.created_at,
+           'nextAttemptAt', CASE WHEN d.status = 'pending' THEN d.available_at END,
+           'firebaseQueued', d.payload->>'firebaseFallback' = 'true',
+           'sesTimeoutAt', d.ses_timeout_at, 'sesDeliveredAt', d.ses_delivered_at,
+           'icloudAcceptedAt', d.icloud_accepted_at,
+           'sentViaSes', d.ses_message_id IS NOT NULL) ORDER BY d.created_at, e.recipient) AS deliveries
+         FROM email_delivery_status e JOIN email_deliveries d ON d.id = e.id
+         WHERE e.organization_id = o.organization_id
+           AND e.tag IN ('order-confirmation', 'new-order-notification', 'order-status-update')
            AND split_part(e.deduplication_key, ':', 2) = o.id::text
-           AND split_part(e.deduplication_key, ':', 1) = 'order-created'
+           AND split_part(e.deduplication_key, ':', 1) IN ('order-created', 'order-status')
        ) emails ON true
        LEFT JOIN LATERAL (
          SELECT jsonb_agg(jsonb_build_object('productId', c.product_id, 'provider', c.provider_code,

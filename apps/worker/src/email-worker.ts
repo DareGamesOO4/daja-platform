@@ -222,13 +222,13 @@ export class EmailWorker {
       );
       if (!permit.rowCount) return;
       const claimed = await this.database.pool.query<DeliveryRow>(`WITH candidate AS (
-        SELECT queued.id, (queued.payload->>'firebaseFallback' = 'true') IS TRUE OR NOT
+        SELECT queued.id, queued.ses_timeout_at IS NOT NULL OR (queued.payload->>'firebaseFallback' = 'true') IS TRUE OR NOT
           ($1::text = 'production' OR ($1 = 'sandbox' AND queued.tag IN ('new-order-notification', 'studio-health-alert')
             AND lower(queued.recipient) = ANY($2::text[]))) AS firebase_fallback
         FROM email_deliveries queued
         WHERE expires_at > now() + minimum_validity_seconds * interval '1 second' AND available_at <= now()
           AND (status = 'pending' OR (status = 'sending' AND locked_until < now()))
-          AND (CASE WHEN queued.payload->>'firebaseFallback' = 'true' THEN $3::boolean
+          AND (CASE WHEN queued.ses_timeout_at IS NOT NULL OR queued.payload->>'firebaseFallback' = 'true' THEN $3::boolean
             ELSE $1 = 'production' OR ($1 = 'sandbox' AND queued.tag IN ('new-order-notification', 'studio-health-alert')
               AND lower(queued.recipient) = ANY($2::text[]))
               OR ($3::boolean AND queued.attempts = 0 AND queued.tag = ANY($4::text[])) END)
@@ -258,6 +258,11 @@ export class EmailWorker {
   private async deliverViaFirebase(row: DeliveryRow): Promise<void> {
     const input = row.payload;
     try {
+      const claim = await this.database.pool.query(
+        `SELECT id FROM email_deliveries WHERE id = $1 AND status = 'sending' AND attempts = $2`,
+        [row.id, row.attempts]
+      );
+      if (!claim.rowCount) return;
       const response = await fetch(this.config.FIREBASE_EMAIL_URL, {
         method: 'POST',
         redirect: 'error',
@@ -277,18 +282,21 @@ export class EmailWorker {
         signal: this.requestSignal()
       });
       if (response.status !== 204) throw new Error(`Firebase Email HTTP ${response.status}`);
+      const acceptedAt = Date.parse(response.headers.get('x-daja-accepted-at') ?? '');
       await this.database.pool.query(
-        `UPDATE email_deliveries SET status = 'sent', sent_at = now(),
+        `UPDATE email_deliveries SET status = 'sent', sent_at = COALESCE(sent_at, $2, now()),
+          icloud_accepted_at = COALESCE(icloud_accepted_at, $2, now()),
           locked_until = NULL, last_error = NULL, payload = '{}'::jsonb WHERE id = $1`,
-        [row.id]
+        [row.id, Number.isFinite(acceptedAt) ? new Date(acceptedAt) : null]
       );
       this.logger.info({ deliveryId: row.id, tag: input.tag }, 'Email accepted by Firebase SMTP');
     } catch (error) {
       const delay = Math.min(3600, 15 * 2 ** Math.min(row.attempts, 8));
       await this.database.pool.query(
         `UPDATE email_deliveries SET status = 'pending', locked_until = NULL,
-          available_at = now() + $2 * interval '1 second', last_error = $3 WHERE id = $1`,
-        [row.id, delay, 'Firebase SMTP acceptance unconfirmed']
+          available_at = now() + $2 * interval '1 second', last_error = $3
+          WHERE id = $1 AND status = 'sending' AND attempts = $4`,
+        [row.id, delay, 'Firebase SMTP acceptance unconfirmed', row.attempts]
       );
       this.logger.warn({ deliveryId: row.id, errorName: (error as Error).name }, 'Firebase SMTP acceptance unconfirmed');
     }
@@ -302,6 +310,7 @@ export class EmailWorker {
     const input = row.payload;
     let accepted = false;
     let messageId: string | undefined;
+    const signal = this.requestSignal();
     try {
       const response = await this.sesClient().send(
         new SendEmailCommand({
@@ -331,9 +340,9 @@ export class EmailWorker {
               }
             }
           },
-          EmailTags: [{ Name: 'type', Value: input.tag }]
+          EmailTags: [{ Name: 'type', Value: input.tag }, { Name: 'daja_delivery_id', Value: row.id }]
         }),
-        { abortSignal: this.requestSignal() }
+        { abortSignal: signal }
       );
       accepted = true;
       messageId = response.MessageId;
@@ -357,15 +366,28 @@ export class EmailWorker {
         return;
       }
       const name = error instanceof Error ? error.name : 'UnknownError';
+      if (this.hasFirebaseFallback() && firebaseEmailTags.includes(input.tag) &&
+          (signal.reason?.name === 'TimeoutError' || name === 'TimeoutError')) {
+        await this.database.pool.query(
+          `UPDATE email_deliveries SET status = 'pending', locked_until = NULL,
+            available_at = now() + interval '60 seconds', ses_timeout_at = now(),
+            last_error = 'Waiting for SES feedback after timeout'
+          WHERE id = $1 AND status = 'sending' AND attempts = $2`,
+          [row.id, row.attempts]
+        );
+        this.logger.warn({ deliveryId: row.id }, 'SES timed out; waiting 60 seconds for feedback');
+        return;
+      }
       // Only a definitive service rejection on the first attempt can switch transports.
       if (row.attempts === 1 && this.hasFirebaseFallback() && firebaseEmailTags.includes(input.tag) &&
           ['TooManyRequestsException', 'AccountSuspendedException', 'SendingPausedException',
             'MailFromDomainNotVerifiedException', 'ForbiddenException', 'NotFoundException', 'LimitExceededException'].includes(name)) {
-        await this.database.pool.query(
-          `UPDATE email_deliveries SET payload = payload || '{"firebaseFallback":true}'::jsonb WHERE id = $1`,
-          [row.id]
+        const switched = await this.database.pool.query(
+          `UPDATE email_deliveries SET payload = payload || '{"firebaseFallback":true}'::jsonb
+            WHERE id = $1 AND status = 'sending' AND attempts = $2`,
+          [row.id, row.attempts]
         );
-        await this.deliverViaFirebase(row);
+        if (switched.rowCount) await this.deliverViaFirebase(row);
         return;
       }
       // Configuration and sandbox rejections can recover without replacing the message.
@@ -374,13 +396,15 @@ export class EmailWorker {
       const delay = Math.min(3600, 15 * 2 ** Math.min(row.attempts, 8));
       await this.database.pool.query(
         `UPDATE email_deliveries SET status = $2, locked_until = NULL,
-        available_at = now() + $3 * interval '1 second', last_error = $4, retryable = $5 WHERE id = $1`,
+        available_at = now() + $3 * interval '1 second', last_error = $4, retryable = $5
+        WHERE id = $1 AND status = 'sending' AND attempts = $6`,
         [
           row.id,
           failed ? 'failed' : 'pending',
           delay,
           error instanceof Error ? `${name}: ${error.message}`.slice(0, 500) : name,
-          retryable
+          retryable,
+          row.attempts
         ]
       );
       this.logger.error(
@@ -432,6 +456,22 @@ export class EmailWorker {
               [fingerprint, kind, event.messageId, message.MessageId]
             );
             if (inserted.rowCount) {
+              if (event.deliveryId && ['Send', 'Delivery', 'DeliveryDelay'].includes(kind)) {
+                await client.query(
+                  `WITH previous AS (
+                    SELECT id, (payload->>'policyDeliveryId')::uuid AS policy_id FROM email_deliveries
+                    WHERE id = $1 AND attempts > 0 AND status IN ('pending', 'sending', 'sent') FOR UPDATE
+                  ), accepted AS (
+                    UPDATE email_deliveries d SET status = 'sent', sent_at = COALESCE(sent_at, now()),
+                      ses_message_id = COALESCE(ses_message_id, $2),
+                      ses_delivered_at = CASE WHEN $3 = 'Delivery' THEN COALESCE(ses_delivered_at, now()) ELSE ses_delivered_at END,
+                      locked_until = NULL, last_error = NULL, payload = '{}'::jsonb
+                    FROM previous WHERE d.id = previous.id RETURNING previous.policy_id
+                  ) UPDATE policy_notification_deliveries SET status = 'sent', sent_at = COALESCE(sent_at, now()), last_error = NULL
+                  WHERE id = (SELECT policy_id FROM accepted)`,
+                  [event.deliveryId, event.messageId, kind]
+                );
+              }
               for (const recipient of recipients ?? []) {
                 const email = recipient;
                 await client.query(
@@ -501,6 +541,7 @@ interface SesFeedback {
   kind: string;
   messageId: string;
   suppressedRecipients: string[];
+  deliveryId?: string;
 }
 
 function parseSesFeedback(body: string): SesFeedback {
@@ -508,7 +549,7 @@ function parseSesFeedback(body: string): SesFeedback {
   try { parsed = JSON.parse(body); } catch { throw new Error('Invalid SES JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid SES event');
   const event = parsed as {
-    eventType?: unknown; notificationType?: unknown; mail?: { messageId?: unknown };
+    eventType?: unknown; notificationType?: unknown; mail?: { messageId?: unknown; tags?: Record<string, unknown> };
     bounce?: { bounceType?: unknown; bouncedRecipients?: unknown };
     complaint?: { complainedRecipients?: unknown };
   };
@@ -533,6 +574,9 @@ function parseSesFeedback(body: string): SesFeedback {
     }
     return address.trim().toLowerCase();
   });
-  return { kind, messageId: event.mail.messageId, suppressedRecipients:
+  const deliveryTags = event.mail.tags?.daja_delivery_id;
+  const deliveryId = Array.isArray(deliveryTags) && typeof deliveryTags[0] === 'string' &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(deliveryTags[0]) ? deliveryTags[0] : undefined;
+  return { kind, messageId: event.mail.messageId, ...(deliveryId ? { deliveryId } : {}), suppressedRecipients:
     kind === 'Complaint' || (kind === 'Bounce' && event.bounce?.bounceType === 'Permanent') ? [...new Set(recipients)] : [] };
 }

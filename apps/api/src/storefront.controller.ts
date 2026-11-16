@@ -790,9 +790,10 @@ export class StorefrontOrdersController {
     const result = await this.database.pool.query(`UPDATE email_deliveries d SET status = 'pending', available_at = now(),
       last_error = NULL, locked_until = NULL WHERE d.id = $1 AND d.organization_id = $2
       AND (d.status = 'pending' OR (d.status = 'failed' AND d.retryable))
+      AND (d.ses_timeout_at IS NULL OR d.available_at <= now())
       AND ($3::uuid IS NULL OR (
-        d.tag IN ('order-confirmation', 'new-order-notification')
-        AND split_part(d.deduplication_key, ':', 1) = 'order-created'
+        d.tag IN ('order-confirmation', 'new-order-notification', 'order-status-update')
+        AND split_part(d.deduplication_key, ':', 1) IN ('order-created', 'order-status')
         AND split_part(d.deduplication_key, ':', 2) = $3::uuid::text
         AND EXISTS (SELECT 1 FROM orders o WHERE o.id = $3 AND o.organization_id = $2 AND o.deleted_at IS NULL)
       ))
