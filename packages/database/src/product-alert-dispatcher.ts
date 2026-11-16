@@ -78,6 +78,7 @@ export class ProductAlertDispatcher {
       await Promise.all(
         changes.map(async (change) => {
           if (this.config.WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED &&
+              this.config.WHATSAPP_WISHLIST_PRICE_COUPON_TEMPLATE_APPROVED &&
               change.organizationId === this.config.PUBLIC_ORGANIZATION_ID &&
               change.previousPriceAmount > 0 && change.previousPriceAmount < change.currentPriceAmount) {
             await this.queueWishlistPriceCoupons(client, change.eventId);

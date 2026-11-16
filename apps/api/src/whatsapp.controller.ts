@@ -28,7 +28,11 @@ export class WhatsAppController {
     @Inject(CustomerAuthService) private readonly auth: CustomerAuthService) {}
 
   @Get('whatsapp/capabilities')
-  capabilities() { return { available: this.notifications.available(), backInStockAvailable: this.notifications.available() && this.config.WHATSAPP_STOCK_ALERTS_ENABLED }; }
+  capabilities() {
+    const available = this.notifications.available();
+    return { available, backInStockAvailable: available && this.config.WHATSAPP_STOCK_ALERTS_ENABLED,
+      priceAlertLanguages: (['sr','en'] as const).filter(language => this.notifications.priceAlertAvailable(language)) };
+  }
 
   @Post('whatsapp/subscriptions/request')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })

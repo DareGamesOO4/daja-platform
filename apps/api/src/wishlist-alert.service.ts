@@ -87,7 +87,7 @@ export class WishlistAlertService {
           ? 'Potvrdite email adresu naloga pre uključivanja email obaveštenja.'
           : 'Potvrdite broj telefona u profilu pre uključivanja WhatsApp obaveštenja.');
       }
-      if (input.channel === 'whatsapp') this.whatsapp.assertWishlistAvailable(customer);
+      if (input.channel === 'whatsapp') this.whatsapp.assertWishlistAvailable(customer, input.language);
       const targets = await this.email.wishlistTargets(customer.organizationId, customer.customerId, client);
       const preference = { ...input, contact, policyVersion: input.policyVersion };
       const existing = await client.query(

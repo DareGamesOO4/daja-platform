@@ -154,7 +154,7 @@ Footer: `STOP CENE za sve cene · STOP SVE za sve pretplate`.
 Primeri: `Orient RA-AC0M09E`, `34.990,00 RSD`, `39.990,00 RSD`, `5.000,00 RSD`, `DAJA-PRIMER72`, `16.11.2026. u 14:00:00`, `19.11.2026. u 14:00:00`, `1042`.
 Primer URL-a: `https://dajashop.rs/product/ra-ac0m09e`.
 
-Uključi `WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED` tek nakon odobrenja Meta šablona i pravne provere uslova ponude. Odvojena saglasnost je u podešavanjima WhatsApp praćenja liste želja. Samo događaj rasta redovne cene kreira ponudu, a potvrda dostave ili čitanja aktivira kupon uz rok od 72 sata od slanja.
+Posle odobrenja Meta šablona i pravne provere uslova ponude postavi `WHATSAPP_WISHLIST_PRICE_COUPON_TEMPLATE_APPROVED=true` uz `WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED=true` na API i worker servisima. Odvojena saglasnost je u podešavanjima WhatsApp praćenja liste želja. Samo događaj rasta redovne cene kreira ponudu, a potvrda dostave ili čitanja aktivira kupon uz rok od 72 sata od slanja.
 
 ### daja_back_in_stock_v1 — iskljuceno, ne kreirati sada
 
@@ -178,6 +178,8 @@ WHATSAPP_OTP_SECRET=<zasebna nasumicna tajna najmanje 32 znaka>
 WHATSAPP_OTP_TEMPLATE_NAME=daja_verification_v1
 WHATSAPP_NEWSLETTER_TEMPLATE=daja_newsletter_v2
 WHATSAPP_PRICE_TEMPLATE=daja_price_change_v2
+WHATSAPP_PRICE_CHANGE_V2_APPROVED=false
+WHATSAPP_SALE_START_TEMPLATE_APPROVED=false
 WHATSAPP_STOCK_TEMPLATE=daja_back_in_stock_v1
 WHATSAPP_OTP_DAILY_LIMIT=100
 WHATSAPP_NOTIFICATION_DAILY_LIMIT=100
@@ -190,7 +192,8 @@ WHATSAPP_NOTIFICATION_TEMPLATES_APPROVED=false
 WHATSAPP_STOCK_ALERTS_ENABLED=false
 
 OTP zastavice ukljuciti nakon odobrenja oba OTP jezika. Notification zastavice
-ukljuciti nakon odobrenja newsletter i price-change predlozaka u oba jezika i webhooka.
+ukljuciti nakon odobrenja newsletter predlozaka u oba jezika i webhooka.
+Za akcijske i opšte cenovne poruke uključiti odgovarajuću zastavicu odobrenja.
 Verzije v1 se više ne koriste za nove prijave i slanje. Pre uključivanja
 pregledaj aktivne pretplate, red slanja i istoriju isporuke. Odjavu proveri samo
 sa odobrenog test broja. Ne pokreći kampanju radi provere.

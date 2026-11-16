@@ -14,8 +14,8 @@
   `promotions.write` evidentira zahtev u WhatsApp admin panelu nakon
   provere broja i obima zahteva. Ova radnja ne šalje reklamne poruke.
 - [Uputstvo za unos šablona v2 i redosled dugmadi](WHATSAPP_SETUP.md).
-  API dozvoljava nove prijave i slanje tek kada su postavljena oba v2 imena
-  i odobrenje šablona. Odjava iz dolaznog webhooka radi i dok slanje čeka.
+  API proverava dostupnost šablona za svaku vrstu obaveštenja.
+  Odjava iz dolaznog webhooka radi i dok slanje čeka.
   Za primaoce starih poruka čuva se značenje odjave iz tih poruka.
 - Migracija 126 dodaje šifre, red odgovora i minimalnu evidenciju za
   buduće ograničeno čuvanje. `WHATSAPP_RETENTION_APPROVED` ostaje false dok
@@ -137,3 +137,10 @@ verification were performed for this change, per the user's instructions.
 Provider references:
 - https://www.postman.com/meta/whatsapp-business-platform/request/o65u5m5/send-message-template-text
 - https://whatsapp.github.io/WhatsApp-Nodejs-SDK/api-reference/webhooks/start/
+## Price templates and delivery limits
+
+- Serbian regular-price decreases use `daja_price_regular_decrease_v1` after the price event's debounce window.
+- Set `WHATSAPP_SALE_START_TEMPLATE_APPROVED=true` after Meta approves the Serbian `daja_price_sale_start_v1` template for this WhatsApp account.
+- Set `WHATSAPP_PRICE_CHANGE_V2_APPROVED=true` after Meta approves `daja_price_change_v2` in Serbian and English. Until then, English WhatsApp price tracking is unavailable for new subscriptions.
+- After Meta approves `daja_price_regular_increase_coupon_v1`, set `WHATSAPP_WISHLIST_PRICE_COUPON_TEMPLATE_APPROVED=true` together with `WHATSAPP_WISHLIST_PRICE_COUPONS_ENABLED=true`. Coupon enrollment also requires separate customer consent.
+- Each recipient has a rolling 24-hour cap of five marketing attempts, one newsletter and one standard price alert per variant. Replies to inbound commands use their own limits. Obsolete prices and messages over the recipient limit are cancelled. Reaching the store-wide quota delays an otherwise eligible message until the quota resets or the message expires.
