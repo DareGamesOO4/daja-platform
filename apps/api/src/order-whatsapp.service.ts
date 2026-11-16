@@ -157,28 +157,27 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
     @Inject(LOGGER) private readonly logger: Logger
   ) {}
 
-  private enabled() {
+  private enabled(recipient: string) {
     const { PUBLIC_ORGANIZATION_ID, WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
-      WHATSAPP_GRAPH_API_VERSION, WHATSAPP_ORDER_ALERT_PHONE, WHATSAPP_BUSINESS_PHONE } = this.config;
+      WHATSAPP_GRAPH_API_VERSION, WHATSAPP_BUSINESS_PHONE } = this.config;
     return Boolean(PUBLIC_ORGANIZATION_ID && WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID &&
-      WHATSAPP_GRAPH_API_VERSION && WHATSAPP_BUSINESS_PHONE && WHATSAPP_ORDER_ALERT_PHONE &&
-      WHATSAPP_ORDER_ALERT_PHONE !== WHATSAPP_BUSINESS_PHONE);
+      WHATSAPP_GRAPH_API_VERSION && WHATSAPP_BUSINESS_PHONE && recipient && recipient !== WHATSAPP_BUSINESS_PHONE);
   }
 
   async enqueue(client: DbClient, organizationId: string, orderId: string) {
-    if (!this.enabled() || organizationId !== this.config.PUBLIC_ORGANIZATION_ID) return;
+    if (!this.enabled(this.config.WHATSAPP_ORDER_ALERT_PHONE) || organizationId !== this.config.PUBLIC_ORGANIZATION_ID) return;
     await client.query('INSERT INTO order_whatsapp_alerts (order_id) VALUES ($1) ON CONFLICT DO NOTHING', [orderId]);
   }
 
   async enqueueContact(client: DbClient, requestId: string) {
-    if (!this.enabled() || !this.config.WHATSAPP_CONTACT_ALERT_ENABLED) return;
+    if (!this.enabled(this.config.WHATSAPP_ORDER_ALERT_PHONE) || !this.config.WHATSAPP_CONTACT_ALERT_ENABLED) return;
     await client.query(`INSERT INTO internal_whatsapp_alerts (organization_id, kind, event_key, expires_at)
       VALUES ($1, 'contact', $2, now() + interval '1 hour') ON CONFLICT DO NOTHING`,
       [this.config.PUBLIC_ORGANIZATION_ID, requestId]);
   }
 
   async enqueueStudioOffline(client: DbClient, organizationId: string) {
-    if (!this.enabled() || !this.config.WHATSAPP_STUDIO_ALERT_ENABLED ||
+    if (!this.enabled(this.config.WHATSAPP_STUDIO_ALERT_PHONE) || !this.config.WHATSAPP_STUDIO_ALERT_ENABLED ||
         organizationId !== this.config.PUBLIC_ORGANIZATION_ID) return;
     // The presence check holds the organization's settings row lock for this transaction.
     await client.query(`INSERT INTO internal_whatsapp_alerts (organization_id, kind, event_key, expires_at)
@@ -192,7 +191,8 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    if (this.enabled()) this.schedule();
+    if (this.enabled(this.config.WHATSAPP_ORDER_ALERT_PHONE) ||
+        (this.config.WHATSAPP_STUDIO_ALERT_ENABLED && this.enabled(this.config.WHATSAPP_STUDIO_ALERT_PHONE))) this.schedule();
   }
 
   async onModuleDestroy() {
@@ -214,6 +214,7 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (this.config.WHATSAPP_CONTACT_ALERT_ENABLED || this.config.WHATSAPP_STUDIO_ALERT_ENABLED) {
       await this.dispatchInternal().catch(() => this.logger.warn('Internal WhatsApp queue processing failed'));
     }
+    if (!this.enabled(this.config.WHATSAPP_ORDER_ALERT_PHONE)) return;
     await this.db.pool.query(`UPDATE order_whatsapp_alerts SET state = 'unknown',
       error_code = 'interrupted_send', updated_at = now()
       WHERE state = 'sending' AND updated_at < now() - interval '2 minutes'`);
@@ -239,8 +240,9 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   private async dispatchInternal() {
     const kinds: InternalAlertKind[] = [];
-    if (this.config.WHATSAPP_CONTACT_ALERT_ENABLED) kinds.push('contact');
-    if (this.config.WHATSAPP_STUDIO_ALERT_ENABLED) kinds.push('studio_offline');
+    if (this.config.WHATSAPP_CONTACT_ALERT_ENABLED && this.enabled(this.config.WHATSAPP_ORDER_ALERT_PHONE)) kinds.push('contact');
+    if (this.config.WHATSAPP_STUDIO_ALERT_ENABLED && this.enabled(this.config.WHATSAPP_STUDIO_ALERT_PHONE)) kinds.push('studio_offline');
+    if (!kinds.length) return;
     await this.db.pool.query(`UPDATE internal_whatsapp_alerts SET state = 'unknown',
       error_code = 'interrupted_send', updated_at = now() WHERE organization_id = $1 AND
       state = 'sending' AND attempted_at < now() - interval '2 minutes'`, [this.config.PUBLIC_ORGANIZATION_ID]);
@@ -260,7 +262,8 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
       RETURNING a.id, a.kind, a.attempts`, [this.config.PUBLIC_ORGANIZATION_ID, kinds]);
     const alert = claimed.rows[0];
     if (!alert) return;
-    const { state, code, providerId } = await this.sendTemplate(internalTemplates[alert.kind], 'sr').catch((): SendResult =>
+    const recipient = alert.kind === 'studio_offline' ? this.config.WHATSAPP_STUDIO_ALERT_PHONE : this.config.WHATSAPP_ORDER_ALERT_PHONE;
+    const { state, code, providerId } = await this.sendTemplate(recipient, internalTemplates[alert.kind], 'sr').catch((): SendResult =>
       ({ state: 'unknown', code: 'send_unconfirmed', providerId: null }));
     const outcome = state === 'queued' && alert.attempts >= 5 ? 'failed' : state;
     await this.db.pool.query(`UPDATE internal_whatsapp_alerts SET state = $2, provider_id = $3, error_code = $4,
@@ -269,13 +272,13 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
     this.logger.info({ alertId: alert.id, kind: alert.kind, state: outcome, errorCode: code }, 'Internal WhatsApp alert processed');
   }
 
-  private async sendTemplate(name: string, language: string, components?: unknown[]): Promise<SendResult> {
+  private async sendTemplate(recipient: string, name: string, language: string, components?: unknown[]): Promise<SendResult> {
     const response = await fetch(`https://graph.facebook.com/${this.config.WHATSAPP_GRAPH_API_VERSION}/${this.config.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
-        messaging_product: 'whatsapp', to: this.config.WHATSAPP_ORDER_ALERT_PHONE.slice(1), type: 'template',
+        messaging_product: 'whatsapp', to: recipient.slice(1), type: 'template',
         template: { name, language: { code: language }, ...(components ? { components } : {}) }
       })
     });
@@ -317,7 +320,7 @@ export class OrderWhatsAppService implements OnModuleInit, OnModuleDestroy {
         if (!claim.rowCount) return;
         stage = 'sending';
         ({ state, code, providerId } = await this.sendTemplate(
-          this.config.WHATSAPP_ORDER_ALERT_TEMPLATE, this.config.WHATSAPP_ORDER_ALERT_LANGUAGE, [
+          this.config.WHATSAPP_ORDER_ALERT_PHONE, this.config.WHATSAPP_ORDER_ALERT_TEMPLATE, this.config.WHATSAPP_ORDER_ALERT_LANGUAGE, [
             { type: 'header', parameters: [{ type: 'image', image: { id: media.id } }] },
             { type: 'body', parameters: values.map(text => ({ type: 'text', text })) }
           ]));
