@@ -100,8 +100,8 @@ export class OrderEmailService {
           escapeHtml(name) +
           ', hvala na poverenju. Pripremićemo porudžbinu i obavestiti vas o svakoj promeni statusa.',
         content:
-          orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
+          orderSummaryHtml(order, items) +
           orderDetailsHtml(order, shipping),
         footer:
           'Sačuvajte ovaj email kao potvrdu porudžbine. Za sva pitanja odgovorite direktno na ovu poruku.'
