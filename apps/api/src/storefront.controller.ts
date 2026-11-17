@@ -669,7 +669,7 @@ export class StorefrontOrdersController {
       const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
-        note: input.note,
+        ...(input.note !== undefined ? { note: input.note } : {}),
         items: frozenItems,
         subtotalAmount: subtotalMinor,
         discountAmount: promotion.discountAmountMinor,
