@@ -6,11 +6,6 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'DAJA Local Image Worker'
 $systemDir = Join-Path $env:ProgramData 'DajaImageWorker'
 $userDir = Join-Path $env:LOCALAPPDATA 'DAJA\ImageWorker'
-$systemInstall = Test-Path -LiteralPath (Join-Path $systemDir 'worker.json') -PathType Leaf
-$destination = if ($systemInstall) { $systemDir } else { $userDir }
-$configName = if ($systemInstall) { 'worker.json' } else { 'worker-user.json' }
-$configPath = Join-Path $destination $configName
-$program = Join-Path $destination 'worker.mjs'
 $studio = Join-Path $userDir 'DAJA Studio.exe'
 $newStudio = Join-Path $PSScriptRoot 'DAJA Studio.exe'
 $newProgram = Join-Path $PSScriptRoot 'worker.mjs'
@@ -62,6 +57,21 @@ if ($StudioOnly) {
     return
 }
 
+$systemInstall = (Test-Path -LiteralPath (Join-Path $systemDir 'status') -PathType Container -ErrorAction SilentlyContinue) -or
+    (Test-Path -LiteralPath (Join-Path $systemDir 'worker.json') -PathType Leaf -ErrorAction SilentlyContinue)
+if ($systemInstall) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Ovaj worker radi kao sistemski zadatak. Desni klik na Instaliraj Stilius.cmd pa Run as administrator.'
+    }
+    Get-ScheduledTask -TaskName $taskName | Out-Null
+}
+$destination = if ($systemInstall) { $systemDir } else { $userDir }
+$configName = if ($systemInstall) { 'worker.json' } else { 'worker-user.json' }
+$configPath = Join-Path $destination $configName
+$program = Join-Path $destination 'worker.mjs'
+
 if (!(Test-Path -LiteralPath $configPath -PathType Leaf)) {
     throw 'DAJA Studio nije instaliran. Za prvu instalaciju pogledaj PROCITAJ.md u paketu.'
 }
@@ -74,14 +84,7 @@ if ([IO.Path]::GetFullPath($newProgram) -ieq [IO.Path]::GetFullPath($program)) {
     throw 'Pokreni instalaciju iz posebno raspakovanog foldera.'
 }
 
-if ($systemInstall) {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'Ovaj worker radi kao sistemski zadatak. Desni klik na Instaliraj Stilius.cmd pa Run as administrator.'
-    }
-    Get-ScheduledTask -TaskName $taskName | Out-Null
-} elseif (!(Test-Path -LiteralPath $studio -PathType Leaf)) {
+if (!$systemInstall -and !(Test-Path -LiteralPath $studio -PathType Leaf)) {
     throw 'U postojecom DAJA Studio folderu nedostaje DAJA Studio.exe.'
 }
 
