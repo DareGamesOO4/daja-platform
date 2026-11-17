@@ -6,6 +6,7 @@ import { CONFIG } from './tokens.js';
 import { EmailDeliveryService, type TransactionalEmail } from './email-delivery.service.js';
 
 interface OrderEmailPayload {
+  note?: string;
   docId?: string;
   id?: string;
   version?: number;
@@ -100,7 +101,7 @@ export class OrderEmailService {
           escapeHtml(name) +
           ', hvala na poverenju. Pripremićemo porudžbinu i obavestiti vas o svakoj promeni statusa.',
         content:
-          orderSummaryHtml(order, items) +
+          (order.note ? '<p>Napomena: ' + escapeHtml(order.note) + '</p>' : '') + orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
           orderDetailsHtml(order, shipping),
         footer:
@@ -125,7 +126,7 @@ export class OrderEmailService {
         order.displayId +
         ' — ' +
         formatMoney(order.finalTotal, order.currency),
-      text: adminOrderText(order, items, shipping, { name, email, phone }),
+      text: adminOrderText(order, items, shipping, { name, email, phone }) + (order.note ? '\nNapomena: ' + order.note : ''),
       html: emailPage({
         siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
         eyebrow: 'NOVA PORUDŽBINA — ZA OBRADU',
@@ -135,7 +136,7 @@ export class OrderEmailService {
           escapeHtml(name) +
           '</strong> je upravo poslao porudžbinu. Ispod su svi podaci potrebni za obradu.',
         content:
-          orderSummaryHtml(order, items) +
+          (order.note ? '<p>Napomena: ' + escapeHtml(order.note) + '</p>' : '') + orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
           adminCustomerHtml(order, shipping, { name, email, phone }),
         footer: 'Porudžbinu možeš pregledati i ažurirati u Admin → Porudžbine.'
@@ -171,7 +172,7 @@ export class OrderEmailService {
           ', status vaše porudžbine je promenjen. Ispod možete videti trenutno stanje i kompletan pregled porudžbine.',
         content:
           orderStatusHtml(order) +
-          orderSummaryHtml(order, items) +
+          (order.note ? '<p>Napomena: ' + escapeHtml(order.note) + '</p>' : '') + orderSummaryHtml(order, items) +
           orderDetailsHtml(order, shipping),
         footer: 'Ako imate pitanje u vezi porudžbine, odgovorite direktno na ovaj email.'
       }),
@@ -428,6 +429,7 @@ function customerOrderText(input: {
     '',
     orderTextSummary(input.order, input.items, input.shipping),
     '',
+    input.order.note ? 'Napomena: ' + input.order.note : '',
     input.footer,
     'DajaShop'
   ].join('\n');

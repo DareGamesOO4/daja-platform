@@ -1,3 +1,4 @@
+import { createHmac, randomUUID } from 'node:crypto';
 import {
   Body,
   Controller,
@@ -18,7 +19,7 @@ import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import { StorefrontRepository, TransactionManager, type Database } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission, ValidationFailedError, verifyJwt } from '@daja/security';
+import { requirePermission, ValidationFailedError, signJwt, verifyJwt } from '@daja/security';
 import { browserRequest } from './runtime/edge-ingress.js';
 import { beginBrowserOAuth, beginBrowserPhone, readBrowserPhone, clearBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
@@ -111,6 +112,7 @@ const wishlistSchema = z.object({
 });
 
 const orderSchema = z.object({
+  note: z.string().trim().max(200).optional(),
   customer: z.record(z.string(), z.unknown()),
   items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
   subtotal: z.coerce.number().min(0),
@@ -667,6 +669,7 @@ export class StorefrontOrdersController {
       const created = await new StorefrontRepository(client).createOrder(organizationId, {
         customerId: customer?.customerId ?? null,
         customer: input.customer,
+        note: input.note,
         items: frozenItems,
         subtotalAmount: subtotalMinor,
         discountAmount: promotion.discountAmountMinor,
@@ -694,7 +697,18 @@ export class StorefrontOrdersController {
       event: 'orders.created',
       payload: { orderId: order.id, displayId: order.displayId }
     });
-    return { ...order, emailStatus: 'queued' };
+    return { ...order, emailStatus: 'queued', ...(!customer ? { claimToken: signJwt({ sub: order.docId, org: organizationId, typ: 'access', jti: randomUUID(), purpose: 'order-claim' }, createHmac('sha256', this.config.JWT_ACCESS_SECRET).update('order-claim').digest('hex'), 3600) } : {}) };
+  }
+
+  @Post('orders/:id/claim')
+  async claimOrder(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const input = parseWithSchema(z.object({ claimToken: z.string().min(1).max(8192) }), body);
+    const proof = verifyJwt(input.claimToken, createHmac('sha256', this.config.JWT_ACCESS_SECRET).update('order-claim').digest('hex'), 'access');
+    if (proof.purpose !== 'order-claim' || proof.org !== customer.organizationId || proof.sub !== id || !customer.email) throw new ValidationFailedError('Povezivanje porudžbine nije dostupno.');
+    const result = await this.database.pool.query(`UPDATE orders SET customer_id=$3, updated_at=now() WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL AND (customer_id IS NULL OR customer_id=$3) AND lower(customer_email)=lower($4) RETURNING id`, [customer.organizationId, id, customer.customerId, customer.email]);
+    if (!result.rowCount) throw new ValidationFailedError('Povezivanje porudžbine nije dostupno.');
+    return { linked: true };
   }
 
   @Post('promotions/validate')

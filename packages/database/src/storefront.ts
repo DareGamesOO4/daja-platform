@@ -78,6 +78,7 @@ export interface StorefrontItemSnapshot {
 }
 
 export interface CheckoutInput {
+  note?: string;
   customerId?: string | null;
   customer: Record<string, unknown>;
   items: Array<StorefrontItemSnapshot & { qty?: number; quantity?: number }>;
@@ -1050,6 +1051,7 @@ export class StorefrontRepository {
         JSON.stringify(customer),
         JSON.stringify({
           method: input.shippingMethod,
+          note: input.note || '',
           address: customer.address,
           city: customer.city,
           postalCode: customer.postalCode
@@ -2012,6 +2014,7 @@ function serializeOrder(row: OrderRow) {
     version: row.version,
     displayId: row.display_id,
     customer: row.customer_payload,
+    note: String(row.shipping_payload?.note || ''),
     customerEmailDisabled: row.customer_email_disabled,
     items: row.items_payload,
     subtotal: row.subtotal_amount / 100,
