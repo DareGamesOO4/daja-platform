@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { runLocalLinkel } from './local-linkel-checks.js';
+import { runLocalStilius } from './local-stilius-checks.js';
 import type { ProductImageProfile } from '../packages/database/src/image-encoder-core.js';
 import {
   defaultMediaWorkerProfile, mediaWorkerProfileSchema as profileSchema
@@ -18,7 +19,8 @@ const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 const configSchema = z.object({
   apiBaseUrl: z.url(),
   token: z.string().min(32).regex(/^[A-Za-z0-9._~-]+$/),
-  checkLinkel: z.boolean().default(false)
+  checkLinkel: z.boolean().default(false),
+  checkStilius: z.boolean().default(false)
 });
 const claimSchema = z.object({
   id: z.uuid(),
@@ -223,7 +225,8 @@ async function work(configPath: string, statusPath?: string) {
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
   const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown,
-    linkel: config.checkLinkel ? 'Povezivanje…' : 'Isključeno na ovom računaru', linkelLast: '' };
+    linkel: config.checkLinkel ? 'Povezivanje…' : 'Isključeno na ovom računaru', linkelLast: '',
+    stilius: config.checkStilius ? 'Povezivanje…' : 'Isključeno na ovom računaru' };
   let imageError: string | null = null;
   let imageJobFailed = false;
   if (config.checkLinkel) {
@@ -232,6 +235,10 @@ async function work(configPath: string, statusPath?: string) {
         status.linkel = message;
         if (lastResult !== undefined) status.linkelLast = lastResult;
       });
+  }
+  if (config.checkStilius) {
+    void runLocalStilius((route, payload, signal) => api(config, route, payload, signal), shutdown.signal,
+      message => { status.stilius = message; });
   }
   async function refreshRenderStatus() {
     try {

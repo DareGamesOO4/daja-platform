@@ -18,7 +18,7 @@ import { enqueueCatalogDelivery } from './catalog-delivery.service.js';
 import { inspectLocalMediaSource } from './local-media-source.js';
 import { LocalMediaPresence } from './local-media-presence.js';
 import { apiUnderLoad } from './runtime/abuse-protection.js';
-import { claimLocalLinkel, completeLocalLinkel, localLinkelQueueStatus } from './supplier-queue.js';
+import { claimLocalLinkel, claimLocalStilius, completeLocalLinkel, completeLocalStilius, localLinkelQueueStatus } from './supplier-queue.js';
 
 const variants = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 type Variant = typeof variants[number];
@@ -100,6 +100,36 @@ export class LocalMediaWorkerController {
   async rapidStartLinkel(@Req() request: Request) {
     this.authenticate(request);
     throw new ValidationFailedError('Linkel radi po sedmodnevnom rasporedu. Za pojedinačni artikal koristi „Proveri sada“.');
+  }
+
+  @Post('stilius/claim')
+  async claimStilius(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    response.setHeader('Cache-Control', 'no-store');
+    const job = await claimLocalStilius(this.db.pool, organizationId);
+    if (job) return job;
+    response.status(204);
+  }
+
+  @Post('stilius/complete')
+  async completeStilius(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    const result = z.object({
+      token: z.uuid(),
+      duration: z.number().int().min(0).max(90_000),
+      outcome: z.discriminatedUnion('status', [
+        z.object({ status: z.literal('available'), stockStatus: z.enum(['in_stock', 'out_of_stock']).nullable(),
+          priceAmount: z.number().positive().max(100_000_000).nullable(), priceCurrency: z.literal('EUR') }),
+        z.object({ status: z.literal('missing') }),
+        z.object({ status: z.literal('error'), accessFailed: z.boolean(), message: z.string().max(220) })
+      ])
+    }).safeParse(body);
+    if (!result.success || (result.data.outcome.status === 'available'
+      && result.data.outcome.stockStatus === null && result.data.outcome.priceAmount === null)) {
+      throw new ValidationFailedError('Invalid Stilius result');
+    }
+    await completeLocalStilius(this.db, organizationId, result.data.token, result.data.outcome, result.data.duration);
+    response.status(204);
   }
 
   @Post('linkel/complete')

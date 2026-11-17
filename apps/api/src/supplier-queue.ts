@@ -7,7 +7,8 @@ import { ValidationFailedError } from '@daja/security';
 
 export const NUMBERED_PROVIDERS = ['ekka', 'bultime', 'timezone', 'qandq'] as const;
 export const ALL_PROVIDERS = [...NUMBERED_PROVIDERS, 'linkel', 'milano'] as const;
-const SERVER_PROVIDERS = [...NUMBERED_PROVIDERS, 'milano'] as const;
+const SERVER_NUMBERED_PROVIDERS = ['ekka', 'bultime', 'timezone'] as const;
+const SERVER_PROVIDERS = [...SERVER_NUMBERED_PROVIDERS, 'milano'] as const;
 export type NumberedProvider = (typeof NUMBERED_PROVIDERS)[number];
 export type SupplierOutcome =
   | {
@@ -134,7 +135,7 @@ async function expireSupplierLeases(client: QueryClient): Promise<void> {
     `DELETE FROM supplier_check_leases WHERE expires_at<=now() RETURNING *`
   );
   for (const lease of expired.rows)
-    if (lease.link_id) {
+    if (lease.link_id && lease.provider_code !== 'qandq') {
       await client.query(
         `UPDATE supplier_product_links SET initial_requested_at=CASE WHEN $3='initial' THEN now() ELSE initial_requested_at END, manual_requested_at=CASE WHEN $3='manual' THEN now() ELSE manual_requested_at END,
       bulk_requested_at=CASE WHEN $3='bulk' THEN now() ELSE bulk_requested_at END,
@@ -409,8 +410,9 @@ async function deferExpiredConfirmations(
       +make_interval(secs => p.phase_seconds+(l.queue_position-1)*p.interval_seconds))
     FROM supplier_provider_checks p WHERE l.provider_code=p.provider_code
       AND l.provider_code=ANY($1::text[]) AND ($2::text IS NULL OR l.provider_code=$2)
-      AND l.confirmation_due_at<=now() AND (p.paused_until IS NOT NULL OR p.manual_pause_mode IS NOT NULL OR p.dispatcher_seen_at IS NULL
-        OR (p.dispatcher_seen_at<now()-interval '2 seconds' AND l.confirmation_due_at>=p.dispatcher_seen_at))`,
+      AND l.confirmation_due_at<=now() AND (p.paused_until IS NOT NULL OR p.manual_pause_mode IS NOT NULL OR
+        (p.provider_code<>'qandq' AND (p.dispatcher_seen_at IS NULL
+          OR (p.dispatcher_seen_at<now()-interval '2 seconds' AND l.confirmation_due_at>=p.dispatcher_seen_at))))`,
     [NUMBERED_PROVIDERS, provider]
   );
 }
@@ -513,18 +515,34 @@ async function finishLink(
 ) {
   const started = Date.now() - duration;
   await supplierTransaction(database.pool, async (client) => {
-    const current = await client.query<QueueLink & { timezone_missing_since: Date | null; timezone_missing_due: boolean }>(
-      `SELECT l.*,
+    const current = await client.query<QueueLink & { lease_started_at: Date; timezone_missing_since: Date | null; timezone_missing_due: boolean }>(
+      `SELECT l.*,lease.started_at AS lease_started_at,
         CASE WHEN l.provider_code='timezone' AND l.check_status='missing'
           AND l.first_problem_reason='Stranica proizvoda ne postoji' THEN l.first_problem_at END AS timezone_missing_since,
         (l.first_problem_at<=lease.started_at-interval '24 hours') IS TRUE AS timezone_missing_due
        FROM supplier_product_links l JOIN supplier_check_leases lease
          ON lease.link_id=l.id AND lease.token=$3 AND lease.expires_at>now()
-       WHERE l.id=$1 AND l.generation=$2 AND NOT l.removed FOR UPDATE OF l`,
+       WHERE l.id=$1 AND l.generation=$2 AND NOT l.removed
+         AND (l.provider_code<>'qandq' OR l.checks_enabled) FOR UPDATE OF l`,
       [link.id, lease.generation, lease.token]
     );
     const row = current.rows[0];
     if (!row) return;
+    if (row.provider_code === 'qandq') {
+      // A Windows worker can close between claim and completion. Leave its work
+      // queued until the result is committed and preserve newer requests.
+      await client.query(
+        `UPDATE supplier_product_links SET
+           initial_requested_at=CASE WHEN initial_requested_at<=$2 THEN NULL ELSE initial_requested_at END,
+           manual_requested_at=CASE WHEN manual_requested_at<=$2 THEN NULL ELSE manual_requested_at END,
+           confirmation_due_at=CASE WHEN confirmation_due_at<=$2 THEN NULL ELSE confirmation_due_at END,
+           next_regular_at=CASE WHEN next_regular_at<=$2 THEN next_regular_at+
+             (floor(extract(epoch FROM $2::timestamptz-next_regular_at)/864000)::integer+1)*interval '240 hours'
+             ELSE next_regular_at END
+         WHERE id=$1`,
+        [row.id, row.lease_started_at]
+      );
+    }
     await recordOrderSupplierCheck(client, lease.token, outcome);
     await client.query(`DELETE FROM supplier_check_leases WHERE token=$1`, [lease.token]);
     await recordSupplierStatistics(client, row.organization_id, row.provider_code, {
@@ -538,7 +556,7 @@ async function finishLink(
     });
     await client.query(
       `UPDATE supplier_product_links SET window_observed_at=now(), window_bad=$2 WHERE id=$1`,
-      [row.id, !(row.provider_code === 'timezone' && outcome.status === 'missing') && pageAccessFailed(outcome)]
+      [row.id, !(['timezone', 'qandq'].includes(row.provider_code) && outcome.status === 'missing') && pageAccessFailed(outcome)]
     );
     const provider = await client.query<{
       paused_until: Date | null;
@@ -988,6 +1006,91 @@ export async function completeLocalLinkel(
   }, result, { ...link, generation: result.generation!, legacy_due: result.legacy_due },
     blocked ? { status: 'error', accessFailed: true } : outcome, AbortSignal.timeout(60_000), duration);
 }
+
+export async function claimLocalStilius(pool: pg.Pool, organizationId: string) {
+  return supplierTransaction(pool, async client => {
+    await expireSupplierLeases(client);
+    const provider = (await client.query<{
+      automatic: boolean; initial: boolean; probe: boolean; ready: boolean;
+    }>(`UPDATE supplier_provider_checks SET dispatcher_seen_at=now() WHERE provider_code='qandq'
+      RETURNING (manual_pause_mode IS NULL AND paused_until IS NULL) AS automatic,
+        (manual_pause_mode IS DISTINCT FROM 'all' AND paused_until IS NULL) AS initial,
+        (probe_requested_at IS NOT NULL OR (paused_until<=now() AND manual_pause_mode IS DISTINCT FROM 'all')) IS TRUE AS probe,
+        (next_request_at<=now()) AS ready`)).rows[0];
+    if (!provider?.ready) return null;
+    const active = (await client.query<{ busy: boolean }>(`
+      SELECT count(*)>=20 OR COALESCE(bool_or(provider_code='qandq'),false) AS busy
+      FROM supplier_check_leases`)).rows[0]?.busy;
+    if (active) return null;
+
+    if (provider.probe) {
+      const lease = (await client.query<Lease>(`
+        INSERT INTO supplier_check_leases(provider_code,kind) VALUES ('qandq','health') RETURNING token`)).rows[0]!;
+      return { token: lease.token, kind: 'health' as const };
+    }
+    if (!provider.initial) return null;
+
+    const link = (await client.query<QueueLink>(`
+      SELECT l.*,order_check.order_requested_at
+      FROM supplier_product_links l JOIN products p ON p.id=l.product_id AND p.organization_id=l.organization_id
+      ${ORDER_CHECK_REQUEST}
+      WHERE l.organization_id=$1 AND l.provider_code='qandq' AND l.checks_enabled AND NOT l.removed
+        AND l.url IS NOT NULL AND p.deleted_at IS NULL
+        AND (l.initial_requested_at IS NOT NULL OR $2 AND (
+          order_check.order_requested_at IS NOT NULL OR l.manual_requested_at IS NOT NULL
+          OR l.confirmation_due_at<=now()
+          OR (l.next_regular_at<=now() AND (l.first_problem_at IS NULL OR l.first_problem_at<=now()-interval '24 hours'))))
+      ORDER BY CASE WHEN order_check.order_requested_at IS NOT NULL THEN 0 WHEN l.initial_requested_at IS NOT NULL THEN 1
+        WHEN l.manual_requested_at IS NOT NULL THEN 2 WHEN l.confirmation_due_at<=now() THEN 3 ELSE 4 END,
+        LEAST(order_check.order_requested_at,l.initial_requested_at,l.manual_requested_at,l.confirmation_due_at,l.next_regular_at),l.id
+      LIMIT 1`, [organizationId, provider.automatic])).rows[0];
+    if (!link) return null;
+
+    const kind = link.initial_requested_at ? 'initial' : link.manual_requested_at || link.order_requested_at ? 'manual'
+      : link.confirmation_due_at && link.confirmation_due_at <= new Date() ? 'confirmation' : 'regular';
+    const lease = (await client.query<Lease>(`
+      INSERT INTO supplier_check_leases(provider_code,link_id,generation,kind)
+      VALUES ('qandq',$1,$2,$3) RETURNING token`, [link.id, link.generation, kind])).rows[0]!;
+    await client.query("UPDATE supplier_provider_checks SET next_request_at=now()+interval '6 seconds' WHERE provider_code='qandq'");
+    return { token: lease.token, kind: 'product' as const, url: link.url };
+  });
+}
+
+export async function completeLocalStilius(
+  database: Database, organizationId: string, token: string, outcome: SupplierOutcome, duration: number
+) {
+  const lease = (await database.pool.query<Lease & { stock_cycle_due: boolean }>(`
+    SELECT lease.*,COALESCE(l.next_regular_at<=lease.started_at
+      AND (l.first_problem_at IS NULL OR l.first_problem_at<=lease.started_at-interval '24 hours'),false) AS stock_cycle_due
+    FROM supplier_check_leases lease LEFT JOIN supplier_product_links l ON l.id=lease.link_id
+    WHERE lease.token=$1 AND lease.provider_code='qandq' AND lease.expires_at>now()
+      AND (lease.kind='health' OR (l.organization_id=$2 AND l.generation=lease.generation))`, [token, organizationId])).rows[0];
+  if (!lease) return;
+  if (lease.kind !== 'health') {
+    const link = (await database.pool.query<QueueLink>(
+      'SELECT * FROM supplier_product_links WHERE id=$1 AND organization_id=$2', [lease.link_id, organizationId]
+    )).rows[0];
+    if (link) await finishLink(database, lease, { ...link, generation: lease.generation!, stock_cycle_due: lease.stock_cycle_due }, outcome, duration);
+    return;
+  }
+
+  const healthy = outcome.status === 'available' && outcome.stockStatus !== null && outcome.priceAmount != null;
+  await supplierTransaction(database.pool, async client => {
+    const released = await client.query('DELETE FROM supplier_check_leases WHERE token=$1 AND expires_at>now()', [token]);
+    if (!released.rowCount) return;
+    await recordSupplierStatistics(client, 'site', 'qandq', { outcome: healthy ? 'available' : 'error', duration });
+    await client.query(`UPDATE supplier_provider_checks
+      SET paused_until=CASE WHEN $1 THEN NULL ELSE now()+interval '15 minutes' END,
+        pause_reason=CASE WHEN $1 THEN NULL ELSE 'DAJA Studio nije potvrdio pristup i podatke Stilius artikla.' END,
+        health_ok=$1,health_checked_at=now(),probe_requested_at=NULL,updated_at=now()
+      WHERE provider_code='qandq'`, [healthy]);
+    if (healthy) {
+      await client.query(`UPDATE supplier_product_links SET window_observed_at=NULL,window_bad=NULL
+        WHERE provider_code='qandq' AND window_bad`);
+    }
+  });
+}
+
 export async function rollMissedSlots(
   client: QueryClient,
   providers: readonly string[] = ALL_PROVIDERS
@@ -1000,7 +1103,8 @@ export async function rollMissedSlots(
     `WITH due AS MATERIALIZED (
     SELECT l.id,l.organization_id,l.provider_code,(floor(extract(epoch FROM now()-l.next_regular_at)/864000)::integer+1) AS skipped
     FROM supplier_product_links l JOIN supplier_provider_checks p ON p.provider_code=l.provider_code
-    WHERE l.provider_code=ANY($1::text[]) AND l.next_regular_at IS NOT NULL AND (l.next_regular_at<=now()-interval '60 seconds'
+    WHERE l.provider_code=ANY($1::text[]) AND l.next_regular_at IS NOT NULL
+    AND ((p.provider_code<>'qandq' AND l.next_regular_at<=now()-interval '60 seconds')
       OR (p.manual_pause_mode IS NOT NULL AND l.next_regular_at<=LEAST(now(),COALESCE(p.manual_pause_until,now())))
       OR (p.paused_until IS NOT NULL AND l.next_regular_at<=now())))
     ,updated AS (UPDATE supplier_product_links l SET next_regular_at=l.next_regular_at+due.skipped*interval '240 hours'
@@ -1145,7 +1249,7 @@ export function startNumberedSupplierChecks(
           WHERE manual_pause_until<=now()`);
         await client.query(
           `UPDATE supplier_provider_checks SET dispatcher_seen_at=now() WHERE provider_code=ANY($1::text[])`,
-          [NUMBERED_PROVIDERS]
+          [SERVER_NUMBERED_PROVIDERS]
         );
         if (Date.now() - lastMaintenance > 3_600_000) {
           await client.query(

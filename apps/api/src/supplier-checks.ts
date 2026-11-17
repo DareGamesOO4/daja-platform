@@ -177,10 +177,9 @@ async function linkelPage(urlValue: string): Promise<Outcome> {
   return { status: 'error', accessFailed: true, message: 'Linkel je vratio previše preusmerenja.' };
 }
 
-async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValue: string): Promise<Outcome> {
-  const domains = { milano: ['milanogroup.eu', 'www.milanogroup.eu'], timezone: ['timezone-bg.com', 'www.timezone-bg.com'], qandq: ['qandq-casio.com', 'www.qandq-casio.com'] };
+async function additionalPage(provider: 'milano' | 'timezone', urlValue: string): Promise<Outcome> {
+  const domains = { milano: ['milanogroup.eu', 'www.milanogroup.eu'], timezone: ['timezone-bg.com', 'www.timezone-bg.com'] };
   let url = new URL(urlValue);
-  const requestedId = provider === 'qandq' ? url.searchParams.get('id') : null;
   for (let redirects = 0; redirects < 4; redirects += 1) {
     if (url.protocol !== 'https:' || !domains[provider].includes(url.hostname.toLowerCase()) || url.port || url.username || url.password) return { status: 'error' };
     let response: Response;
@@ -194,7 +193,7 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
       if (provider === 'timezone' && (url.protocol !== 'https:' || !domains.timezone.includes(url.hostname.toLowerCase()) || url.port || url.username || url.password)) {
         return { status: 'error', accessFailed: true };
       }
-      if (url.pathname === '/' || (provider === 'qandq' && url.searchParams.get('id') !== requestedId)) return { status: 'missing' };
+      if (url.pathname === '/') return { status: 'missing' };
       continue;
     }
     if (!response.ok) return { status: 'error', accessFailed: true, message: `Dobavljač je serveru vratio HTTP ${response.status}.` };
@@ -210,33 +209,19 @@ async function additionalPage(provider: 'milano' | 'timezone' | 'qandq', urlValu
       const priceAmount = priceFromMarkup(regular, 'EUR') ?? (!discounted && price && Number.isFinite(Number(price)) ? Number(price) : null);
       return { status: 'available', stockStatus: stock === 'instock' ? 'in_stock' : stock === 'outofstock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
     }
-    if (provider === 'timezone') {
-      if (!/itemprop=["']availability["']/.test(body)) return { status: 'error' };
-      const priceAmount = timezoneRegularPrice(body);
-      const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
-      return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
-    }
-    const product = body.split('id="product_info"')[1];
-    if (!product || !/Модел|Model/i.test(product.slice(0, 20000))) return { status: 'error' };
-    const purchase = product.slice(0, 20_000).split(/\bid=["']product-details-title["']/i, 1)[0] ?? '';
-    const oldPrice = purchase.match(/<(?:del|s|strike)\b[^>]*>([\s\S]*?)<\/(?:del|s|strike)>/i)?.[1];
-    const currentPrice = purchase.match(/<div\b[^>]*class=["'][^"']*\bproduct-price\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1]
-      ?? purchase.match(/<b\b[^>]*>\s*([0-9.,]+\s*(?:&euro;|€))\s*<\/b>/i)?.[1];
-    const discounted = oldPrice !== undefined || /\bproduct-old-price\b/i.test(purchase);
-    const priceAmount = priceFromMarkup(discounted ? oldPrice : currentPrice, 'EUR');
-    // Do not report stock when the supplier page has no explicit stock signal.
-    // The modal preview and scheduled checks share this parser; optimistic
-    // fallback here can contradict a previous confirmed out-of-stock result.
-    const stockStatus = explicitStock(product.slice(0,20_000));
-    return { status: 'available', stockStatus, priceAmount, priceCurrency: 'EUR' };
+    if (!/itemprop=["']availability["']/.test(body)) return { status: 'error' };
+    const priceAmount = timezoneRegularPrice(body);
+    const stock = body.match(/itemprop=["']availability["'][^>]*href=["'][^"']*schema\.org\/(InStock|OutOfStock)/i)?.[1];
+    return { status: 'available', stockStatus: stock === 'InStock' ? 'in_stock' : stock === 'OutOfStock' ? 'out_of_stock' : null, priceAmount, priceCurrency: 'EUR' };
   }
   return { status: 'error', accessFailed: true };
 }
 
 async function homeHealthy(provider: Provider): Promise<boolean> {
   if (provider === 'ekka') return ekkaHomeHealthy();
-  if (provider === 'milano' || provider === 'timezone' || provider === 'qandq') {
-    const home = { milano: 'https://milanogroup.eu/', timezone: 'https://timezone-bg.com/', qandq: 'https://www.qandq-casio.com/' }[provider];
+  if (provider === 'qandq') return false;
+  if (provider === 'milano' || provider === 'timezone') {
+    const home = provider === 'milano' ? 'https://milanogroup.eu/' : 'https://timezone-bg.com/';
     try { const response = await fetch(home, { signal: supplierSignal() }); return response.ok && (await response.text()).includes('<html'); }
     catch { return false; }
   }
@@ -253,7 +238,8 @@ async function homeHealthy(provider: Provider): Promise<boolean> {
 }
 
 export async function checkSupplierPage(provider: string, url: string, signal: AbortSignal): Promise<Outcome> {
-  return supplierDeadline.run(signal, () => provider === 'ekka' ? ekkaPage(url) : provider === 'bultime' ? bultimePage(url) : provider === 'linkel' ? linkelPage(url) : additionalPage(provider as 'milano' | 'timezone' | 'qandq',url));
+  if (provider === 'qandq') return { status: 'error', message: 'Stilius proverava DAJA Studio.' };
+  return supplierDeadline.run(signal, () => provider === 'ekka' ? ekkaPage(url) : provider === 'bultime' ? bultimePage(url) : provider === 'linkel' ? linkelPage(url) : additionalPage(provider as 'milano' | 'timezone',url));
 }
 export async function checkSupplierHome(provider: string, signal: AbortSignal): Promise<boolean> {
   return supplierDeadline.run(signal, () => homeHealthy(provider as Provider));

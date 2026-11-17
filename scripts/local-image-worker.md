@@ -1,5 +1,13 @@
 # DAJA lokalni worker za slike
 
+## Stilius na postojećem računaru
+
+Raspakuj ceo paket i pokreni **Instaliraj Stilius.cmd**. Ako DAJA radi kao sistemski zadatak, pokreni ga kao administrator. Paket preuzima postojeći ključ, podešavanja i način pokretanja iz lokalne instalacije. Potreban je instaliran Microsoft Edge ili Google Chrome.
+
+Za prvu instalaciju koristi komandu za sistemsku instalaciju ispod, uz dodatak `-CheckStilius`. Dodaj i `-CheckLinkel` ako taj računar treba da proverava Linkel.
+
+Stilius deli jedan red između oba računara. Kada se jedan računar ugasi, drugi preuzima naredni posao. DAJA Studio čita redovnu cenu u EUR i stanje sa stranice artikla. U adminu **Dobavljači → Stilius** vidiš poslednje rezultate i proveru pristupa sajtu.
+
 Paket koristi instalirani Node.js 22.12 ili noviji i uključuje Sharp za Windows x64.
 
 DAJA Studio.exe otvara prozor i ikonicu pored sata. Pozadinska obrada koristi isti program sa parametrom `--run-worker`. U korisničkoj instalaciji oba se pokreću pri prijavi u Windows. Ikonica se pokreće u pozadini, a prečica DAJA Studio na radnoj površini otvara prozor.

@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param([Parameter(Mandatory)][uri]$ApiBaseUrl, [switch]$CheckLinkel)
+param([Parameter(Mandatory)][uri]$ApiBaseUrl, [switch]$CheckLinkel, [switch]$CheckStilius)
 
 $ErrorActionPreference = 'Stop'
 if ($ApiBaseUrl.Scheme -ne 'https' -or $ApiBaseUrl.UserInfo -or $ApiBaseUrl.Query -or $ApiBaseUrl.Fragment) {
@@ -47,7 +47,7 @@ Set-Acl -LiteralPath $installDir -AclObject $acl
 Copy-Item -LiteralPath $program -Destination $installDir
 Copy-Item -LiteralPath $dependencies -Destination $installDir -Recurse
 $configPath = Join-Path $installDir 'worker.json'
-@{ apiBaseUrl = $ApiBaseUrl.AbsoluteUri; token = $token; checkLinkel = $CheckLinkel.IsPresent } | ConvertTo-Json |
+@{ apiBaseUrl = $ApiBaseUrl.AbsoluteUri; token = $token; checkLinkel = $CheckLinkel.IsPresent; checkStilius = $CheckStilius.IsPresent } | ConvertTo-Json |
     Set-Content -LiteralPath $configPath -Encoding ASCII
 $token = $null
 

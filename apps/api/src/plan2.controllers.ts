@@ -706,7 +706,7 @@ export class StaffCatalogController {
       ? normalizeEkkaUrl(input.url)
       : input.provider === 'bultime' ? normalizeBultimeUrl(input.url) : input.provider === 'linkel' ? normalizeLinkelUrl(input.url) : normalizeAdditionalUrl(input.provider, input.url);
     if (!url) throw new ValidationFailedError('Link dobavljača je obavezan');
-    if (input.provider === 'linkel') return { status: 'unverified', url,
+    if (input.provider === 'linkel' || input.provider === 'qandq') return { status: 'unverified', url,
       message: 'Sačuvaj link da bi ga DAJA Studio proverio.' };
     const lease=await acquireSupplierLease(this.database.pool,input.provider,'preview');
     if (!lease) return {status:'unverified',url,message:'Provera je odložena zbog ručne pauze ili zauzetosti sistema.'};

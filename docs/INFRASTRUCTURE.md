@@ -1,5 +1,14 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: Stilius preko DAJA Studio, 18.11.2026.
+
+- Red za Stilius (`qandq`) je u Render API-ju. Na Windows računarima
+  DAJA Studio otvara stranice artikala u instaliranom Edge-u ili Chrome-u
+  i šalje redovnu cenu u EUR i potvrđeno stanje kroz namenski worker API.
+- Oba računara mogu da preuzimaju poslove iz istog reda. Server dodeljuje
+  po jednu proveru i posle prekida omogućava da je preuzme drugi računar.
+  Automatska pauza se ukida kada Studio potvrdi pristup i podatke živog artikla.
+
 ## Dopuna: produkcijsko slanje mejlova, 16.11.2026.
 
 - SES u `eu-north-1` ima produkcijsku kvotu 50.000 primalaca u 24 sata i 14 slanja u sekundi.
