@@ -87,6 +87,7 @@ internal sealed class Dashboard : Form
     private readonly Label renderState;
     private readonly Label linkelState;
     private readonly Label linkelLastState;
+    private readonly Label stiliusState;
     private readonly Label pauseState;
     private readonly ComboBox pauseDuration;
     private readonly Button pauseButton;
@@ -122,8 +123,8 @@ internal sealed class Dashboard : Form
         Font = new Font("Segoe UI", 10);
         ForeColor = Ink;
         BackColor = Paper;
-        ClientSize = new Size(650, 550);
-        MinimumSize = new Size(620, 560);
+        ClientSize = new Size(650, 570);
+        MinimumSize = new Size(620, 580);
         StartPosition = FormStartPosition.CenterScreen;
 
         var layout = new TableLayoutPanel {
@@ -146,11 +147,13 @@ internal sealed class Dashboard : Form
         renderState = StatusLabel(20);
         linkelState = StatusLabel(20);
         linkelLastState = StatusLabel(20);
+        stiliusState = StatusLabel(20);
         status.Controls.Add(state);
         status.Controls.Add(detail);
         status.Controls.Add(renderState);
         status.Controls.Add(linkelState);
         status.Controls.Add(linkelLastState);
+        status.Controls.Add(stiliusState);
         layout.Controls.Add(status);
 
         var controls = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, Margin = new Padding(0, 0, 0, 10) };
@@ -352,6 +355,7 @@ internal sealed class Dashboard : Form
                 var linkelText = "Linkel · " + (snapshot.linkel ?? "stanje nije dostupno");
                 var linkelLastText = String.IsNullOrEmpty(snapshot.linkelLast)
                     ? "" : "Poslednja lokalna provera · " + snapshot.linkelLast;
+                var stiliusText = "Stilius · " + (snapshot.stilius ?? "stanje nije dostupno");
                 var last = DateTimeOffset.TryParse(snapshot.completed, out completed)
                     ? "Poslednja obrada " + completed.ToLocalTime().ToString("g") : "Nema završenih poslova u ovoj sesiji.";
                 var detailText = snapshot.phase == "working" ? (snapshot.productSlug ?? "Slika") + (snapshot.imageIndex.HasValue ? " · slika " + snapshot.imageIndex : "") +
@@ -373,7 +377,7 @@ internal sealed class Dashboard : Form
                 var pauseText = snapshot.phase != "local-paused" ? "" :
                     DateTimeOffset.TryParse(snapshot.pauseUntil, out pauseUntil)
                     ? "Pauzirano do " + pauseUntil.ToLocalTime().ToString("t") : "Pauzirano dok ne nastaviš";
-                ShowStatus(phaseText, detailText, renderText, linkelText, linkelLastText, pauseText, snapshot.progress);
+                ShowStatus(phaseText, detailText, renderText, linkelText, linkelLastText, stiliusText, pauseText, snapshot.progress);
             }
         }
         catch (IOException)
@@ -389,16 +393,18 @@ internal sealed class Dashboard : Form
 
     private void ShowUnavailableStatus(string phaseText, string detailText)
     {
-        ShowStatus(phaseText, detailText, "Render · stanje nije dostupno", "Linkel · stanje nije dostupno", "", "", 0);
+        ShowStatus(phaseText, detailText, "Render · stanje nije dostupno", "Linkel · stanje nije dostupno",
+            "", "Stilius · stanje nije dostupno", "", 0);
     }
 
-    private void ShowStatus(string phaseText, string detailText, string renderText, string linkelText, string linkelLastText, string pauseText, int percent)
+    private void ShowStatus(string phaseText, string detailText, string renderText, string linkelText, string linkelLastText, string stiliusText, string pauseText, int percent)
     {
         SetStatusText(state, phaseText);
         SetStatusText(detail, detailText);
         SetStatusText(renderState, renderText);
         SetStatusText(linkelState, linkelText);
         SetStatusText(linkelLastState, linkelLastText);
+        SetStatusText(stiliusState, stiliusText);
         SetStatusText(pauseState, pauseText);
         var clamped = Math.Max(0, Math.Min(100, percent));
         if (progress.Value != clamped) progress.Value = clamped;
@@ -429,6 +435,7 @@ internal sealed class Dashboard : Form
         public string updated { get; set; }
         public string linkel { get; set; }
         public string linkelLast { get; set; }
+        public string stilius { get; set; }
         public string activity { get; set; }
         public string productSlug { get; set; }
         public int? imageIndex { get; set; }

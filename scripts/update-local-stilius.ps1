@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param()
+param([switch]$StudioOnly)
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'DAJA Local Image Worker'
@@ -11,9 +11,56 @@ $destination = if ($systemInstall) { $systemDir } else { $userDir }
 $configName = if ($systemInstall) { 'worker.json' } else { 'worker-user.json' }
 $configPath = Join-Path $destination $configName
 $program = Join-Path $destination 'worker.mjs'
-$studio = Join-Path $destination 'DAJA Studio.exe'
+$studio = Join-Path $userDir 'DAJA Studio.exe'
+$newStudio = Join-Path $PSScriptRoot 'DAJA Studio.exe'
 $newProgram = Join-Path $PSScriptRoot 'worker.mjs'
 $browserLibrary = Join-Path $PSScriptRoot 'node_modules\playwright-core'
+
+if (!(Test-Path -LiteralPath $studio -PathType Leaf)) {
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'DAJA Studio.lnk'
+    if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+        if ((Split-Path -Leaf $shortcut.TargetPath) -ieq 'DAJA Studio.exe') { $studio = $shortcut.TargetPath }
+    }
+}
+
+function Update-DajaStudio([switch]$ShowWindow) {
+    if (!(Test-Path -LiteralPath $newStudio -PathType Leaf) -or !(Test-Path -LiteralPath $studio -PathType Leaf)) {
+        throw 'Nedostaje DAJA Studio.exe u paketu ili postojecoj instalaciji.'
+    }
+    $replace = [IO.Path]::GetFullPath($newStudio) -ine [IO.Path]::GetFullPath($studio)
+    if ($replace) { $originalStudio = [IO.File]::ReadAllBytes($studio) }
+    $tray = @(Get-CimInstance Win32_Process -Filter "Name='DAJA Studio.exe'" | Where-Object {
+        $_.ExecutablePath -ieq $studio -and $_.CommandLine -notmatch '(?:^|\s)--run-worker(?:\s|$)'
+    })
+    $tray | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+        Wait-Process -Id $_.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+    }
+    $launch = @{ FilePath=$studio; WorkingDirectory=(Split-Path -Parent $studio) }
+    if (!$ShowWindow) {
+        $launch.ArgumentList = '--background'
+        $launch.WindowStyle = 'Hidden'
+    }
+    $copied = $false
+    try {
+        if ($replace) {
+            Copy-Item -LiteralPath $newStudio -Destination $studio -Force
+            $copied = $true
+        }
+        Start-Process @launch
+    } catch {
+        if ($copied) { [IO.File]::WriteAllBytes($studio, $originalStudio) }
+        if ($tray.Count -gt 0) { Start-Process @launch -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
+if ($StudioOnly) {
+    Update-DajaStudio -ShowWindow
+    Write-Host 'DAJA Studio je azuriran i otvoren.'
+    return
+}
 
 if (!(Test-Path -LiteralPath $configPath -PathType Leaf)) {
     throw 'DAJA Studio nije instaliran. Za prvu instalaciju pogledaj PROCITAJ.md u paketu.'
@@ -78,6 +125,7 @@ try {
     Copy-Item -LiteralPath $browserLibrary -Destination $modules -Recurse -Force
     Copy-Item -LiteralPath $newProgram -Destination $program -Force
     [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 12), $utf8)
+    if (Test-Path -LiteralPath $studio -PathType Leaf) { Update-DajaStudio }
     Start-DajaWorker
 } catch {
     [IO.File]::WriteAllBytes($program, $originalProgram)
