@@ -45,6 +45,7 @@ function isCustomerRoute(path: string): boolean {
   return (
     normalized.startsWith('/customer-auth') ||
     /^\/media\/local-worker\/(?:claim|complete|queue|status|linkel\/(?:claim|complete|rapid-start))\/?$/.test(normalized) ||
+    /^\/media\/local-worker\/stilius\/(?:claim|complete)\/?$/.test(normalized) ||
     normalized.startsWith('/whatsapp/') ||
     normalized === '/contact' ||
     normalized.startsWith('/engraving/') ||
