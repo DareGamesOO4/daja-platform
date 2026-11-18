@@ -24,7 +24,10 @@ function Update-DajaStudio([switch]$ShowWindow) {
         throw 'Nedostaje DAJA Studio.exe u paketu ili postojecoj instalaciji.'
     }
     $replace = [IO.Path]::GetFullPath($newStudio) -ine [IO.Path]::GetFullPath($studio)
-    if ($replace) { $originalStudio = [IO.File]::ReadAllBytes($studio) }
+    $suffix = [guid]::NewGuid().ToString('N')
+    $stagedStudio = "$studio.$suffix.new"
+    $backupStudio = "$studio.$suffix.bak"
+    if ($replace) { Copy-Item -LiteralPath $newStudio -Destination $stagedStudio }
     $tray = @(Get-CimInstance Win32_Process -Filter "Name='DAJA Studio.exe'" | Where-Object {
         $_.ExecutablePath -ieq $studio -and $_.CommandLine -notmatch '(?:^|\s)--run-worker(?:\s|$)'
     })
@@ -37,18 +40,29 @@ function Update-DajaStudio([switch]$ShowWindow) {
         $launch.ArgumentList = '--background'
         $launch.WindowStyle = 'Hidden'
     }
-    $copied = $false
     try {
         if ($replace) {
-            Copy-Item -LiteralPath $newStudio -Destination $studio -Force
-            $copied = $true
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+                try {
+                    [IO.File]::Replace($stagedStudio, $studio, $backupStudio, $true)
+                    break
+                } catch [IO.IOException] {
+                    if ($attempt -eq 5) { throw }
+                    Start-Sleep -Milliseconds 400
+                }
+            }
         }
         Start-Process @launch
     } catch {
-        if ($copied) { [IO.File]::WriteAllBytes($studio, $originalStudio) }
+        if (Test-Path -LiteralPath $backupStudio -PathType Leaf) {
+            [IO.File]::Replace($backupStudio, $studio, $null, $true)
+        }
         if ($tray.Count -gt 0) { Start-Process @launch -ErrorAction SilentlyContinue }
         throw
+    } finally {
+        Remove-Item -LiteralPath $stagedStudio -ErrorAction SilentlyContinue
     }
+    Remove-Item -LiteralPath $backupStudio -ErrorAction SilentlyContinue
 }
 
 if ($StudioOnly) {
