@@ -14,6 +14,12 @@ using Microsoft.Win32;
 
 internal static class Program
 {
+    internal static string NodePath()
+    {
+        var bundled = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "runtime", "node.exe");
+        return File.Exists(bundled) ? bundled : "node.exe";
+    }
+
     [STAThread]
     private static void Main(string[] args)
     {
@@ -56,7 +62,7 @@ internal static class Program
             while (File.Exists(config))
             {
                 var start = new ProcessStartInfo {
-                    FileName = "node.exe", WorkingDirectory = folder, CreateNoWindow = true, UseShellExecute = false,
+                    FileName = NodePath(), WorkingDirectory = folder, CreateNoWindow = true, UseShellExecute = false,
                     Arguments = "\"" + Path.Combine(folder, "worker.mjs") + "\" run \"" + config + "\" \"" + status + "\""
                 };
                 try
@@ -295,7 +301,7 @@ internal sealed class Dashboard : Form
         try
         {
             var start = new ProcessStartInfo {
-                FileName = "node.exe", WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                FileName = Program.NodePath(), WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
                 Arguments = Quote(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "worker.mjs")) + " local " +
                     Quote(input.Text) + " " + Quote(output) + " " + quality.Value.ToString(CultureInfo.InvariantCulture),
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,

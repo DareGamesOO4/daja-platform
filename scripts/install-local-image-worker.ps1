@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param([Parameter(Mandatory)][uri]$ApiBaseUrl, [switch]$CheckLinkel, [switch]$CheckStilius)
+param([Parameter(Mandatory)][uri]$ApiBaseUrl, [switch]$CheckLinkel, [switch]$CheckStilius, [switch]$WorkerOnly)
 
 $ErrorActionPreference = 'Stop'
 if ($ApiBaseUrl.Scheme -ne 'https' -or $ApiBaseUrl.UserInfo -or $ApiBaseUrl.Query -or $ApiBaseUrl.Fragment) {
@@ -10,7 +10,10 @@ if ($ApiBaseUrl.Scheme -ne 'https' -or $ApiBaseUrl.UserInfo -or $ApiBaseUrl.Quer
 
 $taskName = 'DAJA Local Image Worker'
 $installDir = Join-Path $env:ProgramData 'DajaImageWorker'
-$node = (Get-Command node.exe -CommandType Application).Source
+$runtime = Join-Path $PSScriptRoot 'runtime'
+$bundledNode = Test-Path -LiteralPath (Join-Path $runtime 'node.exe') -PathType Leaf
+$node = if ($bundledNode) { Join-Path $installDir 'runtime\node.exe' }
+    else { (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source }
 $program = Join-Path $PSScriptRoot 'worker.mjs'
 $dependencies = Join-Path $PSScriptRoot 'node_modules'
 $studio = Join-Path $PSScriptRoot 'DAJA Studio.exe'
@@ -46,6 +49,7 @@ New-Item -ItemType Directory -Path $installDir | Out-Null
 Set-Acl -LiteralPath $installDir -AclObject $acl
 Copy-Item -LiteralPath $program -Destination $installDir
 Copy-Item -LiteralPath $dependencies -Destination $installDir -Recurse
+if ($bundledNode) { Copy-Item -LiteralPath $runtime -Destination $installDir -Recurse }
 $configPath = Join-Path $installDir 'worker.json'
 @{ apiBaseUrl = $ApiBaseUrl.AbsoluteUri; token = $token; checkLinkel = $CheckLinkel.IsPresent; checkStilius = $CheckStilius.IsPresent } | ConvertTo-Json |
     Set-Content -LiteralPath $configPath -Encoding ASCII
@@ -99,6 +103,9 @@ $service = $serviceSid.Translate([System.Security.Principal.NTAccount]).Value
 $principal = New-ScheduledTaskPrincipal -UserId $service -LogonType ServiceAccount
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
 Start-ScheduledTask -TaskName $taskName
+Write-Host 'DAJA worker je pokrenut i Windows će ga pokretati pri paljenju.'
+if ($WorkerOnly) { return }
+
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'DAJA Studio.lnk'
 $startupFolder = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
 $startupShortcut = Join-Path $startupFolder 'DAJA Studio.lnk'
@@ -112,5 +119,4 @@ foreach ($shortcutPath in @($desktopShortcut, $startupShortcut)) {
     $shortcut.Save()
 }
 Start-Process -FilePath $studio -WorkingDirectory $PSScriptRoot
-Write-Host 'DAJA worker je pokrenut i Windows će ga pokretati pri paljenju.'
 Write-Host 'DAJA Studio je otvoren; prečica je na radnoj površini, a ikonica se pokreće pri prijavi.'

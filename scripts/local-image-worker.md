@@ -1,5 +1,13 @@
 # DAJA lokalni worker za slike
 
+## Instalacija kompletnog DAJA Studio paketa
+
+Na Windows x64 računaru raspakuj ceo ZIP. Klikni desnim tasterom na **Instaliraj DAJA Studio.cmd** i izaberi **Run as administrator** ako worker radi kao sistemski zadatak ili prvi put instaliraš Studio. Kod postojeće korisničke instalacije dovoljan je dvoklik. Pokreni instalater sa Windows naloga sa kojeg koristiš Studio.
+
+Paket uključuje DAJA Studio, obradu slika, Linkel, Stilius i Node.js. Na postojećoj instalaciji zadržava ključ, API adresu i režim pokretanja. Kod prve instalacije unesi ključ za worker kada se pojavi upit. Sistemski worker se pokreće pri paljenju, a Studio pri prijavi u Windows. Na radnoj površini se pojavljuje prečica **DAJA Studio**.
+
+Za Stilius mora da bude instaliran Microsoft Edge ili Google Chrome. Za sistemski worker koristi pregledač instaliran za sve korisnike.
+
 ## Stilius na postojećem računaru
 
 Raspakuj ceo paket i pokreni **Instaliraj Stilius.cmd**. Ako DAJA radi kao sistemski zadatak, pokreni ga kao administrator. Paket preuzima postojeći ključ, podešavanja i način pokretanja iz lokalne instalacije. Potreban je instaliran Microsoft Edge ili Google Chrome.
