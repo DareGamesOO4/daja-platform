@@ -1185,13 +1185,14 @@ export class StorefrontRepository {
       supplierChecks: row.supplier_checks, statusChangedAt: row.status_changed_at }));
   }
 
-  async getOrder(input: { organizationId: string; orderIdOrDisplayId: string; customerId?: string }) {
+  async getOrder(input: { organizationId: string; orderIdOrDisplayId: string; customerId?: string; guestOnly?: boolean }) {
     const result = await this.client.query<OrderRow>(
       `SELECT * FROM orders
        WHERE organization_id = $1 AND (id::text = $2 OR display_id = $2) AND deleted_at IS NULL
          AND ($3::uuid IS NULL OR customer_id = $3)
+         AND (NOT $4::boolean OR customer_id IS NULL)
        LIMIT 1`,
-      [input.organizationId, input.orderIdOrDisplayId, input.customerId ?? null]
+      [input.organizationId, input.orderIdOrDisplayId, input.customerId ?? null, input.guestOnly === true]
     );
     return serializeOrder(requireRow(result));
   }

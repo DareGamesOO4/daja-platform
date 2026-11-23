@@ -348,6 +348,7 @@ export class CatalogRepository {
                'linkId', pm.id,
                'mediaId', pm.media_asset_id,
                'url', ma.public_url,
+               'width', ma.width,
                'thumb', COALESCE(thumb.public_url, ma.public_url),
                'sources', thumb.sources,
                'role', pm.role,
@@ -822,6 +823,7 @@ export interface PublicProductCard {
 }
 
 export interface PublicProductImage {
+  width?: number | null;
   sources?: Array<{ url: string; width: number }>;
   url: string;
   thumb: string | null;

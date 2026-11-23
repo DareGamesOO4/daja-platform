@@ -29,7 +29,7 @@ export class HealthController {
       await this.pending;
     }
     if (!this.healthy) throw new ServiceUnavailableException('Service dependencies are not ready');
-    return { status: 'ok', checks: { postgres: 'ok', redis: 'ok' } };
+    return { status: 'ok', checks: { postgres: 'ok', redis: 'ok' }, checkoutAttempts: true };
   }
 
   private async checkDependencies(): Promise<boolean> {

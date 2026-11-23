@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
 import {
   MediaRepository, R2MediaStorageAdapter, StorefrontRepository, TransactionManager,
-  productMediaVariantKeys, resolveMediaFailures, sha256, type Database, type MediaAssetRow
+  productMediaVariantKeys, recordMediaFailure, resolveMediaFailures, sha256, type Database, type MediaAssetRow
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
 import { AppError, AuthenticationRequiredError, ValidationFailedError } from '@daja/security';
@@ -35,6 +35,12 @@ const completeSchema = z.object({
     sha256: z.string().regex(/^[a-f0-9]{64}$/)
   })).length(4)
 }).refine(value => new Set(value.files.map(file => file.variant)).size === variants.length);
+
+const failureSchema = z.object({
+  id: z.uuid(),
+  leaseToken: z.uuid(),
+  reason: z.enum(['deferred', 'processing_failed'])
+});
 
 type Job = { media_asset_id: string; source_key: string; source_checksum: string; lease_until: Date; asset: MediaAssetRow };
 type VerifiedFile = Awaited<ReturnType<typeof inspectLocalMediaSource>> & {
@@ -245,7 +251,11 @@ export class LocalMediaWorkerController {
     const [source, ...uploads] = await Promise.all([
       storage.createPresignedGet({ key: job.source_key }),
       ...variants.map(variant => storage.createWorkerUpload(job.keys[variant], mime(variant)))
-    ] as const);
+    ] as const).catch(async error => {
+      // The worker has not received the lease yet and cannot release it itself.
+      await this.releaseFailedJob(organizationId, job.media_asset_id, token, true).catch(() => undefined);
+      throw error;
+    });
     response.status(200);
     return {
       id: job.media_asset_id, leaseToken: token, expiresAt: job.lease_until.toISOString(), customSizes: true,
@@ -256,6 +266,44 @@ export class LocalMediaWorkerController {
       source: { url: source.downloadUrl, sha256: job.source_checksum },
       uploads: Object.fromEntries(variants.map((variant, index) => [variant, uploads[index]]))
     };
+  }
+
+  @Post('fail')
+  @Throttle({ default: { limit: 12, ttl: 60_000 } })
+  async fail(@Req() request: Request, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {
+    const organizationId = this.authenticate(request);
+    const parsed = failureSchema.safeParse(body);
+    if (!parsed.success) throw new ValidationFailedError('Invalid worker failure report');
+    const { id, leaseToken, reason } = parsed.data;
+    await this.releaseFailedJob(organizationId, id, leaseToken, reason === 'deferred');
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(204);
+  }
+
+  private async releaseFailedJob(organizationId: string, id: string, leaseToken: string, deferred: boolean) {
+    await new TransactionManager(this.db.pool, this.logger).run(async client => {
+      // Match the asset-before-job lock order used while completing an image.
+      const asset = await client.query(
+        "SELECT id FROM media_assets WHERE organization_id=$1 AND id=$2 AND status='ready' AND deleted_at IS NULL FOR UPDATE",
+        [organizationId, id]
+      );
+      if (!asset.rowCount) return;
+      const updated = await client.query(
+        `UPDATE media_derivative_jobs j SET lease_until=NULL,lease_token=NULL,lease_worker=NULL,
+           available_at=now()+(CASE WHEN $4 THEN 30 ELSE least(3600,30*(1 << least(attempts,7))) END)*interval '1 second',
+           attempts=CASE WHEN $4 THEN greatest(attempts-1,0) ELSE attempts END,
+           last_error_code=CASE WHEN $4 THEN last_error_code ELSE 'IMAGE_PROCESSING_FAILED' END,
+           last_error_at=CASE WHEN $4 THEN last_error_at ELSE now() END
+         WHERE j.organization_id=$1 AND j.media_asset_id=$2 AND j.local_worker
+           AND j.lease_token=$3 AND j.lease_worker='pc' AND j.lease_until>now()
+           AND EXISTS (SELECT 1 FROM media_assets a WHERE a.organization_id=$1 AND a.id=$2 AND a.storage_key=j.avif_main_key)`,
+        [organizationId, id, leaseToken, deferred]
+      );
+      if (updated.rowCount && !deferred) {
+        await recordMediaFailure(client, organizationId, id, 'overnight',
+          new AppError('IMAGE_PROCESSING_FAILED', 'Studio image processing failed', 500), leaseToken);
+      }
+    });
   }
 
   @Post('complete')

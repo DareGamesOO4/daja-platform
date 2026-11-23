@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import {
   Body,
   Controller,
@@ -17,9 +17,9 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
-import { StorefrontRepository, TransactionManager, type Database } from '@daja/database';
+import { StorefrontRepository, TransactionManager, type CustomerPrincipal, type Database, type DbClient } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission, ValidationFailedError, signJwt, verifyJwt } from '@daja/security';
+import { AppError, requirePermission, ValidationFailedError, signJwt, verifyJwt } from '@daja/security';
 import { browserRequest } from './runtime/edge-ingress.js';
 import { beginBrowserOAuth, beginBrowserPhone, readBrowserPhone, clearBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
@@ -32,6 +32,7 @@ import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
+import { checkoutCredentials, checkoutRequestHash, StorefrontCheckoutAttempt } from './storefront-checkout-attempt.js';
 import { WishlistAlertService } from './wishlist-alert.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
@@ -110,6 +111,16 @@ const cartSchema = z.object({
 const wishlistSchema = z.object({
   item: z.record(z.string(), z.unknown())
 });
+
+// The compatibility route and the new checkout route share the same submission limit.
+const storefrontOrderThrottle = {
+  default: {
+    limit: 5,
+    ttl: 60_000,
+    generateKey: (_context: unknown, tracker: string) =>
+      createHash('sha256').update('storefront-order:' + tracker).digest('hex')
+  }
+};
 
 const orderSchema = z.object({
   note: z.string().trim().max(200).optional(),
@@ -632,7 +643,7 @@ export class StorefrontOrdersController {
   ) {}
 
   @Post('orders')
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(storefrontOrderThrottle)
   async createOrder(@Req() request: Request, @Body() body: unknown) {
     const token = bearerToken(request);
     const customer = token
@@ -640,64 +651,134 @@ export class StorefrontOrdersController {
       : null;
     const input = parseWithSchema(orderSchema, body);
     const organizationId = publicOrganizationId(this.config);
-    const order = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const cart = await this.promotions.priceCart(organizationId, input.items, client);
-      const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, cart.items, client);
-      const promotion = await this.promotions.resolve(
-        {
-          organizationId,
-          customer,
-          code: input.promoCode,
-          items: cart.items,
-          shippingMethod: input.shippingMethod,
-          paymentMethod: input.paymentMethod
-        },
-        client,
-        true,
-        cart.lines
-      );
-      const subtotalMinor = cart.subtotalMinor;
-      const discountedSubtotalMinor = Math.max(0, subtotalMinor - promotion.discountAmountMinor);
-      const shippingMinor = input.shippingMethod === 'pickup' || promotion.freeShipping ||
-        discountedSubtotalMinor >= amountMinor(this.config.STOREFRONT_FREE_SHIPPING_THRESHOLD_RSD)
-        ? 0
-        : amountMinor(this.config.STOREFRONT_SHIPPING_COST_RSD);
-      const totalMinor = discountedSubtotalMinor + shippingMinor;
-      if (!Number.isSafeInteger(totalMinor) || totalMinor > 2_147_483_647) {
-        throw new ValidationFailedError('Iznos porudžbine je van dozvoljenog opsega.');
+    const order = await new TransactionManager(this.database.pool, this.logger).run(
+      client => this.placeOrder(client, organizationId, customer, input)
+    );
+    this.publishOrderCreated(organizationId, order);
+    return this.orderReceipt(order, organizationId, !customer);
+  }
+
+  @Post('orders/attempt')
+  @Throttle(storefrontOrderThrottle)
+  async createOrderAttempt(@Req() request: Request, @Body() body: unknown) {
+    const credentials = checkoutCredentials(request);
+    const organizationId = publicOrganizationId(this.config);
+    const customer = await this.checkoutCustomer(request, organizationId);
+    const input = parseWithSchema(orderSchema, body);
+    const requestHash = checkoutRequestHash(this.config.JWT_ACCESS_SECRET, {
+      customer: input.customer,
+      note: input.note ?? '',
+      promoCode: input.promoCode?.toUpperCase() ?? null,
+      shippingMethod: input.shippingMethod,
+      paymentMethod: input.paymentMethod,
+      items: input.items.map(item => ({
+        productId: item.productId ?? item.id ?? null,
+        variantId: item.variantId ?? null,
+        quantity: Number(item.qty ?? item.quantity ?? 1),
+        engraving: item.engraving ?? null
+      }))
+    });
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const attempt = new StorefrontCheckoutAttempt(client, organizationId, credentials, customer?.customerId ?? null);
+      if (!await attempt.claim(requestHash)) {
+        const receipt = await attempt.receipt(requestHash);
+        if (!receipt) throw new AppError('CHECKOUT_ATTEMPT_UNAVAILABLE', 'Checkout attempt not ready', 409);
+        return { ...receipt, created: false };
       }
-      const created = await new StorefrontRepository(client).createOrder(organizationId, {
-        customerId: customer?.customerId ?? null,
-        customer: input.customer,
-        ...(input.note !== undefined ? { note: input.note } : {}),
-        items: frozenItems,
-        subtotalAmount: subtotalMinor,
-        discountAmount: promotion.discountAmountMinor,
-        shippingAmount: shippingMinor,
-        totalAmount: totalMinor,
-        promoCode: promotion.code,
+      const order = await this.placeOrder(client, organizationId, customer, input);
+      await attempt.finish(order.docId);
+      return { order, guest: !customer, created: true };
+    });
+    if (result.created) this.publishOrderCreated(organizationId, result.order);
+    return this.orderReceipt(result.order, organizationId, result.guest);
+  }
+
+  @Get('orders/attempt')
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  async recoverOrderAttempt(@Req() request: Request) {
+    const credentials = checkoutCredentials(request);
+    const organizationId = publicOrganizationId(this.config);
+    const customer = await this.checkoutCustomer(request, organizationId);
+    const attempt = new StorefrontCheckoutAttempt(this.database.pool, organizationId, credentials, customer?.customerId ?? null);
+    const receipt = await attempt.receipt();
+    return { order: receipt ? this.orderReceipt(receipt.order, organizationId, receipt.guest) : null };
+  }
+
+  private async checkoutCustomer(request: Request, organizationId: string) {
+    const token = bearerToken(request);
+    const customer = token ? await this.auth.authenticateAccessToken(token) : null;
+    if (customer && customer.organizationId !== organizationId) {
+      throw new AppError('CHECKOUT_ATTEMPT_ACCESS_DENIED', 'Checkout attempt access denied', 403);
+    }
+    return customer;
+  }
+
+  private async placeOrder(client: DbClient, organizationId: string, customer: CustomerPrincipal | null, input: z.infer<typeof orderSchema>) {
+    const cart = await this.promotions.priceCart(organizationId, input.items, client);
+    const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, cart.items, client);
+    const promotion = await this.promotions.resolve(
+      {
+        organizationId,
+        customer,
+        code: input.promoCode,
+        items: cart.items,
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
-      });
-      await this.promotions.consume(
-        {
-          organizationId,
-          resolution: promotion,
-          customer,
-          orderId: created.docId
-        },
-        client
-      );
-      await this.orderEmail.sendOrderCreated(created, client);
-      await this.orderWhatsApp.enqueue(client, organizationId, created.docId);
-      return created;
+      },
+      client,
+      true,
+      cart.lines
+    );
+    const subtotalMinor = cart.subtotalMinor;
+    const discountedSubtotalMinor = Math.max(0, subtotalMinor - promotion.discountAmountMinor);
+    const shippingMinor = input.shippingMethod === 'pickup' || promotion.freeShipping ||
+      discountedSubtotalMinor >= amountMinor(this.config.STOREFRONT_FREE_SHIPPING_THRESHOLD_RSD)
+      ? 0
+      : amountMinor(this.config.STOREFRONT_SHIPPING_COST_RSD);
+    const totalMinor = discountedSubtotalMinor + shippingMinor;
+    if (!Number.isSafeInteger(totalMinor) || totalMinor > 2_147_483_647) {
+      throw new ValidationFailedError('Iznos porudžbine je van dozvoljenog opsega.');
+    }
+    const created = await new StorefrontRepository(client).createOrder(organizationId, {
+      customerId: customer?.customerId ?? null,
+      customer: input.customer,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      items: frozenItems,
+      subtotalAmount: subtotalMinor,
+      discountAmount: promotion.discountAmountMinor,
+      shippingAmount: shippingMinor,
+      totalAmount: totalMinor,
+      promoCode: promotion.code,
+      shippingMethod: input.shippingMethod,
+      paymentMethod: input.paymentMethod
     });
-    this.realtime.publish({
-      organizationId: publicOrganizationId(this.config),
-      event: 'orders.created',
-      payload: { orderId: order.id, displayId: order.displayId }
-    });
-    return { ...order, emailStatus: 'queued', ...(!customer ? { claimToken: signJwt({ sub: order.docId, org: organizationId, typ: 'access', jti: randomUUID(), purpose: 'order-claim' }, createHmac('sha256', this.config.JWT_ACCESS_SECRET).update('order-claim').digest('hex'), 3600) } : {}) };
+    await this.promotions.consume(
+      {
+        organizationId,
+        resolution: promotion,
+        customer,
+        orderId: created.docId
+      },
+      client
+    );
+    await this.orderEmail.sendOrderCreated(created, client);
+    await this.orderWhatsApp.enqueue(client, organizationId, created.docId);
+    return created;
+  }
+
+  private publishOrderCreated(organizationId: string, order: { id: string; displayId: string }) {
+    this.realtime.publish({ organizationId, event: 'orders.created', payload: { orderId: order.id, displayId: order.displayId } });
+  }
+
+  private orderReceipt<T extends { docId: string }>(order: T, organizationId: string, guest: boolean) {
+    return {
+      ...order,
+      emailStatus: 'queued',
+      ...(guest ? { claimToken: signJwt(
+        { sub: order.docId, org: organizationId, typ: 'access', jti: randomUUID(), purpose: 'order-claim' },
+        createHmac('sha256', this.config.JWT_ACCESS_SECRET).update('order-claim').digest('hex'), 3600
+      ) } : {})
+    };
   }
 
   @Post('orders/:id/claim')

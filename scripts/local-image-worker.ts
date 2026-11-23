@@ -100,7 +100,7 @@ function runEncoderChild() {
 }
 
 class HttpFailure extends Error {
-  constructor(service: string, readonly status: number) {
+  constructor(service: string, readonly status: number, readonly code?: string) {
     super(service + ' je vratio HTTP ' + status + '.');
   }
 }
@@ -137,8 +137,14 @@ async function api(config: Config, route: string, payload: unknown, signal: Abor
     signal: AbortSignal.any([signal, AbortSignal.timeout(route === 'complete' ? 65_000 : 15_000)])
   });
   if (!response.ok) {
-    await response.body?.cancel();
-    throw new HttpFailure('DAJA API', response.status);
+    let code: string | undefined;
+    if (route === 'complete' && response.headers.get('content-type')?.includes('application/json')) {
+      const body = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+      if (body?.error?.code === 'IMAGE_PROCESSING_BUSY') code = body.error.code;
+    } else {
+      await response.body?.cancel();
+    }
+    throw new HttpFailure('DAJA API', response.status, code);
   }
   return response;
 }
@@ -281,6 +287,7 @@ async function work(configPath: string, statusPath?: string) {
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     let jobClaimed = false;
+    let currentClaim: z.infer<typeof claimSchema> | undefined;
     let requestingClaim = false;
     try {
       let pauseState: { until?: string | null; paused?: boolean } = {};
@@ -306,6 +313,7 @@ async function work(configPath: string, statusPath?: string) {
         jobClaimed = true;
         const payload = await response.json() as { data?: unknown };
         const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
+        currentClaim = claim;
         Object.assign(status, { phase: 'working', job: claim.id, productSlug: claim.productSlug, imageIndex: claim.imageIndex,
           sourceWidth: claim.sourceWidth, sourceHeight: claim.sourceHeight, progress: 5, error: '', activity: 'Preuzimanje originala' });
         await publishStatus();
@@ -340,10 +348,26 @@ async function work(configPath: string, statusPath?: string) {
         pause = Math.min(60_000, claimErrorDelay + Math.floor(Math.random() * 1_000));
         claimErrorDelay = Math.min(60_000, claimErrorDelay * 2);
       }
-      console.error(reason + ' Novi pokušaj za ' + Math.ceil(pause / 1_000) + ' sekundi.');
-      imageError = reason;
-      imageJobFailed ||= jobClaimed;
-      Object.assign(status, { phase: 'error', job: '', progress: 0, activity: '', error: reason });
+      const deferred = error instanceof HttpFailure &&
+        (error.code === 'IMAGE_PROCESSING_BUSY' || (error.status === 429 && error.message.startsWith('DAJA API')));
+      if (currentClaim) {
+        const reported = await api(config, 'fail', {
+          id: currentClaim.id,
+          leaseToken: currentClaim.leaseToken,
+          reason: deferred ? 'deferred' : 'processing_failed'
+        }, shutdown.signal).catch(() => null);
+        if (reported?.status === 204) pause = 0;
+      }
+      if (pause === 0) {
+        console.error(reason + ' Red može da nastavi.');
+      } else {
+        console.error(reason + ' Novi pokušaj za ' + Math.ceil(pause / 1_000) + ' sekundi.');
+      }
+      if (!deferred) {
+        imageError = reason;
+        imageJobFailed ||= jobClaimed;
+      }
+      Object.assign(status, { phase: deferred ? 'ready' : 'error', job: '', progress: 0, activity: '', error: deferred ? '' : reason });
     }
     await publishStatus();
     await delay(pause, undefined, { signal: shutdown.signal }).catch(() => {});

@@ -572,7 +572,10 @@ async function finishLink(
       await client.query(
         `UPDATE supplier_product_links SET check_status='available',stock_status=$2,price_amount=$3,price_currency=$4,
         negative_count=0,missing_count=0,first_problem_at=NULL,first_problem_reason=NULL,confirmation_due_at=NULL,
-        last_error=NULL,last_checked_at=now(),last_seen_at=now(),last_good_result=$5::jsonb WHERE id=$1`,
+        last_error=NULL,last_checked_at=now(),last_seen_at=now(),
+        last_good_result=$5::jsonb||jsonb_build_object('stockCheckedAt',
+          CASE WHEN $2::text IS NOT NULL THEN to_jsonb(now()) ELSE last_good_result->'stockCheckedAt' END)
+        WHERE id=$1`,
         [
           row.id,
           outcome.stockStatus,
@@ -726,6 +729,7 @@ async function finishLegacy(
             THEN CASE WHEN l.negative_count>0 AND l.confirmation_due_at>now()
               THEN l.confirmation_due_at ELSE now()+interval '24 hours' END END,
           last_good_result=jsonb_build_object('checkedAt',now(),'stockStatus',COALESCE($6,l.stock_status),
+            'stockCheckedAt',CASE WHEN $6 IS NOT NULL THEN to_jsonb(now()) ELSE l.last_good_result->'stockCheckedAt' END,
             'priceAmount',COALESCE($3,l.price_amount),
             'priceCurrency',CASE WHEN $3 IS NULL THEN l.price_currency ELSE $4 END,
             'regularPrice',$3 IS NOT NULL OR COALESCE(l.last_good_result->'regularPrice' = 'true'::jsonb,false))
@@ -738,7 +742,10 @@ async function finishLegacy(
       await client.query(
         `UPDATE supplier_product_links SET check_status='available',stock_status=$2,price_amount=$3,price_currency=$4,
         missing_count=0,last_checked_at=now(),last_seen_at=now(),last_error=NULL,next_check_at=$5,confirmation_due_at=NULL,
-        first_problem_at=NULL,first_problem_reason=NULL,last_good_result=$6::jsonb WHERE id=$1`,
+        first_problem_at=NULL,first_problem_reason=NULL,
+        last_good_result=$6::jsonb||jsonb_build_object('stockCheckedAt',
+          CASE WHEN $2::text IS NOT NULL THEN to_jsonb(now()) ELSE last_good_result->'stockCheckedAt' END)
+        WHERE id=$1`,
         [
           row.id,
           outcome.stockStatus,
