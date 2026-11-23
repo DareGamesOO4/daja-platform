@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { invalidatePublicCatalogCache, productCacheEpoch, productCacheKey } from './public-catalog-cache.js';
 import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import type pg from 'pg';
@@ -71,14 +73,58 @@ export class CatalogDeliveryService implements OnModuleInit, OnModuleDestroy {
       this.timer.unref();
     }
   }
-  async invalidateKeys(keys: string[]) {
+  private connectCache() {
     if (this.cache.status === 'wait' || this.cache.status === 'end') {
       this.connecting ??= this.cache.connect().finally(() => {
         this.connecting = undefined;
       });
     }
-    if (this.connecting) await this.connecting;
-    await this.cache.del(...keys);
+    return this.connecting;
+  }
+
+  async readPublicProductCache(key: string, epoch: string): Promise<[string | null, string | null] | null> {
+    if (this.cache.status !== 'ready') {
+      void this.connectCache()?.catch(() => {});
+      return null;
+    }
+    return new Promise(resolve => {
+      const timer = setTimeout(() => resolve(null), 150);
+      void this.cache.mget(key, epoch).then(values => {
+        clearTimeout(timer);
+        resolve([values[0] ?? null, values[1] ?? null]);
+      }, () => {
+        clearTimeout(timer);
+        resolve(null);
+      });
+    });
+  }
+
+  rememberPublicProductCache(key: string, epoch: string, revision: string | null, ttl: number, value: string) {
+    if (this.cache.status !== 'ready') return;
+    void this.cache.eval(
+      "if (redis.call('GET', KEYS[2]) or '') == ARGV[1] and redis.call('EXISTS', KEYS[1]) == 0 then return redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[3]) end",
+      2, key, epoch, revision ?? '', ttl, value
+    ).catch(() => {});
+  }
+
+  async invalidateKeys(keys: string[]) {
+    const products = keys.flatMap(key => {
+      const match = /^catalog:slug:public-v4:([^:]+):(.+)$/.exec(key);
+      return match?.[1] && match[2] ? [{ org: match[1], slug: match[2] }] : [];
+    });
+    const organizations = new Set(products.map(product => product.org));
+    for (const org of organizations) invalidatePublicCatalogCache(org);
+    const connecting = this.connectCache();
+    if (connecting) await connecting;
+    if (!products.length) {
+      await this.cache.del(...keys);
+      return;
+    }
+    const transaction = this.cache.multi();
+    for (const org of organizations) transaction.set(productCacheEpoch(org), randomUUID(), 'EX', 600);
+    transaction.del(...keys, ...products.map(product => productCacheKey(product.org, product.slug)));
+    const results = await transaction.exec();
+    if (!results || results.some(([error]) => error)) throw new Error('Public cache invalidation failed');
   }
   async refreshProductReviews(organizationId: string, productId: string) {
     // Review writes have already succeeded. Cache failure must not make the

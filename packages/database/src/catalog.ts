@@ -194,7 +194,10 @@ export class CatalogRepository {
               v.current_price_amount AS regular_price,
               COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,
               active_sale.amount_minor AS sale_price,
-              active_sale.valid_until AS sale_valid_until, v.currency,
+              active_sale.valid_until AS sale_valid_until,
+              (SELECT MIN(vp.valid_from) FROM variant_prices vp
+               WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+                 AND vp.price_type = 'sale' AND vp.cancelled_at IS NULL AND vp.valid_from > now()) AS next_sale_starts_at, v.currency,
               COALESCE(inv.quantity, 0) AS available_quantity,
               COALESCE(media.items, '[]'::jsonb) AS images,
               media.primary_image_url,
@@ -284,6 +287,9 @@ export class CatalogRepository {
               COALESCE(active_sale.amount_minor, v.current_price_amount) AS price,
               active_sale.amount_minor AS "salePrice",
               active_sale.valid_until AS "saleValidUntil",
+              (SELECT MIN(vp.valid_from) FROM variant_prices vp
+               WHERE vp.organization_id = p.organization_id AND vp.variant_id = v.id
+                 AND vp.price_type = 'sale' AND vp.cancelled_at IS NULL AND vp.valid_from > now()) AS "nextSaleStartsAt",
               COALESCE(inventory.quantity, 0) AS "availableQuantity",
               (COALESCE(inventory.quantity, 0) > 0) AS "inStock",
               jsonb_build_object(
@@ -815,6 +821,7 @@ export interface PublicProductCard {
   price: number;
   salePrice: number | null;
   saleValidUntil: string | null;
+  nextSaleStartsAt: string | null;
   currency: string;
   availability: { inStock: boolean; availableQuantity: number };
   images: PublicProductImage[];
@@ -853,6 +860,7 @@ interface PublicProductRow {
   regular_price: number;
   sale_price: number | null;
   sale_valid_until: Date | null;
+  next_sale_starts_at: Date | null;
   currency: string;
   available_quantity: number | null;
   images: PublicProductImage[];
@@ -978,6 +986,7 @@ function mapPublicProduct(row: PublicProductRow): PublicProductCard {
     price: row.regular_price,
     salePrice: row.sale_price === null ? null : row.price,
     saleValidUntil: row.sale_valid_until?.toISOString() ?? null,
+    nextSaleStartsAt: row.next_sale_starts_at?.toISOString() ?? null,
     currency: row.currency,
     availability: { inStock: availableQuantity > 0, availableQuantity },
     images: row.images,

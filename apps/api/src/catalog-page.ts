@@ -1,3 +1,4 @@
+import { invalidatePublicCatalogCache } from './public-catalog-cache.js';
 import { catalogLandings, catalogLanding, matchesLanding, withWatchSeries } from './catalog-landings.js';
 import { catalogUrlSlug, publicListingParams } from './catalog-page-params.js';
 import { createHash } from 'node:crypto';
@@ -151,6 +152,7 @@ function indexedOptionMatches(data: Snapshot, product: Product, option: Option):
 const snapshots = new Map<string, { pool: Pool; expires: number; promise: Promise<Snapshot> }>();
 const SNAPSHOT_TTL = 60_000;
 export function invalidateCatalogPages(organizationId: string) {
+  invalidatePublicCatalogCache(organizationId);
   for (const key of snapshots.keys()) if (key.startsWith(`${organizationId}:`)) snapshots.delete(key);
 }
 async function loadSnapshot(pool: Pool, organizationId: string, department: string, includeHidden: boolean): Promise<Snapshot> {

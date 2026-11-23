@@ -126,6 +126,7 @@ const orderSchema = z.object({
   note: z.string().trim().max(200).optional(),
   customer: z.record(z.string(), z.unknown()),
   items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
+  confirmCatalogPrice: z.literal(true).optional(),
   subtotal: z.coerce.number().min(0),
   discountAmount: z.coerce.number().min(0).default(0),
   shippingCost: z.coerce.number().min(0).default(0),
@@ -713,8 +714,43 @@ export class StorefrontOrdersController {
     return customer;
   }
 
+  private async confirmSelectableBatteryStock(client: DbClient, organizationId: string,
+    lines: Awaited<ReturnType<PromotionsService['priceCart']>>['lines']) {
+    const expected = new Map<string, number>();
+    for (const line of lines) {
+      const packaging = (line.attributes._catalog_import as { packaging?: {
+        schemaVersion?: number; quantity?: number; selectableQuantities?: number[];
+      } } | undefined)?.packaging;
+      if (packaging?.schemaVersion === 1 && packaging.quantity === 1 &&
+          packaging.selectableQuantities?.length === 2 && packaging.selectableQuantities[0] === 1 &&
+          packaging.selectableQuantities[1] === 5) {
+        expected.set(line.variantId, (expected.get(line.variantId) ?? 0) + line.quantity);
+      }
+    }
+    if (!expected.size) return;
+    const { rows } = await client.query<{ variant_id: string; quantity: number }>(
+      'SELECT variant_id, SUM(quantity)::int AS quantity FROM inventory_balances WHERE organization_id=$1 AND variant_id=ANY($2::uuid[]) GROUP BY variant_id',
+      [organizationId, [...expected.keys()]]
+    );
+    const stock = new Map(rows.map(row => [row.variant_id, row.quantity]));
+    if ([...expected].some(([variant, quantity]) => (stock.get(variant) ?? 0) < quantity)) {
+      throw new AppError('CHECKOUT_STOCK_CHANGED', 'Nema dovoljno baterija na stanju za izabranu količinu.', 409);
+    }
+  }
+
   private async placeOrder(client: DbClient, organizationId: string, customer: CustomerPrincipal | null, input: z.infer<typeof orderSchema>) {
     const cart = await this.promotions.priceCart(organizationId, input.items, client);
+    if (input.confirmCatalogPrice) {
+      if (cart.items.some((item, index) => {
+        const expected = input.items[index]?.price;
+        return typeof expected !== 'number' || !Number.isFinite(expected) || expected < 0 || amountMinor(expected) !== amountMinor(item.price);
+      })) {
+        throw new AppError('CHECKOUT_PRICE_CHANGED',
+          'Cena u korpi je promenjena. Proverite novi iznos i ponovo potvrdite porudžbinu.', 409,
+          { prices: cart.items.map(item => item.price) });
+      }
+      await this.confirmSelectableBatteryStock(client, organizationId, cart.lines);
+    }
     const frozenItems = await this.engraving.freezeItems(organizationId, customer?.customerId ?? null, cart.items, client);
     const promotion = await this.promotions.resolve(
       {

@@ -10,7 +10,6 @@ import {
   MediaRepository,
   OutboxRepository,
   R2MediaStorageAdapter,
-  type RedisConnection,
   SyncRepository,
   TransactionManager,
   type Database
@@ -18,11 +17,12 @@ import {
 import type { Logger } from '@daja/observability';
 import { requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
-import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
+import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { requireScopedPermission } from './access-policy.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { RealtimeGateway } from './realtime.gateway.js';
+import { CatalogDeliveryService } from './catalog-delivery.service.js';
 
 const deviceRegisterSchema = z.object({
   deviceKey: z.string().trim().min(8).max(240),
@@ -69,7 +69,7 @@ export class SyncController {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(LOGGER) private readonly logger: Logger,
-    @Inject(REDIS) private readonly redis: RedisConnection,
+    @Inject(CatalogDeliveryService) private readonly catalogDelivery: CatalogDeliveryService,
     @Inject(CONFIG) private readonly config: AppConfig,
     private readonly realtime: RealtimeGateway
   ) {}
@@ -233,7 +233,14 @@ export class SyncController {
     );
     const slugs = products.rows.map((product) => product.slug);
     if (slugs.length === 0) return;
-    await this.redis.client.del(...slugs.map((slug) => `catalog:slug:${organizationId}:${slug}`));
+    try {
+      await this.catalogDelivery.invalidateKeys([...new Set(slugs)].flatMap(slug => [
+        'catalog:slug:' + organizationId + ':' + slug,
+        'catalog:slug:public-v4:' + organizationId + ':' + slug,
+      ]));
+    } catch (error) {
+      this.logger.warn({ err: error }, 'Synced product cache will refresh at expiry');
+    }
     for (const product of products.rows) {
       this.realtime.publish({
         organizationId,

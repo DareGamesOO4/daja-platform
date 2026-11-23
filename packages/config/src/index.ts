@@ -8,6 +8,7 @@ const envSchema = z.object({
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
   EDGE_SHARED_SECRET: z.string().default(''),
   EDGE_ENFORCEMENT: z.enum(['off', 'observe', 'enforce']).default('off'),
+  PUBLIC_CATALOG_CACHE_V2: z.enum(['true', 'false']).default('true').transform(value => value === 'true'),
   BROWSER_SESSIONS_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   DATABASE_URL: z.string().url(),
   MIGRATION_DATABASE_URL: optionalPreparedSecret,

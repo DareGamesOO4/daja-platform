@@ -63,6 +63,7 @@ import {
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
 import { catalogPageSchema, catalogPreparationSchema, prepareCatalogPages, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
+import { bypassCatalogCache, catalogEntry, productCacheEpoch, productCacheKey, publicCatalogResponse, readPublicCatalog, replyCatalog } from './public-catalog-cache.js';
 import { PublicBrandCacheService } from './public-brand-cache.service.js';
 import { resolvePublicRequestContext, resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
@@ -283,7 +284,7 @@ export class PublicCatalogController {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(REDIS) private readonly redis: RedisConnection,
+    @Inject(CatalogDeliveryService) private readonly catalogDelivery: CatalogDeliveryService,
     @Inject(LOGGER) private readonly logger: Logger,
     private readonly brandCache: PublicBrandCacheService
   ) {}
@@ -308,8 +309,10 @@ export class PublicCatalogController {
   }
 
   @Get('collections')
-  async collections(@Req() request: Request) {
-    return publicCollectionPreviews(this.database.pool, this.publicContext(request).organizationId);
+  async collections(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { organizationId } = this.publicContext(request);
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response, `${organizationId}:collections`,
+      () => publicCollectionPreviews(this.database.pool, organizationId));
   }
 
   @Get('page')
@@ -318,7 +321,14 @@ export class PublicCatalogController {
     const started = performance.now();
     const organizationId = this.publicContext(request).organizationId;
     const input = parseWithSchema(catalogPageSchema, query);
-    const cached = this.brandCache.get(organizationId, input);
+    const admitted = input.page === 1 && input.prepareOnly !== '1' && !input.fixedGender &&
+      (!input.params || input.params === 'sort=newest') &&
+      (!input.pathname || ['/catalog', '/muski-satovi', '/zenski-satovi', '/naocare', '/baterije', '/daljinski'].includes(input.pathname));
+    if (this.config.PUBLIC_CATALOG_CACHE_V2 && admitted) {
+      return publicCatalogResponse(true, request, response, `${organizationId}:page:${JSON.stringify(input)}`,
+        () => publicCatalogPage(this.database.pool, organizationId, input));
+    }
+    const cached = bypassCatalogCache(request) ? undefined : this.brandCache.get(organizationId, input);
     const result = cached ?? await publicCatalogPage(this.database.pool, organizationId, input);
     response.setHeader('Server-Timing', `catalog;dur=${(performance.now() - started).toFixed(1)}, catalog_cache;desc="${cached ? 'hit' : 'miss'}"`);
     return result;
@@ -331,14 +341,19 @@ export class PublicCatalogController {
   }
 
   @Get('home')
-  async homeProducts(@Req() request: Request) {
-    return publicHomeProducts(this.database.pool, this.publicContext(request).organizationId);
+  async homeProducts(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { organizationId } = this.publicContext(request);
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response, `${organizationId}:home`,
+      () => publicHomeProducts(this.database.pool, organizationId));
   }
 
   @Get('hero-slides')
   async homeHeroSlides(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
     response.setHeader('Cache-Control', 'no-store');
-    return publicHomeHeroSettings(await readHomeHeroSettings(this.database.pool, this.publicContext(request).organizationId));
+    const { organizationId } = this.publicContext(request);
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response,
+      organizationId + ':hero-slides',
+      async () => publicHomeHeroSettings(await readHomeHeroSettings(this.database.pool, organizationId)));
   }
 
   @Get('products')
@@ -537,66 +552,84 @@ export class PublicCatalogController {
     const repository = new CatalogRepository(this.database.pool);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
     response.setHeader('Cache-Control', 'no-store');
-    const group = await loadPublicGroupMembers(this.database.pool, ctx.organizationId, normalizedSlug);
-    if (!group) throw new NotFoundException('Product not found');
-    const { ids, sourceId } = group;
-    if (ids.length < 2) return { items: [], groupId: null };
-    const result = await repository.listPublicProducts(ctx, { productIds: ids, limit: ids.length });
-    // Internal names and private group metadata never enter the public payload.
-    const unique = [...new Map(result.items.map(item => [item.productId, item])).values()];
-    if (unique.length < 2 || !unique.some(item => item.productId === sourceId)) return { items: [], groupId: null };
-    return { items: unique.filter(item => item.productId !== sourceId), groupId: group.groupId };
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response,
+      `${ctx.organizationId}:variants:${normalizedSlug}`, async () => {
+      const group = await loadPublicGroupMembers(this.database.pool, ctx.organizationId, normalizedSlug);
+      if (!group) throw new NotFoundException('Product not found');
+      const { ids, sourceId } = group;
+      if (ids.length < 2) return { items: [], groupId: null };
+      const result = await repository.listPublicProducts(ctx, { productIds: ids, limit: ids.length });
+      // Internal names and private group metadata never enter the public payload.
+      const unique = [...new Map(result.items.map(item => [item.productId, item])).values()];
+      if (unique.length < 2 || !unique.some(item => item.productId === sourceId)) return { items: [], groupId: null };
+      return { items: unique.filter(item => item.productId !== sourceId), groupId: group.groupId };
+    });
   }
 
   @Get('products/:slug')
   async productBySlug(
     @Req() request: Request,
     @Param('slug') slug: string,
+    @Res({ passthrough: true }) response: Response,
     @Query('realtime') realtime?: string
   ) {
     const ctx = this.publicContext(request);
     const normalizedSlug = parseWithSchema(slugSchema, slug);
-    const cacheKey = `catalog:slug:public-v4:${ctx.organizationId}:${normalizedSlug}`;
-    const cached = await this.redis.client.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as unknown;
-    }
     const repository = new CatalogRepository(this.database.pool);
-    const product = await repository.getPublicProductBySlug(ctx, normalizedSlug);
-    if (!product) {
+    const load = async () => {
+      const product = await repository.getPublicProductBySlug(ctx, normalizedSlug);
+      if (product) return product;
       const redirectTo = await repository.getPublicProductRedirect(ctx, normalizedSlug);
-      // A product can disappear between a realtime event and this refresh.
-      // That refresh is not a direct visitor navigation, so return a normal
-      // empty payload instead of making an expected race visible as a 404.
-      if (!redirectTo && realtime === '1') return null;
-      if (!redirectTo) throw new NotFoundException('Product not found');
-      // Return an absolute site path, not only a slug: both the SPA and the
-      // Pages worker can then replace/redirect without depending on the
-      // current route's relative path.
-      const redirect = { redirectTo: `/product/${redirectTo}` };
-      await this.redis.client.set(cacheKey, JSON.stringify(redirect), 'EX', 120);
-      return redirect;
+      return redirectTo ? { redirectTo: `/product/${redirectTo}` } : null;
+    };
+    const started = performance.now();
+    response.setHeader('Cache-Control', 'no-store');
+    const force = realtime === '1' || bypassCatalogCache(request);
+    if (!this.config.PUBLIC_CATALOG_CACHE_V2) {
+      const result = await load();
+      if (!result && realtime !== '1') throw new NotFoundException('Product not found');
+      return result;
     }
-    // Do not cache a sale beyond its expiry. A client refreshes only this
-    // slug at that moment and must receive the regular price immediately.
-    const saleExpiry =
-      (product as { saleValidUntil?: string | null }).saleValidUntil;
-    const expiresIn = saleExpiry ? new Date(saleExpiry).getTime() - Date.now() : Infinity;
-    const cacheSeconds = Number.isFinite(expiresIn)
-      ? Math.max(1, Math.min(120, Math.ceil(expiresIn / 1000)))
-      : 120;
-    await this.redis.client.set(cacheKey, JSON.stringify(product), 'EX', cacheSeconds);
-    return product;
+    const cacheKey = productCacheKey(ctx.organizationId, normalizedSlug);
+    const epochKey = productCacheEpoch(ctx.organizationId);
+    const result = await readPublicCatalog(`${ctx.organizationId}:product:${normalizedSlug}${force ? ':refresh' : ''}`, async current => {
+      const redisRead = force ? null : await this.catalogDelivery.readPublicProductCache(cacheKey, epochKey);
+      if (redisRead?.[0] && current()) {
+        try {
+          const entry = JSON.parse(redisRead[0]) as ReturnType<typeof catalogEntry>;
+          if (entry.freshUntil > Date.now()) return { entry, source: 'redis' };
+        } catch { /* An invalid cache entry is a miss. */ }
+      }
+      const generatedAt = Date.now();
+      const value = await load();
+      if (!value || typeof value.redirectTo === 'string') return { value };
+      const entry = catalogEntry(value, generatedAt);
+      const ttl = entry.freshUntil - Date.now();
+      if (redisRead && current() && ttl > 0) {
+        const encoded = JSON.stringify(entry);
+        if (Buffer.byteLength(encoded) <= 256 * 1024) {
+          this.catalogDelivery.rememberPublicProductCache(cacheKey, epochKey, redisRead[1], ttl, encoded);
+        }
+      }
+      return { entry, source: 'database' };
+    });
+    if (result.entry) return replyCatalog(request, response, result.entry, result.source, started);
+    if (!result.value && realtime !== '1') throw new NotFoundException('Product not found');
+    return result.value;
   }
 
   @Get('brands')
-  async brands(@Req() request: Request) {
-    return new CatalogRepository(this.database.pool).listBrands(this.publicContext(request));
+  async brands(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const ctx = this.publicContext(request);
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response, ctx.organizationId + ':brands',
+      () => new CatalogRepository(this.database.pool).listBrands(ctx), 300_000);
   }
 
   @Get('categories')
-  async categories(@Req() request: Request) {
-    return new CatalogRepository(this.database.pool).listCategories(this.publicContext(request));
+  async categories(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const ctx = this.publicContext(request);
+    return publicCatalogResponse(this.config.PUBLIC_CATALOG_CACHE_V2, request, response, ctx.organizationId + ':categories',
+      () => new CatalogRepository(this.database.pool).listCategories(ctx), 300_000);
   }
 
   private publicContext(request: Request) {
