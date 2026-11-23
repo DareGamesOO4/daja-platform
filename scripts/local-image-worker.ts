@@ -276,14 +276,18 @@ async function work(configPath: string, statusPath?: string) {
   const heartbeat = setInterval(() => void publishStatus(), 3_000);
   heartbeat.unref();
   console.log('DAJA worker čeka posao.');
+  let idleDelay = 3_000;
+  let claimErrorDelay = 15_000;
   while (!shutdown.signal.aborted) {
     let pause = 3_000;
     let jobClaimed = false;
+    let requestingClaim = false;
     try {
       let pauseState: { until?: string | null; paused?: boolean } = {};
       try { pauseState = JSON.parse(await readFile(pausePath, 'utf8')); } catch {}
       const until = pauseState.until ? Date.parse(pauseState.until) : 0;
       if (pauseState.paused || until > Date.now()) {
+        idleDelay = 3_000;
         Object.assign(status, { phase: 'local-paused', job: '', progress: 0, error: '', activity: '', pauseUntil: until > Date.now() ? new Date(until).toISOString() : null });
         await publishStatus();
         await delay(3_000, undefined, { signal: shutdown.signal }).catch(() => {});
@@ -291,9 +295,14 @@ async function work(configPath: string, statusPath?: string) {
       }
       if (pauseState.until) await writeFile(pausePath, JSON.stringify({ paused: false, until: null }));
       status.pauseUntil = null;
+      requestingClaim = true;
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
+      requestingClaim = false;
+      claimErrorDelay = 15_000;
+      const remotelyPaused = response.headers.get('X-Daja-Worker-Paused') === '1';
       if (!imageJobFailed) imageError = null;
       if (response.status !== 204) {
+        idleDelay = 3_000;
         jobClaimed = true;
         const payload = await response.json() as { data?: unknown };
         const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
@@ -310,8 +319,13 @@ async function work(configPath: string, statusPath?: string) {
         imageJobFailed = false;
         console.log('Obrađene su četiri verzije slike.');
         pause = 0;
+      } else if (remotelyPaused) {
+        idleDelay = 3_000;
+      } else {
+        pause = idleDelay;
+        idleDelay = Math.min(idleDelay * 2, 10_000);
       }
-      Object.assign(status, { phase: response.headers.get('X-Daja-Worker-Paused') === '1' ? 'paused' : 'ready', job: '', progress: 0, activity: '', error: '' });
+      Object.assign(status, { phase: remotelyPaused ? 'paused' : 'ready', job: '', progress: 0, activity: '', error: '' });
     } catch (error) {
       if (shutdown.signal.aborted) return;
       const detail = error instanceof Error
@@ -320,11 +334,16 @@ async function work(configPath: string, statusPath?: string) {
       const reason = error instanceof Error && /^(DAJA API|R2) je vratio HTTP \d+\.$/.test(error.message)
         ? error.message
         : detail;
-      console.error(reason + ' Novi pokušaj za 15 sekundi.');
+      idleDelay = 3_000;
+      pause = 15_000;
+      if (requestingClaim && (!(error instanceof HttpFailure) || error.status >= 500 || error.status === 429)) {
+        pause = Math.min(60_000, claimErrorDelay + Math.floor(Math.random() * 1_000));
+        claimErrorDelay = Math.min(60_000, claimErrorDelay * 2);
+      }
+      console.error(reason + ' Novi pokušaj za ' + Math.ceil(pause / 1_000) + ' sekundi.');
       imageError = reason;
       imageJobFailed ||= jobClaimed;
       Object.assign(status, { phase: 'error', job: '', progress: 0, activity: '', error: reason });
-      pause = 15_000;
     }
     await publishStatus();
     await delay(pause, undefined, { signal: shutdown.signal }).catch(() => {});

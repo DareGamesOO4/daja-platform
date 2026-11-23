@@ -60,8 +60,28 @@ byId('trial').onsubmit = async event => {
   } catch (error) { byId('trial-status').textContent = error.message; }
   finally { button.disabled = false; }
 };
+let refreshTimer;
+let refreshing = false;
+let refreshOnCompletion = false;
 async function refreshState() {
-  if (!document.hidden) await updateState();
-  setTimeout(refreshState, 4_000);
+  clearTimeout(refreshTimer);
+  if (document.hidden) return;
+  if (refreshing) {
+    refreshOnCompletion = true;
+    return;
+  }
+  refreshing = true;
+  try {
+    await updateState();
+  } finally {
+    refreshing = false;
+    if (refreshOnCompletion) {
+      refreshOnCompletion = false;
+      void refreshState();
+    } else if (!document.hidden) {
+      refreshTimer = setTimeout(refreshState, 4_000);
+    }
+  }
 }
+document.addEventListener('visibilitychange', refreshState);
 void refreshState();
