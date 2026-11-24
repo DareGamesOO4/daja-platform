@@ -1213,8 +1213,7 @@ export class StorefrontContentController {
     const { token } = parseWithSchema(z.object({ token: z.string().min(24).max(160) }), body);
     return new TransactionManager(this.database.pool, this.logger).run(async client => {
       const subscriber = await this.privacy.confirmNewsletter(token, client);
-      const eligible = !subscriber.welcome_queued_at &&
-        await this.privacy.nemaPrethodnihPorudzbina({ organizationId: subscriber.organization_id, email: subscriber.email }) &&
+      const eligible = await this.privacy.nemaPrethodnihPorudzbina({ organizationId: subscriber.organization_id, email: subscriber.email }) &&
         await this.promotions.welcomeCodeAvailable(subscriber.organization_id, KOD_DOBRODOSLICE);
       if (!subscriber.welcome_queued_at) {
         await this.novostiEmail.posaljiPorukuDobrodoslice({ recipient: subscriber.email,
