@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import sharp from 'sharp';
 import type { PoolClient } from 'pg';
-import type { Database } from '@daja/database';
+import type { Database, DbClient } from '@daja/database';
 import { ResourceConflictError, ResourceNotFoundError, ValidationFailedError } from '@daja/security';
 import { DATABASE } from './tokens.js';
 import { parseWithSchema } from '@daja/validation';
@@ -199,7 +199,7 @@ export class EngravingService {
     return result.rows;
   }
 
-  async freezeItems(organizationId: string, customerId: string | null, items: Array<Record<string, unknown>>, client: PoolClient) {
+  async freezeItems(organizationId: string, customerId: string | null, items: Array<Record<string, unknown>>, client: DbClient) {
     const frozen = [];
     let frozenBytes = 0;
     for (const item of items) {

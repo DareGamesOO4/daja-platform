@@ -286,6 +286,7 @@ export class PublicCatalogController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CatalogDeliveryService) private readonly catalogDelivery: CatalogDeliveryService,
     @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(REDIS) private readonly redis: RedisConnection,
     private readonly brandCache: PublicBrandCacheService
   ) {}
 
@@ -602,7 +603,7 @@ export class PublicCatalogController {
       }
       const generatedAt = Date.now();
       const value = await load();
-      if (!value || typeof value.redirectTo === 'string') return { value };
+      if (!value || ('redirectTo' in value && typeof value.redirectTo === 'string')) return { value };
       const entry = catalogEntry(value, generatedAt);
       const ttl = entry.freshUntil - Date.now();
       if (redisRead && current() && ttl > 0) {

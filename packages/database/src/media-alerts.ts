@@ -30,7 +30,7 @@ export async function recordMediaFailure(
   mediaId: string,
   phase: 'upload' | 'overnight',
   error: unknown,
-  eventKey = randomUUID()
+  eventKey: string = randomUUID()
 ) {
   const failure = mediaFailure(error);
   if (!failure) return;
