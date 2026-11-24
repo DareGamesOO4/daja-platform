@@ -17,13 +17,14 @@
   API proverava dostupnost šablona za svaku vrstu obaveštenja.
   Odjava iz dolaznog webhooka radi i dok slanje čeka.
   Za primaoce starih poruka čuva se značenje odjave iz tih poruka.
-- Migracija 126 dodaje šifre, red odgovora i minimalnu evidenciju za
-  buduće ograničeno čuvanje. `WHATSAPP_RETENTION_APPROVED` ostaje false dok
-  rukovalac ne potvrdi svrhu, pravni osnov, rokove i pravila za konkretne
-  otvorene zahteve. Pre uključivanja postaviti zaseban
-  `WHATSAPP_RETENTION_HMAC_KEY` u secret store i uskladiti javno obaveštenje.
-  Mehanizam čuva tehničke zapise do 90 dana, a minimalni dokaz odjavljene
-  potvrđene saglasnosti do 12 meseci od odjave.
+- Dopuna 24.11.2026: javno obaveštenje i politika usvajaju rokove iz migracije 126.
+  Periodično čišćenje više ne zavisi od `WHATSAPP_RETENTION_APPROVED`. Završena
+  slanja uklanjaju se nakon 90 dana od promene statusa; opozvane pretplate nakon
+  90 dana i uklanjanja povezanih slanja; heširani dokaz do 12 meseci od odjave.
+  Postojeći `WHATSAPP_RETENTION_HMAC_KEY` ostaje; kada nije podešen, ključ se
+  izvodi iz privatnog signing secret-a sa posebnim kontekstom. Ne menjati ključ
+  bez plana migracije. Heš je pseudonimizacija, ne anonimni podatak.
+  Detalji i otvorene poslovne obaveze: [LEGAL_COMPLIANCE.md](LEGAL_COMPLIANCE.md).
 - Na odobrenom test broju potvrdi newsletter, jedan ručno izabran sat
   i praćenje Liste želja. Sa `MOJI SATOVI` uzmi šifru i odjavi jedan sat
   pre prve promene cene. Proveri da pogrešna ili stara šifra ne dira drugu

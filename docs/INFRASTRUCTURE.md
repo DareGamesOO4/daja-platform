@@ -1,5 +1,15 @@
 # DAJA — mapa infrastrukture i veza
 
+## Dopuna: pravni tekstovi, 24.11.2026.
+
+- Izvor opštih pravnih tekstova je `daja-platform/apps/api/src/legal-policy-content.ts`,
+  sa usklađenom web kopijom i sr/en prevodom u `dajashopweb`. Verzija je
+  `2026-11-23-privacy-storage-v1`: `/privacy`, `/cookies`, `/terms`, `/withdrawal`.
+  Posebno WhatsApp obaveštenje koristi isti kontakt `info@dajashop.rs`.
+- Implementirani rokovi i preostale poslovne/ugovorne obaveze opisani su u
+  `daja-platform/docs/LEGAL_COMPLIANCE.md`. Tekst nije potvrda potpune pravne
+  usklađenosti. Ovom dopunom nije menjana cloud topologija niti proveren deploy.
+
 ## Dopuna: Stilius preko DAJA Studio, 18.11.2026.
 
 - Red za Stilius (`qandq`) je u Render API-ju. Na Windows računarima
@@ -47,7 +57,7 @@
   Posle verifikacije ponoviti OTP zahtev, pa Meta podrska ako zabrana ostane.
 - Korisnik je odobrio WhatsApp obavestenje o privatnosti/brisanje podataka na
   https://dajashop.rs/whatsapp-privacy (sr/en), povezano sa Meta aplikacijom.
-  Opsta politika sajta /privacy ostaje zaseban tehnicki nacrt.
+  Opsta politika sajta /privacy pripremljena je u izvoru 23.11.2026; videti dopunu na vrhu.
 - Korisnik je zatim iskljucio WhatsApp povratak na stanje. Njegov nezavrseni
   predlozak nije podnet. WHATSAPP_STOCK_ALERTS_ENABLED=false blokira njegov web
   izbor, nove pretplate, skeniranje i slanje. Za newsletter/promenu cene potrebna

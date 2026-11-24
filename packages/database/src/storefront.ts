@@ -78,6 +78,7 @@ export interface StorefrontItemSnapshot {
 }
 
 export interface CheckoutInput {
+  legalSnapshot?: { version: string; presentedVersion: string | null; recordedAt: string; documents: unknown[] };
   note?: string;
   customerId?: string | null;
   customer: Record<string, unknown>;
@@ -1050,6 +1051,7 @@ export class StorefrontRepository {
         phone,
         JSON.stringify(customer),
         JSON.stringify({
+          ...(input.legalSnapshot ? { legal: input.legalSnapshot } : {}),
           method: input.shippingMethod,
           note: input.note || '',
           address: customer.address,
@@ -1098,7 +1100,8 @@ export class StorefrontRepository {
       [organizationId, order.id, order.status]
     );
     await this.client.query('SELECT enqueue_order_supplier_checks($1)', [order.id]);
-    return serializeOrder(order);
+    // The full legal copy is needed by the creation email, not every order list.
+    return { ...serializeOrder(order), legalSnapshot: input.legalSnapshot };
   }
 
   async listCustomerOrders(input: {

@@ -469,7 +469,7 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
   private async tick() {
     await this.sendServiceReply();
     if (Date.now() >= this.nextHistoryCleanup && this.org() &&
-        this.config.WHATSAPP_RETENTION_APPROVED && this.config.WHATSAPP_RETENTION_HMAC_KEY.length >= 32) {
+        (this.config.WHATSAPP_RETENTION_HMAC_KEY || this.config.PRIVACY_TOKEN_SECRET || this.config.JWT_ACCESS_SECRET).length >= 32) {
       this.nextHistoryCleanup = Date.now() + 60 * 60_000;
       await this.expireHistory().catch(() => this.logger.warn('WhatsApp history cleanup failed'));
     }
@@ -784,7 +784,12 @@ export class WhatsAppNotificationsService implements OnModuleInit, OnModuleDestr
           AND NOT EXISTS(SELECT 1 FROM whatsapp_deliveries d WHERE d.subscription_id=s.id)
         ORDER BY revoked_at LIMIT 100 FOR UPDATE SKIP LOCKED`, [this.org()]);
       for (const row of old.rows) {
-        const digest = createHmac('sha256', this.config.WHATSAPP_RETENTION_HMAC_KEY).update(this.org() + ':' + row.phone).digest('hex');
+        // The 2026-11-23 privacy policy adopts this retention schedule. Existing
+        // dedicated keys remain stable; other installations use a domain-
+        // separated signing secret without provisioning or exposing a new key.
+        const key = this.config.WHATSAPP_RETENTION_HMAC_KEY || createHmac('sha256',
+          this.config.PRIVACY_TOKEN_SECRET || this.config.JWT_ACCESS_SECRET).update('daja:whatsapp-retention-key').digest('hex');
+        const digest = createHmac('sha256', key).update(this.org() + ':' + row.phone).digest('hex');
         await client.query(`INSERT INTO whatsapp_consent_evidence
           (subscription_id,organization_id,phone_digest,purpose,policy_version,notice_version,source,confirmed_at,revoked_at,revoked_via)
           SELECT id,organization_id,$2,purpose,policy_version,notice_version,source,confirmed_at,revoked_at,revoked_via

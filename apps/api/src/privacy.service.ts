@@ -52,14 +52,16 @@ export class PrivacyService {
        LIMIT 1`,
       [organizationId]
     );
-    const publication = result.rows[0];
+    // A historical admin publication must never label new source copy with an
+    // old version or silently carry consent into newly described purposes.
+    const publication = result.rows.find(row => row.version === LEGAL_POLICY_VERSION);
     return {
       version: publication?.version ?? LEGAL_POLICY_VERSION,
       // Analytics is a new optional category. Existing receipts must be
       // refreshed instead of being interpreted as analytics consent.
       material: publication?.material ?? true,
       changeSummary: publication?.change_summary ?? '',
-      effectiveAt: publication?.effective_at?.toISOString() ?? '2026-09-02T00:00:00.000Z',
+      effectiveAt: publication?.effective_at?.toISOString() ?? '2026-11-23T00:00:00.000Z',
       ready: LEGAL_DOCUMENTS.every((document) => document.ready),
       documents: LEGAL_DOCUMENTS
     };
@@ -82,6 +84,9 @@ export class PrivacyService {
     source?: string | undefined;
   }): Promise<{ receipt: string; version: string; categories: ConsentCategories }> {
     const policy = await this.currentPolicy(input.organizationId);
+    if (input.policyVersion !== policy.version && Object.values(input.categories).some(Boolean)) {
+      throw new ValidationFailedError('Politika privatnosti je ažurirana. Osvežite stranicu i ponovo izaberite dozvole.');
+    }
     const receipt = validReceipt(input.receipt) ? input.receipt! : randomToken();
     const action = input.action ?? 'granted';
     const categories = {

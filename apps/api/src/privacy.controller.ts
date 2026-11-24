@@ -57,8 +57,9 @@ export class PrivacyController {
   ) {}
 
   @Get('current')
-  current() {
-    return this.privacy.currentPolicy(publicOrganizationId(this.config));
+  async current() {
+    const { documents: _documents, ...policy } = await this.privacy.currentPolicy(publicOrganizationId(this.config));
+    return policy;
   }
 
   @Get('documents')
@@ -68,7 +69,7 @@ export class PrivacyController {
 
   @Get('documents/:kind')
   document(@Param('kind') kind: string) {
-    if (kind !== 'privacy' && kind !== 'cookies' && kind !== 'terms') {
+    if (kind !== 'privacy' && kind !== 'cookies' && kind !== 'terms' && kind !== 'withdrawal') {
       throw new ValidationFailedError('Nepoznat pravni dokument.');
     }
     return this.privacy.document(kind, publicOrganizationId(this.config));

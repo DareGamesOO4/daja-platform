@@ -26,7 +26,7 @@ Korisnik radi Meta podesavanja; kod, red slanja i web priprema su u DAJA projekt
   nije podnet i nije uslov za newsletter/promenu cene.
 - Korisnik je odobrio zasebno sr/en obavestenje o WhatsApp privatnosti i brisanju:
   https://dajashop.rs/whatsapp-privacy. Taj URL je sacuvan u Meta app Privacy Policy
-  i User Data Deletion poljima. Opsta /privacy stranica ostaje tehnicki nacrt.
+  i User Data Deletion poljima. Opsta /privacy stranica je pripremljena u izvoru 23.11.2026; videti LEGAL_COMPLIANCE.md.
 - Ranija blokada naloga 2239869233236176 nije status ovog novog naloga.
 
 ## Sta korisnik radi u Meti

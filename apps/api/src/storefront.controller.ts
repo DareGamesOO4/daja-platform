@@ -32,6 +32,7 @@ import { AuthService } from './auth.service.js';
 import { DesktopGoogleOAuthService } from './desktop-google-oauth.service.js';
 import { NovostiEmailService } from './novosti-email.service.js';
 import { OrderEmailService } from './order-email.service.js';
+import { LEGAL_POLICY_VERSION, legalDocument } from './legal-policy-content.js';
 import { checkoutCredentials, checkoutRequestHash, StorefrontCheckoutAttempt } from './storefront-checkout-attempt.js';
 import { WishlistAlertService } from './wishlist-alert.service.js';
 import { ProductAlertService } from './product-alert.service.js';
@@ -127,6 +128,7 @@ const orderSchema = z.object({
   customer: z.record(z.string(), z.unknown()),
   items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
   confirmCatalogPrice: z.literal(true).optional(),
+  termsVersion: z.string().max(120).optional(),
   subtotal: z.coerce.number().min(0),
   discountAmount: z.coerce.number().min(0).default(0),
   shippingCost: z.coerce.number().min(0).default(0),
@@ -739,6 +741,9 @@ export class StorefrontOrdersController {
   }
 
   private async placeOrder(client: DbClient, organizationId: string, customer: CustomerPrincipal | null, input: z.infer<typeof orderSchema>) {
+    if (input.termsVersion && input.termsVersion !== LEGAL_POLICY_VERSION) {
+      throw new AppError('CHECKOUT_TERMS_CHANGED', 'Uslovi kupovine su ažurirani. Osvežite stranicu i pročitajte važeće uslove pre slanja porudžbine.', 409);
+    }
     const cart = await this.promotions.priceCart(organizationId, input.items, client);
     if (input.confirmCatalogPrice) {
       if (cart.items.some((item, index) => {
@@ -775,7 +780,16 @@ export class StorefrontOrdersController {
     if (!Number.isSafeInteger(totalMinor) || totalMinor > 2_147_483_647) {
       throw new ValidationFailedError('Iznos porudžbine je van dozvoljenog opsega.');
     }
+    if (input.confirmCatalogPrice && (amountMinor(input.finalTotal) !== totalMinor ||
+        amountMinor(input.shippingCost) !== shippingMinor || amountMinor(input.discountAmount) !== promotion.discountAmountMinor)) {
+      throw new AppError('CHECKOUT_TOTAL_CHANGED',
+        'Obračun porudžbine je promenjen. Proverite dostavu, popust i ukupan iznos, pa ponovo potvrdite porudžbinu.', 409,
+        { subtotal: subtotalMinor / 100, discountAmount: promotion.discountAmountMinor / 100,
+          shippingCost: shippingMinor / 100, finalTotal: totalMinor / 100 });
+    }
     const created = await new StorefrontRepository(client).createOrder(organizationId, {
+      legalSnapshot: { version: LEGAL_POLICY_VERSION, presentedVersion: input.termsVersion ?? null,
+        recordedAt: new Date().toISOString(), documents: [legalDocument('terms'), legalDocument('withdrawal')] },
       customerId: customer?.customerId ?? null,
       customer: input.customer,
       ...(input.note !== undefined ? { note: input.note } : {}),
@@ -799,7 +813,8 @@ export class StorefrontOrdersController {
     );
     await this.orderEmail.sendOrderCreated(created, client);
     await this.orderWhatsApp.enqueue(client, organizationId, created.docId);
-    return created;
+    const { legalSnapshot: _legalSnapshot, ...receipt } = created;
+    return receipt;
   }
 
   private publishOrderCreated(organizationId: string, order: { id: string; displayId: string }) {

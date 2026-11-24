@@ -61,6 +61,7 @@ import { OrderWhatsAppService } from './order-whatsapp.service.js';
 import { WishlistAlertService } from './wishlist-alert.service.js';
 import { ProductAlertService } from './product-alert.service.js';
 import { PrivacyService } from './privacy.service.js';
+import { PrivacyRetentionService } from './privacy-retention.service.js';
 import { PrivacyController } from './privacy.controller.js';
 import { PolicyPublicationService } from './policy-publication.service.js';
 import { PromotionsService } from './promotions.service.js';
@@ -161,6 +162,7 @@ const rateStorage = new SharedRateStorage(config);
     ProductAlertService,
     WishlistAlertService,
     PrivacyService,
+    PrivacyRetentionService,
     PolicyPublicationService,
     PromotionsService,
     RealtimeGateway,

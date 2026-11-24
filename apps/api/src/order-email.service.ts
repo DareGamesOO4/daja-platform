@@ -4,8 +4,10 @@ import type { DbClient } from '@daja/database';
 import { emailPreheader } from '@daja/shared';
 import { CONFIG } from './tokens.js';
 import { EmailDeliveryService, type TransactionalEmail } from './email-delivery.service.js';
+import { legalDocument, type LegalDocument } from './legal-policy-content.js';
 
 interface OrderEmailPayload {
+  legalSnapshot?: unknown;
   note?: string;
   docId?: string;
   id?: string;
@@ -90,7 +92,7 @@ export class OrderEmailService {
         order,
         items,
         shipping,
-        footer: 'Obavestićemo vas emailom kada se status porudžbine promeni.'
+        footer: 'Ova poruka potvrđuje prijem zahteva. O prihvatanju i slanju porudžbine obavestićemo vas zasebno.\n\n' + legalOrderText(order)
       }),
       html: emailPage({
         siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL,
@@ -99,11 +101,11 @@ export class OrderEmailService {
         introduction:
           'Zdravo ' +
           escapeHtml(name) +
-          ', hvala na poverenju. Pripremićemo porudžbinu i obavestiti vas o svakoj promeni statusa.',
+          ', hvala na poverenju. Proverićemo dostupnost i obavestiti vas o prihvatanju porudžbine.',
         content:
           (order.note ? '<p>Napomena: ' + escapeHtml(order.note) + '</p>' : '') + orderSummaryHtml(order, items) +
           orderStatusHtml(order) +
-          orderDetailsHtml(order, shipping),
+          orderDetailsHtml(order, shipping) + legalOrderHtml(order),
         footer:
           'Sačuvajte ovaj email kao potvrdu porudžbine. Za sva pitanja odgovorite direktno na ovu poruku.'
       }),
@@ -681,4 +683,23 @@ function escapeHtml(value: string): string {
     };
     return entities[character] ?? character;
   });
+}
+
+function orderLegalDocuments(order: OrderEmailPayload): LegalDocument[] {
+  const snapshot = order.legalSnapshot;
+  if (isRecord(snapshot) && Array.isArray(snapshot.documents)) {
+    return snapshot.documents.filter((doc): doc is LegalDocument =>
+      isRecord(doc) && typeof doc.title === 'string' && Array.isArray(doc.sections));
+  }
+  return [legalDocument('terms'), legalDocument('withdrawal')];
+}
+function legalOrderText(order: OrderEmailPayload): string {
+  return orderLegalDocuments(order).map(doc => [doc.title + ' (' + doc.updatedAt + ')',
+    ...doc.sections.flatMap(section => [section.title, ...section.body])].join('\n\n')).join('\n\n');
+}
+function legalOrderHtml(order: OrderEmailPayload): string {
+  return '<hr><p>Ova poruka potvrđuje prijem zahteva. O prihvatanju i slanju obavestićemo vas zasebno.</p>' +
+    orderLegalDocuments(order).map(doc => '<h2>' + escapeHtml(doc.title) + ' (' + escapeHtml(doc.updatedAt) + ')</h2>' +
+      doc.sections.map(section => '<h3>' + escapeHtml(section.title) + '</h3>' +
+        section.body.map(text => '<p>' + escapeHtml(text) + '</p>').join('')).join('')).join('');
 }
