@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$StudioOnly, [switch]$InstallAll)
+param([switch]$StudioOnly, [switch]$InstallAll, [switch]$PreserveWorkerConfig)
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'DAJA Local Image Worker'
@@ -124,11 +124,16 @@ if ($InstallAll) {
 }
 $freshInstall = $InstallAll -and !$systemInstall -and
     !(Test-Path -LiteralPath (Join-Path $userDir 'worker-user.json') -PathType Leaf)
+if ($freshInstall -and $PreserveWorkerConfig) {
+    throw 'Za prvu instalaciju pokreni Instaliraj DAJA Studio.cmd.'
+}
 if ($systemInstall -or $freshInstall) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        $installer = if ($InstallAll) { 'Instaliraj DAJA Studio.cmd' } else { 'Instaliraj Stilius.cmd' }
+        $installer = if ($PreserveWorkerConfig) { 'Azuriraj DAJA Studio.cmd' } elseif ($InstallAll) {
+            'Instaliraj DAJA Studio.cmd'
+        } else { 'Instaliraj Stilius.cmd' }
         throw "Desni klik na $installer pa Run as administrator."
     }
     if ($freshInstall) {
@@ -168,10 +173,12 @@ if (!$InstallAll -and !$systemInstall -and !(Get-Command node.exe -CommandType A
     throw 'Potreban je Node.js 22.12 ili noviji.'
 }
 
-$originalConfig = [IO.File]::ReadAllText($configPath)
-$config = $originalConfig | ConvertFrom-Json
-$config | Add-Member -NotePropertyName checkStilius -NotePropertyValue $true -Force
-if ($InstallAll) { $config | Add-Member -NotePropertyName checkLinkel -NotePropertyValue $true -Force }
+if (!$PreserveWorkerConfig) {
+    $originalConfig = [IO.File]::ReadAllText($configPath)
+    $config = $originalConfig | ConvertFrom-Json
+    $config | Add-Member -NotePropertyName checkStilius -NotePropertyValue $true -Force
+    if ($InstallAll) { $config | Add-Member -NotePropertyName checkLinkel -NotePropertyValue $true -Force }
+}
 $originalProgram = [IO.File]::ReadAllBytes($program)
 $utf8 = [Text.UTF8Encoding]::new($false)
 
@@ -202,7 +209,7 @@ if ($systemInstall) {
 
 try {
     if ($InstallAll) {
-        if ($systemInstall) {
+        if ($systemInstall -or $PreserveWorkerConfig) {
             Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'node_modules') -Destination $destination -Recurse -Force
             Copy-Item -LiteralPath $newProgram -Destination $program -Force
         } else {
@@ -214,19 +221,20 @@ try {
         Copy-Item -LiteralPath $browserLibrary -Destination $modules -Recurse -Force
         Copy-Item -LiteralPath $newProgram -Destination $program -Force
     }
-    [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 12), $utf8)
-    if ($InstallAll -and !$systemInstall) { Install-FullDajaStudio -UserWorker }
+    if (!$PreserveWorkerConfig) { [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 12), $utf8) }
+    if ($InstallAll -and !$systemInstall -and !$PreserveWorkerConfig) { Install-FullDajaStudio -UserWorker }
     if (!$InstallAll -and (Test-Path -LiteralPath $studio -PathType Leaf)) { Update-DajaStudio }
     Start-DajaWorker
 } catch {
     [IO.File]::WriteAllBytes($program, $originalProgram)
-    [IO.File]::WriteAllText($configPath, $originalConfig, $utf8)
+    if (!$PreserveWorkerConfig) { [IO.File]::WriteAllText($configPath, $originalConfig, $utf8) }
     Start-DajaWorker
     throw
 }
 if ($InstallAll) {
-    if ($systemInstall) { Install-FullDajaStudio }
-    Write-Host 'DAJA Studio je instaliran. Ukljucene su slike, Linkel i Stilius.'
+    if ($systemInstall -and !$PreserveWorkerConfig) { Install-FullDajaStudio }
+    if ($PreserveWorkerConfig) { Write-Host 'DAJA Studio je azuriran. Postojeca podesavanja su sacuvana.' }
+    else { Write-Host 'DAJA Studio je instaliran. Ukljucene su slike, Linkel i Stilius.' }
     return
 }
 Write-Host 'Stilius je ukljucen. DAJA worker je pokrenut sa postojecim podesavanjima.'

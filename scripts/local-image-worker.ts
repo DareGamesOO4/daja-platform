@@ -15,6 +15,9 @@ import {
 } from '../packages/validation/src/media-worker-profile.js';
 
 const MAX_BYTES = 25 * 1024 * 1024;
+const ACTIVE_IMAGE_POLL_MS = 30_000;
+const HOUR_MS = 60 * 60_000;
+const belgradeHour = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Belgrade', hour: '2-digit', hourCycle: 'h23' });
 const VARIANTS = ['avif', 'webp', 'avifThumb', 'webpThumb'] as const;
 const configSchema = z.object({
   apiBaseUrl: z.url(),
@@ -224,13 +227,33 @@ async function loadConfig(configPath: string) {
   return config;
 }
 
+function imagePollDelay(now: number, activeUntil: number) {
+  if (now + ACTIVE_IMAGE_POLL_MS <= activeUntil) return ACTIVE_IMAGE_POLL_MS;
+  const hour = Number(belgradeHour.format(now));
+  // Belgrade's UTC offset is in whole hours. End the night wait at local 08:00.
+  if (hour === 7) return HOUR_MS - now % HOUR_MS;
+  return hour >= 2 && hour < 7 ? HOUR_MS : 60_000;
+}
+
+async function readLocalPause(path: string) {
+  try {
+    const state: { until?: string | null; paused?: boolean } = JSON.parse(await readFile(path, 'utf8'));
+    const until = state.until ? Date.parse(state.until) : NaN;
+    if (Number.isFinite(until)) return until > Date.now() ? { until: new Date(until).toISOString() } : null;
+    return state.paused ? { until: null } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function work(configPath: string, statusPath?: string) {
   const config = await loadConfig(configPath);
   const pausePath = join(dirname(configPath), 'worker-pause.json');
   const shutdown = new AbortController();
   process.once('SIGINT', () => shutdown.abort());
   process.once('SIGTERM', () => shutdown.abort());
-  const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', render: null as unknown,
+  const status = { phase: 'connecting', job: '', completed: '', error: '', activity: '', progress: 0,
+    pauseUntil: null as string | null, render: null as unknown,
     linkel: config.checkLinkel ? 'Povezivanje…' : 'Isključeno na ovom računaru', linkelLast: '',
     stilius: config.checkStilius ? 'Povezivanje…' : 'Isključeno na ovom računaru' };
   let imageError: string | null = null;
@@ -248,8 +271,10 @@ async function work(configPath: string, statusPath?: string) {
   }
   async function refreshRenderStatus() {
     try {
-      const response = await api(config, 'status',
-        config.checkLinkel ? { studio: { imageError, linkelError: null } } : {}, shutdown.signal);
+      const response = await api(config, 'status', {
+        ...(config.checkLinkel ? { studio: { imageError, linkelError: null } } : {}),
+        ...(await readLocalPause(pausePath) ? {} : { imageWorker: true })
+      }, shutdown.signal);
       const payload = await response.json() as { data?: unknown };
       status.render = payload && typeof payload === 'object' && 'data' in payload
         ? payload.data
@@ -282,25 +307,30 @@ async function work(configPath: string, statusPath?: string) {
   const heartbeat = setInterval(() => void publishStatus(), 3_000);
   heartbeat.unref();
   console.log('DAJA worker čeka posao.');
-  let idleDelay = 3_000;
+  let activeUntil = 0;
+  let nextClaimAt = 0;
   let claimErrorDelay = 15_000;
   while (!shutdown.signal.aborted) {
-    let pause = 3_000;
+    const localPause = await readLocalPause(pausePath);
+    if (localPause) {
+      nextClaimAt = 0;
+      Object.assign(status, { phase: 'local-paused', job: '', progress: 0, error: '', activity: '', pauseUntil: localPause.until });
+      await publishStatus();
+      await delay(3_000, undefined, { signal: shutdown.signal }).catch(() => {});
+      continue;
+    }
+    const untilNextClaim = nextClaimAt - Date.now();
+    if (untilNextClaim > 0) {
+      // Keep the local Pause / Resume controls responsive between server requests.
+      await delay(Math.min(untilNextClaim, 3_000), undefined, { signal: shutdown.signal }).catch(() => {});
+      continue;
+    }
+    let retryDelay = 0;
+    let claimErrorMessage = '';
     let jobClaimed = false;
     let currentClaim: z.infer<typeof claimSchema> | undefined;
     let requestingClaim = false;
     try {
-      let pauseState: { until?: string | null; paused?: boolean } = {};
-      try { pauseState = JSON.parse(await readFile(pausePath, 'utf8')); } catch {}
-      const until = pauseState.until ? Date.parse(pauseState.until) : 0;
-      if (pauseState.paused || until > Date.now()) {
-        idleDelay = 3_000;
-        Object.assign(status, { phase: 'local-paused', job: '', progress: 0, error: '', activity: '', pauseUntil: until > Date.now() ? new Date(until).toISOString() : null });
-        await publishStatus();
-        await delay(3_000, undefined, { signal: shutdown.signal }).catch(() => {});
-        continue;
-      }
-      if (pauseState.until) await writeFile(pausePath, JSON.stringify({ paused: false, until: null }));
       status.pauseUntil = null;
       requestingClaim = true;
       const response = await api(config, 'claim', { profile: 'avif95-v1', managed: true }, shutdown.signal);
@@ -309,10 +339,10 @@ async function work(configPath: string, statusPath?: string) {
       const remotelyPaused = response.headers.get('X-Daja-Worker-Paused') === '1';
       if (!imageJobFailed) imageError = null;
       if (response.status !== 204) {
-        idleDelay = 3_000;
         jobClaimed = true;
         const payload = await response.json() as { data?: unknown };
         const claim = claimSchema.parse(payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload);
+        activeUntil = Date.now() + HOUR_MS;
         currentClaim = claim;
         Object.assign(status, { phase: 'working', job: claim.id, productSlug: claim.productSlug, imageIndex: claim.imageIndex,
           sourceWidth: claim.sourceWidth, sourceHeight: claim.sourceHeight, progress: 5, error: '', activity: 'Preuzimanje originala' });
@@ -326,12 +356,6 @@ async function work(configPath: string, statusPath?: string) {
         imageError = null;
         imageJobFailed = false;
         console.log('Obrađene su četiri verzije slike.');
-        pause = 0;
-      } else if (remotelyPaused) {
-        idleDelay = 3_000;
-      } else {
-        pause = idleDelay;
-        idleDelay = Math.min(idleDelay * 2, 10_000);
       }
       Object.assign(status, { phase: remotelyPaused ? 'paused' : 'ready', job: '', progress: 0, activity: '', error: '' });
     } catch (error) {
@@ -342,10 +366,9 @@ async function work(configPath: string, statusPath?: string) {
       const reason = error instanceof Error && /^(DAJA API|R2) je vratio HTTP \d+\.$/.test(error.message)
         ? error.message
         : detail;
-      idleDelay = 3_000;
-      pause = 15_000;
+      retryDelay = 15_000;
       if (requestingClaim && (!(error instanceof HttpFailure) || error.status >= 500 || error.status === 429)) {
-        pause = Math.min(60_000, claimErrorDelay + Math.floor(Math.random() * 1_000));
+        retryDelay = Math.min(60_000, claimErrorDelay + Math.floor(Math.random() * 1_000));
         claimErrorDelay = Math.min(60_000, claimErrorDelay * 2);
       }
       const deferred = error instanceof HttpFailure &&
@@ -356,21 +379,20 @@ async function work(configPath: string, statusPath?: string) {
           leaseToken: currentClaim.leaseToken,
           reason: deferred ? 'deferred' : 'processing_failed'
         }, shutdown.signal).catch(() => null);
-        if (reported?.status === 204) pause = 0;
+        if (reported?.status === 204) retryDelay = 0;
       }
-      if (pause === 0) {
-        console.error(reason + ' Red može da nastavi.');
-      } else {
-        console.error(reason + ' Novi pokušaj za ' + Math.ceil(pause / 1_000) + ' sekundi.');
-      }
+      claimErrorMessage = reason;
       if (!deferred) {
         imageError = reason;
         imageJobFailed ||= jobClaimed;
       }
       Object.assign(status, { phase: deferred ? 'ready' : 'error', job: '', progress: 0, activity: '', error: deferred ? '' : reason });
     }
+    const now = Date.now();
+    const pause = Math.max(retryDelay, imagePollDelay(now, activeUntil));
+    nextClaimAt = now + pause;
+    if (claimErrorMessage) console.error(claimErrorMessage + ' Novi pokušaj za ' + Math.ceil(pause / 1_000) + ' sekundi.');
     await publishStatus();
-    await delay(pause, undefined, { signal: shutdown.signal }).catch(() => {});
   }
 }
 

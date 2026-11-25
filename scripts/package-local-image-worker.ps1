@@ -38,6 +38,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'update-local-stilius.ps1') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Instaliraj Stilius.cmd') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Instaliraj DAJA Studio.cmd') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Azuriraj DAJA Studio.cmd') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-image-worker.md') -Destination (Join-Path $stage 'PROCITAJ.md')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-image-studio') -Destination (Join-Path $stage 'studio') -Recurse
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force

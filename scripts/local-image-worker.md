@@ -24,6 +24,10 @@ Za vraćanje korisničkog backupa raspakuj arhivu i pokreni `Vrati DAJA.cmd`. Sk
 
 U web adminu otvori Slike za red poslova sa sličicama i status računara i Rendera. Vlasnik tamo podešava kvalitet, effort, maksimalnu dimenziju, lossless i obradu boje za svaki od četiri izlaza. Sačuvani profil primenjuje se od sledećeg posla. Pauza ostavlja trenutni posao da se završi.
 
+Kada čeka na slike, Studio proverava red na minut. Od 02:00 do 08:00 po vremenu u Srbiji proverava ga na sat, uz povratak na dnevni ritam u 08:00. Svaka preuzeta slika pokreće narednih sat vremena češćih provera na 30 sekundi. U podešeno vreme isteka lokalne pauze ili posle klika na „Nastavi“, Studio odmah proverava red.
+
+Na računaru koji već obrađuje slike pokreni **Azuriraj DAJA Studio.cmd** iz raspakovanog paketa. Ako worker radi kao sistemski zadatak, pokreni ažuriranje kao administrator. Postojeća podešavanja, uključujući Linkel i Stilius, ostaju sačuvana.
+
 Korisnička instalacija sa postojećim `worker-user.json` prikazuje lokalnu probu i status u pregledaču na `http://127.0.0.1:41627`. Za ažuriranje kopiraj novi `worker.mjs` i folder `studio` pored konfiguracije, pa ponovo pokreni postojeći worker. Rezultati lokalne probe čuvaju se u podfolderu `Rezultati` i dostupni su za preuzimanje iz panela.
 
 U raspakovanom folderu otvori PowerShell i pokreni lokalnu obradu. Izlazni folder mora da bude nov.

@@ -74,11 +74,12 @@ export class LocalMediaWorkerController {
     const report = z.object({ studio: z.object({
       imageError: z.string().max(220).nullable(),
       linkelError: z.string().max(220).nullable()
-    }).optional() }).safeParse(body ?? {});
+    }).optional(), imageWorker: z.literal(true).optional() }).safeParse(body ?? {});
     if (!report.success) throw new ValidationFailedError('Invalid Studio status');
     if (report.data.studio) {
       await this.presence.studioHeartbeat(organizationId, report.data.studio.imageError);
     }
+    if (report.data.imageWorker) await this.presence.pcHeartbeat(organizationId);
     const { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt } = await this.presence.status(organizationId);
     return { renderOnline, renderSeenAt, renderCompletedAt, renderErrorAt };
   }

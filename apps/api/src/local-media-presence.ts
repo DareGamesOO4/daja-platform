@@ -90,6 +90,15 @@ export class LocalMediaPresence implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async pcHeartbeat(organizationId: string) {
+    await this.db.pool.query(
+      `INSERT INTO media_worker_settings(organization_id,pc_seen_at) VALUES ($1,now())
+       ON CONFLICT(organization_id) DO UPDATE SET pc_seen_at=excluded.pc_seen_at
+       WHERE media_worker_settings.pc_seen_at IS NULL OR media_worker_settings.pc_seen_at<now()-interval '15 seconds'`,
+      [organizationId]
+    );
+  }
+
   async status(organizationId: string) {
     const row = (await this.db.pool.query<{
       profile: unknown; pcSeenAt: Date | null; pcOnline: boolean;
