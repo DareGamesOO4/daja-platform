@@ -8,6 +8,8 @@ import { ReaderStationService } from './reader-station.service.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 
 const registerSchema=z.object({name:z.string().trim().min(1).max(120),locationId:uuidSchema.optional(),hardwareKey:uuidSchema.optional(),resetActive:z.literal(true).optional()});
+const visualSpecsSchema = z.record(z.string().regex(/^[a-z0-9_]{1,48}$/), z.string().trim().max(120))
+  .refine((specs) => Object.keys(specs).length <= 24);
 const stationPreviewSchema = z.object({
   name: z.string().trim().min(1).max(240),
   sku: z.string().trim().max(120).optional(),
@@ -16,14 +18,17 @@ const stationPreviewSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/).optional(),
   barcode: z.string().trim().max(256).optional(),
   imageUrl: z.string().url().max(2000).optional(),
-  visualSpecs: z.record(z.string().regex(/^[a-z0-9_]{1,48}$/), z.string().trim().max(120))
-    .refine((specs) => Object.keys(specs).length <= 24).optional(),
+  visualSpecs: visualSpecsSchema.optional(),
+  visualSpecOptions: z.record(z.string().regex(/^[a-z0-9_]{1,48}$/),
+    z.array(z.tuple([z.string().trim().max(120), z.number().int().nonnegative()])).max(250))
+    .refine((fields) => Object.keys(fields).length <= 24).optional(),
   description: z.string().trim().max(1000).optional()
 });
 const labelSchema = z.object({
   sku: z.string().trim().max(120).optional(),
-  variantName: z.string().trim().max(240).optional()
-}).refine((label) => label.sku !== undefined || label.variantName !== undefined);
+  variantName: z.string().trim().max(240).optional(),
+  visualSpecs: visualSpecsSchema.optional()
+}).refine((label) => label.sku !== undefined || label.variantName !== undefined || Object.keys(label.visualSpecs ?? {}).length > 0);
 const labelSessionKind = z.enum(['sessions', 'find-sessions']);
 const startSchema=z.object({stationId:uuidSchema,clientId:uuidSchema,preview:stationPreviewSchema.optional()});
 const epcSchema=z.object({sessionId:uuidSchema,epc:z.string().trim().min(1).max(256)});
@@ -46,6 +51,13 @@ export class ReaderStationController {
     requireReaderAccess(ctx);
     return this.stations.updateLabel(ctx, parseWithSchema(uuidSchema, stationId), parseWithSchema(labelSessionKind, kind),
       parseWithSchema(uuidSchema, sessionId), parseWithSchema(labelSchema, body));
+  }
+  @Post(':stationId/:kind/:sessionId/extend')
+  async extend(@Req() req: Request, @Param('stationId') stationId: string, @Param('kind') kind: string, @Param('sessionId') sessionId: string) {
+    const ctx = resolveRequestContext(req);
+    requireReaderAccess(ctx);
+    return this.stations.extend(ctx, parseWithSchema(uuidSchema, stationId), parseWithSchema(labelSessionKind, kind),
+      parseWithSchema(uuidSchema, sessionId));
   }
   @Get() async list(@Req() req:Request){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.list(ctx);}
   @Post('sessions') async start(@Req() req:Request,@Body() body:unknown){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.start(ctx,parseWithSchema(startSchema,body));}
