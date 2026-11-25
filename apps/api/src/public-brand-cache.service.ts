@@ -66,9 +66,12 @@ export class PublicBrandCacheService implements OnModuleInit, OnModuleDestroy {
     const page = pages?.get(input.page);
     if (!page) return undefined;
     return {
-      ...page,
-      pathname: input.pathname,
-      ...(input.configurationVersion === page.configurationVersion ? {} : { configuration: cache.configuration })
+      expiresAt: cache.expiresAt,
+      value: {
+        ...page,
+        pathname: input.pathname,
+        ...(input.configurationVersion === page.configurationVersion ? {} : { configuration: cache.configuration })
+      }
     };
   }
 

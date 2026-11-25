@@ -62,6 +62,7 @@ import {
   uuidSchema
 } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER, REDIS } from './tokens.js';
+import { catalogLanding } from './catalog-landings.js';
 import { catalogPageSchema, catalogPreparationSchema, prepareCatalogPages, publicCatalogPage, publicHomeProducts } from './catalog-page.js';
 import { bypassCatalogCache, catalogEntry, productCacheEpoch, productCacheKey, publicCatalogResponse, readPublicCatalog, replyCatalog } from './public-catalog-cache.js';
 import { PublicBrandCacheService } from './public-brand-cache.service.js';
@@ -322,15 +323,24 @@ export class PublicCatalogController {
     const started = performance.now();
     const organizationId = this.publicContext(request).organizationId;
     const input = parseWithSchema(catalogPageSchema, query);
+    const pathname = input.pathname ?? '';
+    const watchLanding = input.department === 'satovi' &&
+      (catalogLanding(pathname) || /^\/brend\/[a-z0-9][a-z0-9-]{0,180}$/.test(pathname));
     const admitted = input.page === 1 && input.prepareOnly !== '1' && !input.fixedGender &&
       (!input.params || input.params === 'sort=newest') &&
-      (!input.pathname || ['/catalog', '/muski-satovi', '/zenski-satovi', '/naocare', '/baterije', '/daljinski'].includes(input.pathname));
+      (!pathname || ['/catalog', '/muski-satovi', '/zenski-satovi', '/naocare', '/baterije', '/daljinski'].includes(pathname) || watchLanding);
+    const cached = bypassCatalogCache(request) ? undefined : this.brandCache.get(organizationId, input);
     if (this.config.PUBLIC_CATALOG_CACHE_V2 && admitted) {
+      if (cached) {
+        const entry = catalogEntry(cached.value, Date.now());
+        entry.freshUntil = Math.min(entry.freshUntil, cached.expiresAt);
+        entry.staleUntil = Math.min(entry.staleUntil, cached.expiresAt);
+        return replyCatalog(request, response, entry, 'prewarmed', started);
+      }
       return publicCatalogResponse(true, request, response, `${organizationId}:page:${JSON.stringify(input)}`,
         () => publicCatalogPage(this.database.pool, organizationId, input));
     }
-    const cached = bypassCatalogCache(request) ? undefined : this.brandCache.get(organizationId, input);
-    const result = cached ?? await publicCatalogPage(this.database.pool, organizationId, input);
+    const result = cached?.value ?? await publicCatalogPage(this.database.pool, organizationId, input);
     response.setHeader('Server-Timing', `catalog;dur=${(performance.now() - started).toFixed(1)}, catalog_cache;desc="${cached ? 'hit' : 'miss'}"`);
     return result;
   }
