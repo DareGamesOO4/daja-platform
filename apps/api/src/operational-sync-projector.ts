@@ -2129,53 +2129,68 @@ export class OperationalSyncProjector {
     if (!values || text(command.payload, 'scope') !== 'organization') {
       throw new ValidationFailedError('Desktop organization settings command is incomplete');
     }
-    const result = await this.client.query<{
+    const company = [text(values, 'company.name'), text(values, 'company.legalName'), text(values, 'company.taxNumber')];
+    const updatesCompany = company.some((value) => value !== undefined);
+    const organizationColumns = 'id, name, legal_name AS "legalName", tax_number AS "taxNumber", version::text AS version';
+    const { rows: [organization] } = await this.client.query<{
       id: string;
       name: string;
       legalName: string | null;
       taxNumber: string | null;
       version: string;
     }>(
-      `UPDATE organizations
-       SET name = COALESCE($2, name),
-           legal_name = COALESCE($3, legal_name),
-           tax_number = COALESCE($4, tax_number),
-           version = version + 1,
-           updated_at = now()
-       WHERE id = $1 AND deleted_at IS NULL
-       RETURNING id, name, legal_name AS "legalName", tax_number AS "taxNumber", version::text AS version`,
-      [
-        ctx.organizationId,
-        text(values, 'company.name'),
-        text(values, 'company.legalName'),
-        text(values, 'company.taxNumber')
-      ]
+      updatesCompany
+        ? `UPDATE organizations
+         SET name = COALESCE($2, name), legal_name = COALESCE($3, legal_name),
+             tax_number = COALESCE($4, tax_number), version = version + 1, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING ${organizationColumns}`
+        : `SELECT ${organizationColumns} FROM organizations WHERE id = $1 AND deleted_at IS NULL`,
+      updatesCompany ? [ctx.organizationId, ...company] : [ctx.organizationId]
     );
-    if (!result.rows[0])
+    if (!organization)
       throw new ValidationFailedError('Desktop organization does not exist on Platform');
-    const salesConfiguration = {
-      services: Array.isArray(values['sales.services']) ? values['sales.services'] : [],
-      staff: Array.isArray(values['sales.staff']) ? values['sales.staff'] : [],
-      shifts: Array.isArray(values['sales.shifts']) ? values['sales.shifts'] : [],
-      shiftOverrides: Array.isArray(values['sales.shiftOverrides']) ? values['sales.shiftOverrides'] : []
+
+    const salesColumns = 'services, staff, shifts, shift_overrides AS "shiftOverrides"';
+    const salesPatch = ['sales.services', 'sales.staff', 'sales.shifts', 'sales.shiftOverrides'].map((key) => {
+      if (!Object.hasOwn(values, key)) return null;
+      const value = values[key];
+      if (!Array.isArray(value)) throw new ValidationFailedError(`${key} must be an array`);
+      return JSON.stringify(value);
+    });
+    const salesResult = salesPatch.some((value) => value !== null)
+      ? await this.client.query(
+        `INSERT INTO organization_sales_configuration (organization_id, services, staff, shifts, shift_overrides, updated_by_user_id)
+         VALUES ($1, COALESCE($2::jsonb, '[]'), COALESCE($3::jsonb, '[]'), COALESCE($4::jsonb, '[]'), COALESCE($5::jsonb, '[]'), $6)
+         ON CONFLICT (organization_id) DO UPDATE
+         SET services = COALESCE($2::jsonb, organization_sales_configuration.services),
+             staff = COALESCE($3::jsonb, organization_sales_configuration.staff),
+             shifts = COALESCE($4::jsonb, organization_sales_configuration.shifts),
+             shift_overrides = COALESCE($5::jsonb, organization_sales_configuration.shift_overrides),
+             updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()
+         RETURNING ${salesColumns}`,
+        [ctx.organizationId, ...salesPatch, ctx.userId]
+      )
+      : await this.client.query(
+        `SELECT ${salesColumns} FROM organization_sales_configuration WHERE organization_id = $1`,
+        [ctx.organizationId]
+      );
+    const staffPatch = salesPatch[1];
+    if (staffPatch != null) {
+      await this.client.query(`DELETE FROM organization_sales_staff WHERE organization_id = $1`, [ctx.organizationId]);
+      await this.client.query(
+        `INSERT INTO organization_sales_staff (id, organization_id, name, active)
+         SELECT (staff->>'id')::uuid, $1, staff->>'name', COALESCE((staff->>'active')::boolean, true)
+         FROM jsonb_array_elements($2::jsonb) AS staff
+         WHERE staff ? 'id' AND staff ? 'name' AND length(trim(staff->>'name')) > 0`,
+        [ctx.organizationId, staffPatch]
+      );
+    }
+    return {
+      kind: 'organization.settings',
+      organization,
+      salesConfiguration: salesResult.rows[0] ?? { services: [], staff: [], shifts: [], shiftOverrides: [] }
     };
-    await this.client.query(
-      `INSERT INTO organization_sales_configuration (organization_id, services, staff, shifts, shift_overrides, updated_by_user_id)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6)
-       ON CONFLICT (organization_id) DO UPDATE
-       SET services = EXCLUDED.services, staff = EXCLUDED.staff, shifts = EXCLUDED.shifts, shift_overrides = EXCLUDED.shift_overrides,
-           updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`,
-      [ctx.organizationId, JSON.stringify(salesConfiguration.services), JSON.stringify(salesConfiguration.staff), JSON.stringify(salesConfiguration.shifts), JSON.stringify(salesConfiguration.shiftOverrides), ctx.userId]
-    );
-    await this.client.query(`DELETE FROM organization_sales_staff WHERE organization_id = $1`, [ctx.organizationId]);
-    await this.client.query(
-      `INSERT INTO organization_sales_staff (id, organization_id, name, active)
-       SELECT (staff->>'id')::uuid, $1, staff->>'name', COALESCE((staff->>'active')::boolean, true)
-       FROM jsonb_array_elements($2::jsonb) AS staff
-       WHERE staff ? 'id' AND staff ? 'name' AND length(trim(staff->>'name')) > 0`,
-      [ctx.organizationId, JSON.stringify(salesConfiguration.staff)]
-    );
-    return { kind: 'organization.settings', organization: result.rows[0], salesConfiguration };
   }
 
   private async sale(
