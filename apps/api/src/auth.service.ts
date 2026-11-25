@@ -249,7 +249,11 @@ export class AuthService {
       const repo = new AuthRepository(client);
       const familyId = randomUUID();
       const refreshJti = randomUUID();
-      const refreshExpiresAt = expiresAt(Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900));
+      // Browser staff access is bound to the parent session and short-lived.
+      // Native Google grants create a standalone, device-bound refresh session.
+      const refreshExpiresAt = expiresAt(input.customer.sessionId
+        ? Math.min(this.config.ACCESS_TOKEN_TTL_SECONDS, 900)
+        : this.config.REFRESH_TOKEN_TTL_SECONDS);
       await repo.ensureLoginDevice({
         organizationId: user.organizationId,
         userId: user.id,
