@@ -52,6 +52,10 @@ export class ReaderStationController {
     return this.stations.updateLabel(ctx, parseWithSchema(uuidSchema, stationId), parseWithSchema(labelSessionKind, kind),
       parseWithSchema(uuidSchema, sessionId), parseWithSchema(labelSchema, body));
   }
+  @Post(':stationId/:kind/:sessionId/label')
+  async saveLabel(@Req() req: Request, @Param('stationId') stationId: string, @Param('kind') kind: string, @Param('sessionId') sessionId: string, @Body() body: unknown) {
+    return this.updateLabel(req, stationId, kind, sessionId, body);
+  }
   @Post(':stationId/:kind/:sessionId/extend')
   async extend(@Req() req: Request, @Param('stationId') stationId: string, @Param('kind') kind: string, @Param('sessionId') sessionId: string) {
     const ctx = resolveRequestContext(req);
