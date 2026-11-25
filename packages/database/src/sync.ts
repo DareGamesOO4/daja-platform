@@ -59,6 +59,12 @@ function syncLocations(ctx: Pick<RequestContext, 'scopedGrants' | 'isOwner'>): s
   return [...new Set((ctx.scopedGrants ?? []).filter(grant => grant.permission === 'sync.read' && grant.scope === 'location' && grant.locationId).map(grant => grant.locationId!))];
 }
 
+function transferLocations(ctx: Pick<RequestContext, 'scopedGrants' | 'isOwner'>): string[] | null {
+  const grants = (ctx.scopedGrants ?? []).filter(grant => grant.permission === 'transfers.view');
+  if (ctx.isOwner || grants.some(grant => grant.scope === 'all_locations')) return null;
+  return grants.flatMap(grant => grant.locationId ? [grant.locationId] : []);
+}
+
 export class SyncRepository {
   constructor(private readonly client: Pick<pg.Pool | pg.PoolClient, 'query'>) {}
 
@@ -251,16 +257,35 @@ export class SyncRepository {
               client_timestamp, server_timestamp, idempotency_key, device_sequence, base_payload, offline_package_id, baseline_revision, correlation_id, business_command_id
        FROM server_sync_events
        WHERE organization_id = $1 AND revision > $2
-         AND ($3::uuid IS NULL OR location_id IS NULL OR location_id = $3)
-         AND (location_id IS NULL OR $5::uuid[] IS NULL OR location_id = ANY($5::uuid[]))
+         AND (
+           (aggregate_type = 'transfer' AND payload #>> '{operationalSnapshot,kind}' = 'stock.transfer' AND EXISTS (
+             SELECT 1 FROM (VALUES (payload #>> '{operationalSnapshot,transfer,sourceLocationId}'),
+                                   (payload #>> '{operationalSnapshot,transfer,destinationLocationId}')) AS endpoint(id)
+             WHERE ($3::uuid IS NULL OR endpoint.id = $3::text)
+               AND ($5::uuid[] IS NULL OR endpoint.id = ANY($5::text[]))
+               AND ($7::text[] IS NULL OR endpoint.id = ANY($7::text[]))
+           ))
+           OR (aggregate_type <> 'transfer'
+             AND ($3::uuid IS NULL OR location_id IS NULL OR location_id = $3)
+             AND (location_id IS NULL OR $5::uuid[] IS NULL OR location_id = ANY($5::uuid[])))
+         )
          AND (aggregate_type NOT IN ('user','role') OR $6)
        ORDER BY revision ASC
        LIMIT $4`,
-      [ctx.organizationId, input.afterRevision, ctx.locationId ?? null, input.limit + 1, syncLocations(ctx), ctx.isOwner || ctx.scopedGrants?.some(grant => ['admin.users','users.view','roles.view'].includes(grant.permission) && grant.scope === 'all_locations') || false]
+      [ctx.organizationId, input.afterRevision, ctx.locationId ?? null, input.limit + 1, syncLocations(ctx), ctx.isOwner || ctx.scopedGrants?.some(grant => ['admin.users','users.view','roles.view'].includes(grant.permission) && grant.scope === 'all_locations') || false, transferLocations(ctx)]
     );
-    const scanned = result.rows.slice(0, input.limit).map(mapSyncEvent);
     const locations = syncLocations(ctx);
+    const scanned = result.rows.slice(0, input.limit).map(mapSyncEvent).map(event => {
+      if (locations === null) return event;
+      const snapshot = event.payload.operationalSnapshot as Record<string, unknown> | undefined;
+      if (snapshot?.kind !== 'catalog.item') return event;
+      const item = snapshot.record as Record<string, unknown> | undefined;
+      if (!item || !Array.isArray(item.locationBalances)) return event;
+      const locationBalances = item.locationBalances.filter((balance: { locationId: string }) => locations.includes(balance.locationId));
+      return { ...event, payload: { ...event.payload, operationalSnapshot: { ...snapshot, record: { ...item, locationBalances } } } };
+    });
     const rows = locations === null ? scanned : scanned.filter(event => {
+      if (event.aggregateType === 'transfer') return true;
       const allowed = new Set(locations);
       const visible = (value: unknown): boolean => {
         if (Array.isArray(value)) return value.every(visible);
@@ -274,8 +299,17 @@ export class SyncRepository {
       };
       return visible(event.payload) && visible(event.basePayload);
     });
+    const transferScope = transferLocations(ctx);
     return {
-      events: rows,
+      events: rows.map(event => {
+        if (event.aggregateType !== 'transfer') return event;
+        const snapshot = event.payload.operationalSnapshot as { balances: { locationId: string }[] };
+        const balances = snapshot.balances.filter(balance =>
+          (ctx.locationId == null || balance.locationId === ctx.locationId) &&
+          (locations === null || locations.includes(balance.locationId)) &&
+          (transferScope === null || transferScope.includes(balance.locationId)));
+        return { ...event, locationId: null, payload: { operationalSnapshot: { ...snapshot, balances } }, basePayload: null };
+      }),
       nextRevision: scanned.at(-1)?.revision ?? input.afterRevision,
       hasMore: result.rows.length > input.limit,
       serverTime: new Date().toISOString()
@@ -306,7 +340,9 @@ export class SyncRepository {
               cost.amount_minor AS "costAmount",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
-              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
+              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus",
+              tag.location_id AS "tagLocationId", tag.bin_id AS "tagBinId", tag.in_transit AS "tagInTransit",
+              COALESCE(inventory.location_balances, '[]'::jsonb) AS "locationBalances"
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
         AND v.deleted_at IS NULL AND v.active
@@ -323,7 +359,8 @@ export class SyncRepository {
          SELECT SUM(ib.quantity)::integer AS quantity,
                 (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id,
                 (array_agg(ib.zone_id ORDER BY ib.updated_at DESC))[1] AS zone_id,
-                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id
+                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id,
+                jsonb_agg(jsonb_build_object('locationId', ib.location_id, 'binId', ib.bin_id, 'quantity', ib.quantity)) AS location_balances
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
            AND ($4::uuid[] IS NULL OR ib.location_id = ANY($4::uuid[]))
@@ -340,12 +377,21 @@ export class SyncRepository {
          ORDER BY created_at DESC LIMIT 1
        ) cost ON true
        LEFT JOIN LATERAL (
-         SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt"
+         SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt",
+                CASE WHEN placement.id IS NOT NULL THEN placement.location_id ELSE ii.current_location_id END AS location_id,
+                CASE WHEN placement.metadata ->> 'binId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                     THEN (placement.metadata ->> 'binId')::uuid ELSE ii.current_bin_id END AS bin_id,
+                (t.status = 'transferred' AND placement.location_id IS NULL AND placement.metadata ? 'transferId') AS in_transit
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
+         LEFT JOIN LATERAL (
+           SELECT id, location_id, metadata FROM rfid_tag_events
+           WHERE organization_id = t.organization_id AND tag_id = t.id AND event_type IN ('assigned', 'moved', 'returned')
+           ORDER BY occurred_at DESC, id DESC LIMIT 1
+         ) placement ON true
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
            AND (t.variant_id = v.id OR ii.variant_id = v.id)
-           AND ($4::uuid[] IS NULL OR ii.current_location_id = ANY($4::uuid[]))
+           AND ($4::uuid[] IS NULL OR (CASE WHEN placement.id IS NOT NULL THEN placement.location_id ELSE ii.current_location_id END) = ANY($4::uuid[]))
          ORDER BY t.updated_at DESC LIMIT 1
        ) tag ON true
        WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
@@ -500,6 +546,8 @@ export class SyncRepository {
          SELECT id, version FROM rfid_tags WHERE organization_id = $1 AND id = $2 AND $3 = 'rfid_tag'
          UNION ALL
          SELECT id, version FROM inventory_items WHERE organization_id = $1 AND id = $2 AND $3 = 'inventory_item'
+         UNION ALL
+         SELECT id, version FROM stock_transfers WHERE organization_id = $1 AND id = $2 AND $3 = 'transfer'
        ) source`,
       [organizationId, event.aggregateId, event.aggregateType]
     );

@@ -86,6 +86,16 @@ export async function authorizeSyncEvent(
     if (typeof payload[key] === 'string') locations.add(payload[key]);
   }
   if (event.locationId) locations.add(event.locationId);
+  if (kind === 'transfer.action') {
+    const transfer = (await client.query<{ source_location_id: string; destination_location_id: string }>(
+      'SELECT source_location_id, destination_location_id FROM stock_transfers WHERE organization_id = $1 AND id::text = $2',
+      [ctx.organizationId, event.aggregateId]
+    )).rows[0];
+    if (!transfer) throw new ValidationFailedError('Transfer nije pronađen u zajedničkoj bazi.');
+    locations.clear();
+    const receiving = payload.toStatus === 'awaiting_confirmation' || payload.toStatus === 'completed';
+    locations.add(receiving ? transfer.destination_location_id : transfer.source_location_id);
+  }
   // Derive warehouse scope from authoritative rows, never only caller headers.
   if (kind.startsWith('warehouse.')) {
     const result = await client.query<{ location_id: string }>(

@@ -13,6 +13,7 @@ import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 import { authorizeSyncEvent } from './sync-authorization.js';
+import { projectStockTransfer } from './stock-transfer-projector.js';
 import { assertGrantablePermissions, assignableLocation, grantableRole, lockAccessPolicy, manageableUser, requireActiveOwner } from './access-policy.js';
 
 type ItemCommand = {
@@ -232,6 +233,10 @@ export class OperationalSyncProjector {
     if (!envelope || !command || !commandPayload || typeof kind !== 'string') return event;
 
     const entityIds = record(envelope.entityIds);
+    if (kind === 'transfer.create' || kind === 'transfer.action') {
+      const snapshot = await projectStockTransfer(this.client, ctx, event, kind, commandPayload, entityIds);
+      return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
+    }
     // A desktop writes the business command before it emits the richer RFID
     // snapshot (which contains expected items and reads). Materialize the
     // header from that command as well, so an interrupted snapshot upload can
@@ -3016,7 +3021,9 @@ export class OperationalSyncProjector {
               COALESCE(tag.location_id, inventory.location_id) AS "locationId",
               inventory.zone_id AS "zoneId",
               COALESCE(tag.bin_id, inventory.bin_id) AS "binId",
-              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus"
+              tag.id AS "tagId", tag.epc, tag.status AS "tagStatus",
+              tag.location_id AS "tagLocationId", tag.bin_id AS "tagBinId", tag.in_transit AS "tagInTransit",
+              COALESCE(inventory.location_balances, '[]'::jsonb) AS "locationBalances"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
@@ -3034,7 +3041,8 @@ export class OperationalSyncProjector {
          SELECT SUM(ib.quantity)::integer AS quantity,
                 (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id,
                 (array_agg(ib.zone_id ORDER BY ib.updated_at DESC))[1] AS zone_id,
-                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id
+                (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id,
+                jsonb_agg(jsonb_build_object('locationId', ib.location_id, 'binId', ib.bin_id, 'quantity', ib.quantity)) AS location_balances
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inventory ON true
@@ -3051,7 +3059,8 @@ export class OperationalSyncProjector {
        ) cost ON true
        LEFT JOIN LATERAL (
          SELECT t.id, t.epc, t.status, t.updated_at AS "tagUpdatedAt",
-                latest_event.location_id,
+                CASE WHEN latest_event.id IS NOT NULL THEN latest_event.location_id ELSE ii.current_location_id END AS location_id,
+                (t.status = 'transferred' AND latest_event.location_id IS NULL AND latest_event.metadata ? 'transferId') AS in_transit,
                 CASE
                   WHEN latest_event.metadata ->> 'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
                     THEN (latest_event.metadata ->> 'binId')::uuid
@@ -3060,10 +3069,10 @@ export class OperationalSyncProjector {
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          LEFT JOIN LATERAL (
-           SELECT location_id, metadata
+           SELECT id, location_id, metadata
            FROM rfid_tag_events
            WHERE organization_id = t.organization_id AND tag_id = t.id
-             AND event_type IN ('assigned', 'moved')
+             AND event_type IN ('assigned', 'moved', 'returned')
            ORDER BY occurred_at DESC, id DESC
            LIMIT 1
          ) latest_event ON true
