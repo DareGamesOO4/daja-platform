@@ -101,7 +101,23 @@ export class ReaderStationService {
     } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async findProximity(ctx:RequestContext,stationId:string,input:{sessionId:string;epc:string;rssi:number;proximity:number}):Promise<Record<string,unknown>> { await this.heartbeat(ctx,stationId); const row=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET last_proximity=$4::jsonb WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' AND expires_at>now() RETURNING *`,[input.sessionId,stationId,ctx.organizationId,JSON.stringify({epc:input.epc,rssi:input.rssi,proximity:input.proximity,seenAt:new Date().toISOString()})]); if(!row.rows[0]) throw new ValidationFailedError('Sesija pronalaženja nije aktivna.'); const payload={sessionId:input.sessionId,...row.rows[0].last_proximity!}; this.realtime.publishToSession(ctx.organizationId,input.sessionId,'reader.find.proximity',payload); return payload; }
+  async findProximity(ctx: RequestContext, stationId: string,
+    input: { sessionId: string; epc: string; rssi: number; proximity: number }): Promise<Record<string, unknown>> {
+    if (!ctx.deviceId) throw new ValidationFailedError('Reader Station zahteva identitet uređaja.');
+    const sample = { epc: input.epc, rssi: input.rssi, proximity: input.proximity, seenAt: new Date().toISOString() };
+    const result = await this.database.query(
+      `UPDATE rfid_reader_find_sessions AS session SET last_proximity=$4::jsonb
+       FROM rfid_reader_stations AS station
+       WHERE session.id=$1 AND session.station_id=$2 AND session.organization_id=$3
+         AND session.status='active' AND session.expires_at>now()
+         AND station.id=session.station_id AND station.organization_id=session.organization_id AND station.device_id=$5`,
+      [input.sessionId, stationId, ctx.organizationId, JSON.stringify(sample), ctx.deviceId]
+    );
+    if (!result.rowCount) throw new ValidationFailedError('Sesija pronalaženja nije aktivna.');
+    const payload = { sessionId: input.sessionId, ...sample };
+    this.realtime.publishToSession(ctx.organizationId, input.sessionId, 'reader.find.proximity', payload);
+    return payload;
+  }
   async completeFind(ctx: RequestContext, stationId: string, sessionId: string): Promise<void> {
     await this.closeInactiveSessions(ctx.organizationId);
     await this.heartbeat(ctx, stationId);
