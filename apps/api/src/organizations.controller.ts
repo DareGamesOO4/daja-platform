@@ -29,7 +29,7 @@ export class OrganizationsController {
     @Body() body: { expectedVersion: number; name: string; reason?: string | undefined }
   ) {
     const ctx = resolveRequestContext(request);
-    requireScopedPermission(ctx, ['settings.configure', 'admin.users']);
+    requireScopedPermission(ctx, ['settings.configure', 'admin.users', 'organization.profile.configure']);
     body = parseWithSchema(z.object({ expectedVersion: z.number().int().positive(), name: z.string().trim().min(1).max(240), reason: z.string().trim().max(2000).optional() }), body);
     const tx = new TransactionManager(this.database.pool, this.logger);
     return tx.run(async (client) => {

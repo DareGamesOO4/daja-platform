@@ -2,6 +2,9 @@ import type pg from 'pg';
 import type { RequestContext } from '@daja/shared';
 import type { SyncPushEvent } from '@daja/database';
 import { PermissionDeniedError, ValidationFailedError } from '@daja/security';
+import { requireScopedPermission } from './access-policy.js';
+
+const companyProfileKeys = new Set(['company.name', 'company.legalName', 'company.taxNumber']);
 
 const commandPermissions: Record<string, string[]> = {
   'item.create': ['items.create', 'catalog.write'],
@@ -70,6 +73,12 @@ export async function authorizeSyncEvent(
   const permissions =
     snapshot.kind === 'rfid.cycle_count' ? ['rfid_counts.sync'] : commandPermissions[kind];
   if (!permissions) throw new ValidationFailedError('Unsupported sync command.');
+  if (kind === 'settings.update' && payload.scope === 'organization') {
+    const keys = Object.keys(record(payload.values));
+    const companyProfileOnly = keys.length > 0 && keys.every((key) => companyProfileKeys.has(key));
+    requireScopedPermission(ctx, companyProfileOnly ? [...permissions, 'organization.profile.configure'] : permissions);
+    return;
+  }
   const required =
     kind === 'count.action' && payload.action === 'complete'
       ? ['rfid_counts.confirm']
