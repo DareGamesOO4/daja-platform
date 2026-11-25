@@ -12,6 +12,10 @@ const visualSpecsSchema = z.record(z.string().regex(/^[a-z0-9_]{1,48}$/), z.stri
   .refine((specs) => Object.keys(specs).length <= 24);
 const stationPreviewSchema = z.object({
   name: z.string().trim().min(1).max(240),
+  brandName: z.string().trim().max(120).optional(),
+  modelNumber: z.string().trim().max(120).optional(),
+  gender: z.string().trim().max(80).optional(),
+  departmentSlug: z.string().trim().max(120).optional(),
   sku: z.string().trim().max(120).optional(),
   variantName: z.string().trim().max(240).optional(),
   priceMinor: z.number().int().nonnegative().optional(),

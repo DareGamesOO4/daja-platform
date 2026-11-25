@@ -308,10 +308,13 @@ export class ReaderStationService {
     if (resolved.found !== true || typeof resolved.productId !== 'string' || typeof resolved.variantId !== 'string') return resolved;
     const details = await this.database.query<Record<string, unknown>>(
       `SELECT p.id AS "productId", v.id AS "variantId", p.name, p.slug, v.sku, v.barcode,
+              brand.name AS "brandName", v.mpn AS "modelNumber", v.gender, department.slug AS "departmentSlug",
               v.name AS "variantName", v.current_price_amount::double precision AS "priceMinor", v.currency,
               COALESCE(inventory.quantity,0) AS quantity, location.name AS "locationName", zone.name AS "zoneName", bin.name AS "binName",
               media.public_url AS "imageUrl"
        FROM products p JOIN product_variants v ON v.id=$3 AND v.product_id=p.id AND v.organization_id=p.organization_id
+       LEFT JOIN brands brand ON brand.id=p.brand_id AND brand.organization_id=p.organization_id AND brand.deleted_at IS NULL
+       LEFT JOIN departments department ON department.id=p.department_id AND department.organization_id=p.organization_id AND department.deleted_at IS NULL
        LEFT JOIN inventory_items inventory ON inventory.variant_id=v.id AND inventory.organization_id=p.organization_id AND inventory.deleted_at IS NULL
        LEFT JOIN locations location ON location.id=inventory.location_id
        LEFT JOIN warehouse_zones zone ON zone.id=inventory.zone_id
