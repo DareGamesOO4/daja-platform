@@ -86,7 +86,9 @@ export class ReaderStationService {
       if(active.rows[0]) throw new ResourceConflictError('Čitač je zauzet. Sačekajte da se trenutna sesija završi.');
       const id=randomUUID(), epc=input.epc.replace(/[\s:._-]/g,'').toUpperCase(), product=input.preview?{found:true,...input.preview}:null;
       await client.query(`INSERT INTO rfid_reader_find_sessions (id,organization_id,station_id,requester_user_id,requester_client_id,epc,product,status,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'active',now()+interval '5 minutes')`,[id,ctx.organizationId,input.stationId,ctx.userId,input.clientId,epc,JSON.stringify(product)]); await client.query('COMMIT');
-      const payload={sessionId:id,epc,product,expiresInSeconds:300}; this.realtime.publishToStation(ctx.organizationId,input.stationId,'reader.find.start',payload); return {...payload,status:'active'};
+      const payload = { sessionId: id, epc, product, expiresInSeconds: 300 };
+      this.realtime.publishToStation(ctx.organizationId, input.stationId, 'reader.find.start', payload);
+      return { ...payload, id, status: 'active' };
     } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
@@ -183,6 +185,7 @@ export class ReaderStationService {
     if (resolved.found !== true || typeof resolved.productId !== 'string' || typeof resolved.variantId !== 'string') return resolved;
     const details = await this.database.query<Record<string, unknown>>(
       `SELECT p.id AS "productId", v.id AS "variantId", p.name, p.slug, v.sku, v.barcode,
+              v.name AS "variantName", v.current_price_amount::double precision AS "priceMinor", v.currency,
               COALESCE(inventory.quantity,0) AS quantity, location.name AS "locationName", zone.name AS "zoneName", bin.name AS "binName",
               media.public_url AS "imageUrl"
        FROM products p JOIN product_variants v ON v.id=$3 AND v.product_id=p.id AND v.organization_id=p.organization_id
