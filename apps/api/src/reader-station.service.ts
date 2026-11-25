@@ -99,18 +99,58 @@ export class ReaderStationService {
   }
 
   async findProximity(ctx:RequestContext,stationId:string,input:{sessionId:string;epc:string;rssi:number;proximity:number}):Promise<Record<string,unknown>> { await this.heartbeat(ctx,stationId); const row=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET last_proximity=$4::jsonb WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' AND expires_at>now() RETURNING *`,[input.sessionId,stationId,ctx.organizationId,JSON.stringify({epc:input.epc,rssi:input.rssi,proximity:input.proximity,seenAt:new Date().toISOString()})]); if(!row.rows[0]) throw new ValidationFailedError('Sesija pronalaženja nije aktivna.'); const payload={sessionId:input.sessionId,...row.rows[0].last_proximity!}; this.realtime.publishToSession(ctx.organizationId,input.sessionId,'reader.find.proximity',payload); return payload; }
-  async completeFind(ctx:RequestContext,stationId:string,sessionId:string):Promise<void> { await this.closeInactiveSessions(ctx.organizationId); await this.heartbeat(ctx,stationId); const result=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET status='completed',completed_at=now() WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' AND expires_at>now() RETURNING *`,[sessionId,stationId,ctx.organizationId]); const row=result.rows[0]; if(!row)return; const payload={sessionId,status:'completed'}; this.realtime.publishToStation(ctx.organizationId,stationId,'reader.find.completed',payload); this.realtime.publishToSession(ctx.organizationId,sessionId,'reader.find.completed',payload); }
-  async cancelFind(ctx:RequestContext,sessionId:string):Promise<void> { const result=await this.database.query<FindSessionRow>(`UPDATE rfid_reader_find_sessions SET status='cancelled',completed_at=now() WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3 AND status='active' RETURNING *`,[sessionId,ctx.organizationId,ctx.userId]); const row=result.rows[0]; if(!row)return; const payload={sessionId,status:'cancelled'}; this.realtime.publishToStation(ctx.organizationId,row.station_id,'reader.find.cancelled',payload); this.realtime.publishToSession(ctx.organizationId,sessionId,'reader.find.cancelled',payload); }
+  async completeFind(ctx: RequestContext, stationId: string, sessionId: string): Promise<void> {
+    await this.closeInactiveSessions(ctx.organizationId);
+    await this.heartbeat(ctx, stationId);
+    const result = await this.database.query<{ label_edits: unknown }>(
+      `UPDATE rfid_reader_find_sessions SET status='completed',completed_at=now()
+       WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' AND expires_at>now()
+       RETURNING product->'labelEdits' AS label_edits`, [sessionId, stationId, ctx.organizationId]
+    );
+    if (result.rows[0]) this.publishSessionClosed(ctx.organizationId, stationId, sessionId, 'find', 'completed', result.rows[0].label_edits);
+  }
+
+  async cancelFind(ctx: RequestContext, sessionId: string): Promise<void> {
+    const result = await this.database.query<FindSessionRow>(
+      `UPDATE rfid_reader_find_sessions SET status='cancelled',completed_at=now()
+       WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3 AND status='active' RETURNING *`,
+      [sessionId, ctx.organizationId, ctx.userId]
+    );
+    const row = result.rows[0];
+    if (row) this.publishSessionClosed(ctx.organizationId, row.station_id, sessionId, 'find', 'cancelled', row.product?.labelEdits);
+  }
   async findSession(ctx:RequestContext,sessionId:string):Promise<Record<string,unknown>> { await this.closeInactiveSessions(ctx.organizationId); const result=await this.database.query<FindSessionRow>(`SELECT id,station_id,requester_user_id,status,epc,product,last_proximity,expires_at FROM rfid_reader_find_sessions WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3`,[sessionId,ctx.organizationId,ctx.userId]); const row=result.rows[0]; if(!row)throw new ValidationFailedError('Sesija pronalaženja nije pronađena.'); return {id:row.id,stationId:row.station_id,status:row.status,epc:row.epc,product:row.product,lastProximity:row.last_proximity,expiresAt:row.expires_at}; }
 
   async abortFind(ctx: RequestContext, stationId: string, sessionId: string): Promise<void> {
     await this.heartbeat(ctx, stationId);
-    const result = await this.database.query<{ status: 'cancelled' | 'expired' }>(
+    const result = await this.database.query<{ status: 'cancelled' | 'expired'; label_edits: unknown }>(
       `UPDATE rfid_reader_find_sessions SET status=CASE WHEN expires_at<=now() THEN 'expired' ELSE 'cancelled' END, completed_at=now()
-       WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' RETURNING status`,
+       WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status='active' RETURNING status,product->'labelEdits' AS label_edits`,
       [sessionId, stationId, ctx.organizationId]
     );
-    if (result.rows[0]) this.publishSessionClosed(ctx.organizationId, stationId, sessionId, 'find', result.rows[0].status);
+    const row = result.rows[0];
+    if (row) this.publishSessionClosed(ctx.organizationId, stationId, sessionId, 'find', row.status, row.label_edits);
+  }
+
+  async updateLabel(ctx: RequestContext, stationId: string, kind: 'sessions' | 'find-sessions', sessionId: string,
+    edits: { sku?: string | undefined; variantName?: string | undefined }): Promise<Record<string, unknown>> {
+    await this.closeInactiveSessions(ctx.organizationId);
+    await this.heartbeat(ctx, stationId);
+    const finding = kind === 'find-sessions';
+    const table = finding ? 'rfid_reader_find_sessions' : 'rfid_reader_scan_sessions';
+    const status = finding ? "status='active'" : "status IN ('awaiting_epc','awaiting_barcode')";
+    const result = await this.database.query<{ product: Record<string, unknown> }>(
+      `UPDATE ${table} SET product=product || $4::jsonb ||
+         jsonb_build_object('labelEdits', coalesce(product->'labelEdits', '{}'::jsonb) || $4::jsonb)
+       WHERE organization_id=$1 AND station_id=$2 AND id=$3 AND ${status}
+         AND expires_at>now() AND product IS NOT NULL RETURNING product`,
+      [ctx.organizationId, stationId, sessionId, JSON.stringify(edits)]
+    );
+    const row = result.rows[0];
+    if (!row) throw new ValidationFailedError('Sesija za unos podataka sa nalepnice više nije aktivna.');
+    const payload = { sessionId, product: row.product };
+    this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.label.updated', payload);
+    return payload;
   }
 
   async epc(ctx: RequestContext, stationId: string, sessionId: string, rawEpc: string): Promise<Record<string, unknown>> {
@@ -118,8 +158,14 @@ export class ReaderStationService {
     const epc = rawEpc.replace(/[\s:._-]/g, '').toUpperCase();
     if (!epc) throw new ValidationFailedError('EPC nije validan.');
     const resolved = await new RfidRepository(this.database.pool).resolvePublic(ctx, epc) as Record<string, unknown>;
-    const product = session.product ?? await this.stationProduct(ctx.organizationId, resolved);
-    await this.database.query(`UPDATE rfid_reader_scan_sessions SET status='awaiting_barcode',epc=$2,product=$3::jsonb,expires_at=now()+interval '60 seconds' WHERE id=$1`, [session.id, epc, JSON.stringify(product)]);
+    const fallback = session.product ?? await this.stationProduct(ctx.organizationId, resolved);
+    const result = await this.database.query<{ product: Record<string, unknown> }>(
+      `UPDATE rfid_reader_scan_sessions SET status='awaiting_barcode',epc=$2,product=coalesce(product,$3::jsonb),expires_at=now()+interval '60 seconds'
+       WHERE id=$1 AND status='awaiting_epc' AND expires_at>now() RETURNING product`,
+      [session.id, epc, JSON.stringify(fallback)]
+    );
+    const product = result.rows[0]?.product;
+    if (!product) throw new ValidationFailedError('Sesija više nije aktivna.');
     const payload = { sessionId, phase: 'barcode', epc, product, expiresInSeconds: 60 };
     this.realtime.publishToStation(ctx.organizationId, stationId, 'reader.scan.product', payload);
     this.realtime.publishToSession(ctx.organizationId, session.id, 'reader.scan.product', payload);
@@ -129,8 +175,12 @@ export class ReaderStationService {
   async barcode(ctx: RequestContext, stationId: string, sessionId: string, barcode?: string): Promise<Record<string, unknown>> {
     const session = await this.stationSession(ctx, stationId, sessionId, 'awaiting_barcode');
     const normalized = barcode?.trim() || null;
-    await this.database.query(`UPDATE rfid_reader_scan_sessions SET status='completed',barcode=$2,completed_at=now() WHERE id=$1`, [session.id, normalized]);
-    const payload = { sessionId, status: 'completed', epc: session.epc, barcode: normalized, product: session.product };
+    const result = await this.database.query<{ product: Record<string, unknown> | null }>(
+      `UPDATE rfid_reader_scan_sessions SET status='completed',barcode=$2,completed_at=now()
+       WHERE id=$1 AND status='awaiting_barcode' AND expires_at>now() RETURNING product`, [session.id, normalized]
+    );
+    if (!result.rows[0]) throw new ValidationFailedError('Sesija više nije aktivna.');
+    const payload = { sessionId, status: 'completed', epc: session.epc, barcode: normalized, product: result.rows[0].product };
     this.realtime.publishToStation(ctx.organizationId, stationId, 'reader.scan.completed', payload);
     this.realtime.publishToSession(ctx.organizationId, session.id, 'reader.scan.completed', payload);
     return payload;
@@ -138,10 +188,8 @@ export class ReaderStationService {
 
   async cancel(ctx: RequestContext, sessionId: string): Promise<void> {
     const result = await this.database.query<SessionRow>(`UPDATE rfid_reader_scan_sessions SET status='cancelled',completed_at=now() WHERE id=$1 AND organization_id=$2 AND requester_user_id=$3 AND status IN ('awaiting_epc','awaiting_barcode') RETURNING *`, [sessionId,ctx.organizationId,ctx.userId]);
-    const row = result.rows[0]; if (!row) return;
-    const payload = { sessionId, status: 'cancelled' };
-    this.realtime.publishToStation(ctx.organizationId, row.station_id, 'reader.scan.cancelled', payload);
-    this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.scan.cancelled', payload);
+    const row = result.rows[0];
+    if (row) this.publishSessionClosed(ctx.organizationId, row.station_id, sessionId, 'scan', 'cancelled', row.product?.labelEdits);
   }
 
   /** HTTP fallback for the browser. Realtime can reconnect during a scan, so
@@ -180,10 +228,8 @@ export class ReaderStationService {
        WHERE id=$1 AND station_id=$2 AND organization_id=$3 AND status IN ('awaiting_epc','awaiting_barcode') RETURNING *`,
       [sessionId, stationId, ctx.organizationId]
     );
-    if (!result.rows[0]) return;
-    const payload = { sessionId, status: 'cancelled' };
-    this.realtime.publishToStation(ctx.organizationId, stationId, 'reader.scan.cancelled', payload);
-    this.realtime.publishToSession(ctx.organizationId, sessionId, 'reader.scan.cancelled', payload);
+    const row = result.rows[0];
+    if (row) this.publishSessionClosed(ctx.organizationId, stationId, sessionId, 'scan', 'cancelled', row.product?.labelEdits);
   }
 
   private async stationSession(ctx: RequestContext, stationId: string, sessionId: string, status: ScanStatus): Promise<SessionRow> {
@@ -192,9 +238,11 @@ export class ReaderStationService {
     const row = result.rows[0]; if (!row) throw new ValidationFailedError('Sesija nije aktivna.'); return row;
   }
 
-  private publishSessionClosed(organizationId: string, stationId: string, sessionId: string, kind: 'scan' | 'find', status: 'cancelled' | 'expired'): void {
-    const payload = { sessionId, status };
-    const event = `reader.${kind}.cancelled`;
+  private publishSessionClosed(organizationId: string, stationId: string, sessionId: string,
+    kind: 'scan' | 'find', status: 'completed' | 'cancelled' | 'expired', labelEdits?: unknown): void {
+    const payload = { sessionId, status, ...(labelEdits ? { product: { labelEdits } } : {}) };
+    const phase = status === 'completed' ? 'completed' : 'cancelled';
+    const event = `reader.${kind}.${phase}`;
     this.realtime.publishToStation(organizationId, stationId, event, payload);
     this.realtime.publishToSession(organizationId, sessionId, event, payload);
   }
@@ -204,17 +252,19 @@ export class ReaderStationService {
     const filter = restart ? "station_id=$3 AND created_at<$4" : "expires_at<=now()";
     const params = restart ? [organizationId, status, restart.stationId, restart.startedBefore] : [organizationId, status];
     const findFilter = restart ? filter : `(${filter} OR created_at<=now()-$3::int*interval '1 second')`;
-    const scans = await this.database.query<{ id: string; station_id: string }>(
+    const scans = await this.database.query<{ id: string; station_id: string; label_edits: unknown }>(
       `UPDATE rfid_reader_scan_sessions SET status=$2,completed_at=now()
-       WHERE organization_id=$1 AND status IN ('awaiting_epc','awaiting_barcode') AND ${filter} RETURNING id,station_id`, params
+       WHERE organization_id=$1 AND status IN ('awaiting_epc','awaiting_barcode') AND ${filter}
+       RETURNING id,station_id,product->'labelEdits' AS label_edits`, params
     );
-    const finds = await this.database.query<{ id: string; station_id: string }>(
+    const finds = await this.database.query<{ id: string; station_id: string; label_edits: unknown }>(
       `UPDATE rfid_reader_find_sessions SET status=$2,completed_at=now()
-       WHERE organization_id=$1 AND status='active' AND ${findFilter} RETURNING id,station_id`,
+       WHERE organization_id=$1 AND status='active' AND ${findFilter}
+       RETURNING id,station_id,product->'labelEdits' AS label_edits`,
       restart ? params : [...params, FIND_TIMEOUT_SECONDS]
     );
-    for (const row of scans.rows) this.publishSessionClosed(organizationId, row.station_id, row.id, 'scan', status);
-    for (const row of finds.rows) this.publishSessionClosed(organizationId, row.station_id, row.id, 'find', status);
+    for (const row of scans.rows) this.publishSessionClosed(organizationId, row.station_id, row.id, 'scan', status, row.label_edits);
+    for (const row of finds.rows) this.publishSessionClosed(organizationId, row.station_id, row.id, 'find', status, row.label_edits);
   }
 
   private async stationProduct(organizationId: string, resolved: Record<string, unknown>): Promise<Record<string, unknown>> {

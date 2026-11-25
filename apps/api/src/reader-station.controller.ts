@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Patch, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { z } from 'zod';
 import { TenantAccessDeniedError } from '@daja/security';
@@ -16,8 +16,15 @@ const stationPreviewSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/).optional(),
   barcode: z.string().trim().max(256).optional(),
   imageUrl: z.string().url().max(2000).optional(),
+  visualSpecs: z.record(z.string().regex(/^[a-z0-9_]{1,48}$/), z.string().trim().max(120))
+    .refine((specs) => Object.keys(specs).length <= 24).optional(),
   description: z.string().trim().max(1000).optional()
 });
+const labelSchema = z.object({
+  sku: z.string().trim().max(120).optional(),
+  variantName: z.string().trim().max(240).optional()
+}).refine((label) => label.sku !== undefined || label.variantName !== undefined);
+const labelSessionKind = z.enum(['sessions', 'find-sessions']);
 const startSchema=z.object({stationId:uuidSchema,clientId:uuidSchema,preview:stationPreviewSchema.optional()});
 const epcSchema=z.object({sessionId:uuidSchema,epc:z.string().trim().min(1).max(256)});
 const barcodeSchema=z.object({sessionId:uuidSchema,barcode:z.string().trim().max(256).optional()});
@@ -33,6 +40,13 @@ export class ReaderStationController {
   constructor(@Inject(ReaderStationService) private readonly stations: ReaderStationService) {}
   @Post('register') async register(@Req() req:Request,@Body() body:unknown){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.register(ctx,parseWithSchema(registerSchema,body));}
   @Post(':id/heartbeat') async heartbeat(@Req() req:Request,@Param('id') id:string){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);await this.stations.heartbeat(ctx,parseWithSchema(uuidSchema,id),true);return {ok:true};}
+  @Patch(':stationId/:kind/:sessionId/label')
+  async updateLabel(@Req() req: Request, @Param('stationId') stationId: string, @Param('kind') kind: string, @Param('sessionId') sessionId: string, @Body() body: unknown) {
+    const ctx = resolveRequestContext(req);
+    requireReaderAccess(ctx);
+    return this.stations.updateLabel(ctx, parseWithSchema(uuidSchema, stationId), parseWithSchema(labelSessionKind, kind),
+      parseWithSchema(uuidSchema, sessionId), parseWithSchema(labelSchema, body));
+  }
   @Get() async list(@Req() req:Request){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.list(ctx);}
   @Post('sessions') async start(@Req() req:Request,@Body() body:unknown){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.start(ctx,parseWithSchema(startSchema,body));}
   @Post('find-sessions') async startFind(@Req() req:Request,@Body() body:unknown){const ctx=resolveRequestContext(req);requireReaderAccess(ctx);return this.stations.startFind(ctx,parseWithSchema(findStartSchema,body));}
