@@ -1,11 +1,14 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, verify } from 'node:crypto';
+import type { Request } from 'express';
+import { loadConfig } from '@daja/config';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Database } from './pool.js';
 import { migrate } from './migrations.js';
 import { DeviceRepository, SyncRepository } from './sync.js';
 import { createTestDatabase, resetDatabase } from '../test/helpers.js';
 import { OperationalSyncProjector } from '../../../apps/api/src/operational-sync-projector.js';
+import { OfflineInventoryController } from '../../../apps/api/src/offline-inventory.controller.js';
 
 const organizationId = '00000000-0000-4000-8000-000000000701';
 const otherOrganizationId = '00000000-0000-4000-8000-000000000702';
@@ -19,6 +22,7 @@ const ctx = {
   userId,
   locationId,
   roles: ['owner'],
+  isOwner: true,
   permissions: ['sync.read', 'sync.write', 'sync.conflicts', 'admin.users', 'rfid_counts.sync']
 };
 
@@ -136,6 +140,109 @@ describe('plan 3 sync foundation', () => {
     const snapshot = await new SyncRepository(database.pool).bootstrapSnapshot(ctx, { limit: 50 });
     expect(snapshot.watermarkRevision).toBe(1);
     expect(snapshot.items.length).toBeGreaterThan(0);
+  });
+
+  it('pages mobile variants, keeps tag and quantity location scoped, and signs the live count baseline', async () => {
+    const secondLocation = randomUUID();
+    const variant = '00000000-0000-4000-8000-000000000709';
+    const anotherVariant = '00000000-0000-4000-8000-000000000710';
+    const product = randomUUID();
+    const tag = randomUUID();
+    const tagAtSecondLocation = randomUUID();
+    const epc = 'E20000000000000000000001';
+    const otherEpc = 'E20000000000000000000002';
+    const role = randomUUID();
+    const media = randomUUID();
+    const thumb = 'https://media.example.test/thumb.webp';
+    await database.query("INSERT INTO roles(id, organization_id, name) VALUES($1,$2,'Fixture')", [role, organizationId]);
+    await database.query(
+      "INSERT INTO user_role_assignments(organization_id,user_id,role_id,scope,location_id) VALUES($1,$2,$3,'location',$4)",
+      [organizationId,userId,role,locationId]
+    );
+    await database.query(
+      "INSERT INTO locations(id,organization_id,code,name,type,timezone) VALUES($1,$2,'SECOND','Second','store','Europe/Belgrade')",
+      [secondLocation, organizationId]
+    );
+    await database.query("INSERT INTO products(id,organization_id,name,slug) VALUES($1,$2,'Fixture','fixture-product')", [product, organizationId]);
+    await database.query(
+      "INSERT INTO product_variants(id,organization_id,product_id,sku,currency,current_price_amount,active) VALUES($1,$3,$4,'A1','RSD',5000,true),($2,$3,$4,'A2','RSD',8000,false)",
+      [variant, anotherVariant, organizationId, product]
+    );
+    await database.query(
+      "INSERT INTO inventory_balances(organization_id,location_id,variant_id,quantity) VALUES($1,$2,$4,1),($1,$3,$4,2)",
+      [organizationId,locationId,secondLocation,variant]
+    );
+    await database.query(
+      "INSERT INTO rfid_tags(id,organization_id,epc,variant_id,status) VALUES($1,$3,$4,$6,'in_stock'),($2,$3,$5,$6,'in_stock')",
+      [tag,tagAtSecondLocation,organizationId,epc,otherEpc,variant]
+    );
+    await database.query(
+      "INSERT INTO rfid_tag_events(organization_id,tag_id,location_id,event_type) VALUES($1,$2,$4,'assigned'),($1,$3,$5,'assigned')",
+      [organizationId,tag,tagAtSecondLocation,locationId,secondLocation]
+    );
+    await database.query(
+      "INSERT INTO media_assets(id,organization_id,storage_provider,storage_bucket,storage_key,public_url,mime_type,status) VALUES($1,$2,'external-url','fixture','file','https://media.example.test/full.jpg','image/jpeg','ready')",
+      [media,organizationId]
+    );
+    await database.query(
+      "INSERT INTO product_media(organization_id,product_id,media_asset_id,role,is_primary) VALUES($1,$2,$3,'hero',true)",
+      [organizationId,product,media]
+    );
+    await database.query(
+      "INSERT INTO media_derivatives(organization_id,media_asset_id,width,height,mime_type,storage_key,public_url,size_bytes) VALUES($1,$2,160,160,'image/webp','thumb',$3,10)",
+      [organizationId,media,thumb]
+    );
+
+    const deviceId = await registerSyncDevice(database, 'mobile-offline-fixture');
+    const scoped = { ...ctx, isOwner: false, deviceId, policyVersion: 4,
+      scopedGrants: [{ permission: 'sync.read', scope: 'location' as const, locationId },
+        { permission: 'rfid_counts.sync', scope: 'location' as const, locationId }] };
+    const sync = new SyncRepository(database.pool);
+    const first = await sync.bootstrapSnapshot(scoped, { limit: 1, mobile: { includeState: true } });
+    expect(first).toMatchObject({ hasMore: true, nextCursor: variant });
+    expect(first.items).toEqual([expect.objectContaining({ variantId: variant, quantity: 1, thumbnailUri: thumb,
+      rfidPieces: [expect.objectContaining({ tagId: tag, epc, locationId })] })]);
+    const second = await sync.bootstrapSnapshot(scoped, { limit: 1, cursor: variant, mobile: { includeState: false } });
+    expect(second.items).toEqual([expect.objectContaining({ variantId: anotherVariant, active: false })]);
+
+    const key = generateKeyPairSync('ed25519');
+    const controller = new OfflineInventoryController(database, {
+      ...loadConfig(), OFFLINE_PACKAGE_SIGNING_PRIVATE_KEY: key.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+    });
+    const request = { authContext: scoped, headers: {} } as unknown as Request;
+    const baseline = await controller.mobileBaseline(request, { locationId });
+    expect(baseline.expectedTags).toEqual([expect.objectContaining({ tagId: tag, epc, productVariantId: variant })]);
+    const envelope = await controller.mobileReserve(request, { locationId });
+    const bytes = Buffer.from(envelope.payload, 'base64url');
+    expect(verify(null, bytes, key.publicKey, Buffer.from(envelope.signature, 'base64url'))).toBe(true);
+    const reserve = JSON.parse(bytes.toString('utf8'));
+    expect(reserve).toMatchObject({ schemaVersion: 2, organizationId, userId, deviceId, policyVersion: 4, baseline });
+    expect(Date.parse(reserve.expiresAt) - Date.parse(reserve.issuedAt)).toBe(24 * 3600_000);
+    await expect(controller.mobileReserve(request, { locationId: secondLocation })).rejects.toThrow();
+  });
+
+  it('applies a mobile sale once when the same event is replayed after reconnect', async () => {
+    const product = randomUUID();
+    const variant = randomUUID();
+    const sale = randomUUID();
+    const deviceId = await registerSyncDevice(database, 'mobile-sale-fixture');
+    await database.query("INSERT INTO products(id,organization_id,name,slug) VALUES($1,$2,'Sale fixture','sale-fixture')", [product,organizationId]);
+    await database.query("INSERT INTO product_variants(id,organization_id,product_id,sku,currency,current_price_amount) VALUES($1,$2,$3,'SALE','RSD',10000)", [variant,organizationId,product]);
+    await database.query("INSERT INTO inventory_balances(organization_id,location_id,variant_id,quantity) VALUES($1,$2,$3,2)", [organizationId,locationId,variant]);
+    const saleEvent = {
+      ...event('mobile-sale-replay', sale, { command: { kind: 'sale.confirm', payload: {
+        saleId: sale, locationId, paymentMethod: 'cash', cashPaidMinor: 10000,
+        lines: [{ productVariantId: variant, quantity: 1, unitPriceMinor: 10000 }]
+      } } }), aggregateType: 'sale', operation: 'command'
+    };
+    const owner = { ...ctx, deviceId };
+    const sync = new SyncRepository(database.pool);
+    const projector = new OperationalSyncProjector(database.pool as never);
+    const replay = async () => sync.pushBatch(owner, [saleEvent], row => projector.materialize(owner, row));
+    expect(await replay()).toMatchObject([{ status: 'applied' }]);
+    expect(await replay()).toMatchObject([{ status: 'duplicate' }]);
+    expect((await database.query("SELECT quantity FROM inventory_balances WHERE variant_id=$1", [variant])).rows).toEqual([{ quantity: 1 }]);
+    expect((await database.query("SELECT id FROM internal_sales WHERE id=$1", [sale])).rows).toEqual([{ id: sale }]);
   });
 
   it('keeps server sync events append-only', async () => {
