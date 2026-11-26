@@ -50,16 +50,23 @@ export class CustomerAuthService {
         tokenHash: sha256Hex(token),
         expiresAt: new Date(Date.now() + 15 * 60 * 1000)
       });
-    if (verification.alreadyVerified) return { status: 'already_verified' as const };
-    if (verification.queued === false) return { status: 'queued' as const };
+      if (verification.alreadyVerified) return { status: 'already_verified' as const };
+      const suppressed = await client.query(
+        'SELECT 1 FROM email_suppressions WHERE email = $1',
+        [verification.email.trim().toLowerCase()]
+      );
+      if (suppressed.rowCount) {
+        throw new ValidationFailedError('Dostava na ovu email adresu je blokirana. Proverite adresu ili se obratite podršci.');
+      }
+      if (verification.queued === false) return { status: 'queued' as const };
 
-    const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
-    verificationUrl.searchParams.set('token', token);
-    await this.email.posaljiPotvrduEmailAdrese({
-      recipient: verification.email,
-      verificationUrl: verificationUrl.toString()
-    }, client);
-    return { status: 'queued' as const };
+      const verificationUrl = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
+      verificationUrl.searchParams.set('token', token);
+      await this.email.posaljiPotvrduEmailAdrese({
+        recipient: verification.email,
+        verificationUrl: verificationUrl.toString()
+      }, client);
+      return { status: 'queued' as const };
     });
   }
 

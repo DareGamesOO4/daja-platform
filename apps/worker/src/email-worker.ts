@@ -19,9 +19,10 @@ interface DeliveryRow {
 }
 
 type SesSendingMode = 'disabled' | 'sandbox' | 'production';
+const storefrontVerificationTags = ['novosti-potvrda', 'product-alert-confirmation'];
 const firebaseEmailTags = [
   'order-confirmation', 'new-order-notification', 'order-status-update',
-  'potvrda-email-adrese', 'promena-lozinke'
+  'potvrda-email-adrese', 'promena-lozinke', ...storefrontVerificationTags
 ];
 
 export class EmailWorker {
@@ -272,7 +273,7 @@ export class EmailWorker {
         },
         body: JSON.stringify({
           id: row.id,
-          from: this.sender(input),
+          from: storefrontVerificationTags.includes(input.tag) ? this.config.SES_ACCOUNT_FROM_EMAIL : this.sender(input),
           to: row.recipient,
           subject: input.subject,
           text: input.text,
