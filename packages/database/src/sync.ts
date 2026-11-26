@@ -348,7 +348,15 @@ export class SyncRepository {
 
   async bootstrapSnapshot(
     ctx: Pick<RequestContext, 'organizationId' | 'scopedGrants' | 'isOwner'>,
-    input: { limit: number; cursor?: string | undefined }
+    input: {
+      limit: number;
+      cursor?: string | undefined;
+      mobile?: {
+        variantIds?: string[] | undefined;
+        productIds?: string[] | undefined;
+        includeState: boolean;
+      } | undefined;
+    }
   ) {
     await this.ensureRevisionRow(ctx.organizationId);
     const revision = await this.client.query<{ current_revision: string }>(
@@ -356,6 +364,7 @@ export class SyncRepository {
       [ctx.organizationId]
     );
     const cursor = input.cursor ?? '';
+    const rowKey = input.mobile ? 'v.id' : 'p.id';
     const result = await this.client.query(
       `SELECT p.id AS "productId", p.slug, p.name AS "productName", p.description, p.seo, p.features, p.model_3d_url AS "model3dUrl", p.active AS "productActive", p.published AS "productPublished",
               p.created_at AS "productCreatedAt", p.updated_at AS "productUpdatedAt",
@@ -374,15 +383,20 @@ export class SyncRepository {
               tag.id AS "tagId", tag.epc, tag.status AS "tagStatus",
               tag.location_id AS "tagLocationId", tag.bin_id AS "tagBinId", tag.in_transit AS "tagInTransit",
               COALESCE(inventory.location_balances, '[]'::jsonb) AS "locationBalances"
+              ${input.mobile ? ', media.thumbnail_url AS "thumbnailUri", tag."rfidPieces"' : ''}
        FROM products p
        JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
-        AND v.deleted_at IS NULL AND v.active
+        AND v.deleted_at IS NULL ${input.mobile ? '': 'AND v.active'}
        LEFT JOIN departments d ON d.id = p.department_id AND d.organization_id = p.organization_id AND d.deleted_at IS NULL
        LEFT JOIN brands b ON b.id = p.brand_id AND b.organization_id = p.organization_id AND b.deleted_at IS NULL
        LEFT JOIN categories c ON c.id = p.primary_category_id AND c.organization_id = p.organization_id AND c.deleted_at IS NULL
        LEFT JOIN LATERAL (
-         SELECT ma.public_url FROM product_media pm
+         SELECT ma.public_url ${input.mobile ? ', derivative.public_url AS thumbnail_url' : ''} FROM product_media pm
          JOIN media_assets ma ON ma.id = pm.media_asset_id AND ma.status = 'ready'
+         ${input.mobile ? `LEFT JOIN LATERAL (
+           SELECT md.public_url FROM media_derivatives md WHERE md.media_asset_id = ma.id AND md.public_url IS NOT NULL
+           ORDER BY (md.mime_type = 'image/webp') DESC, md.width ASC LIMIT 1
+         ) derivative ON true` : ''}
          WHERE pm.organization_id = p.organization_id AND pm.product_id = p.id
          ORDER BY pm.is_primary DESC, pm.position ASC LIMIT 1
        ) media ON true
@@ -391,7 +405,7 @@ export class SyncRepository {
                 (array_agg(ib.location_id ORDER BY ib.updated_at DESC))[1] AS location_id,
                 (array_agg(ib.zone_id ORDER BY ib.updated_at DESC))[1] AS zone_id,
                 (array_agg(ib.bin_id ORDER BY ib.updated_at DESC))[1] AS bin_id,
-                jsonb_agg(jsonb_build_object('locationId', ib.location_id, 'binId', ib.bin_id, 'quantity', ib.quantity)) AS location_balances
+                jsonb_agg(jsonb_build_object('locationId', ib.location_id, 'binId', ib.bin_id, 'quantity', ib.quantity ${input.mobile ? ", 'zoneId', ib.zone_id" : ''})) AS location_balances
          FROM inventory_balances ib
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
            AND ($4::uuid[] IS NULL OR ib.location_id = ANY($4::uuid[]))
@@ -415,6 +429,15 @@ export class SyncRepository {
                 CASE WHEN placement.metadata ->> 'binId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
                      THEN (placement.metadata ->> 'binId')::uuid ELSE ii.current_bin_id END AS bin_id,
                 (t.status = 'transferred' AND placement.location_id IS NULL AND placement.metadata ? 'transferId') AS in_transit
+                ${input.mobile ? `, jsonb_agg(jsonb_build_object('tagId', t.id, 'epc', t.epc, 'tagStatus', t.status,
+                  'barcode', v.barcode, 'locationId', CASE WHEN placement.id IS NOT NULL THEN placement.location_id ELSE ii.current_location_id END,
+                  'zoneId', CASE WHEN placement.id IS NULL THEN ii.current_zone_id
+                    WHEN placement.metadata->>'zoneId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN (placement.metadata->>'zoneId')::uuid
+                    ELSE COALESCE(placement_bin.zone_id, ii.current_zone_id) END,
+                  'binId', CASE WHEN placement.metadata->>'binId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN (placement.metadata->>'binId')::uuid ELSE ii.current_bin_id END))
+                  FILTER (WHERE t.status NOT IN ('retired','sold','lost')
+                    AND NOT (t.status = 'transferred' AND placement.id IS NOT NULL AND placement.location_id IS NULL)) OVER () AS "rfidPieces"` : ''}
          FROM rfid_tags t
          LEFT JOIN inventory_items ii ON ii.id = t.inventory_item_id AND ii.deleted_at IS NULL
          LEFT JOIN LATERAL (
@@ -422,17 +445,30 @@ export class SyncRepository {
            WHERE organization_id = t.organization_id AND tag_id = t.id AND event_type IN ('assigned', 'moved', 'returned')
            ORDER BY occurred_at DESC, id DESC LIMIT 1
          ) placement ON true
+         ${input.mobile ? `LEFT JOIN warehouse_bins placement_bin ON placement_bin.organization_id=t.organization_id
+           AND placement_bin.deleted_at IS NULL
+           AND placement_bin.id=CASE WHEN placement.metadata->>'binId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+             THEN (placement.metadata->>'binId')::uuid END` : ''}
          WHERE t.organization_id = p.organization_id AND t.deleted_at IS NULL
            AND (t.variant_id = v.id OR ii.variant_id = v.id)
            AND ($4::uuid[] IS NULL OR (CASE WHEN placement.id IS NOT NULL THEN placement.location_id ELSE ii.current_location_id END) = ANY($4::uuid[]))
-         ORDER BY t.updated_at DESC LIMIT 1
+         ORDER BY ${input.mobile ? "(t.status IN ('assigned','in_stock','reserved','returned','transferred')) DESC," : ''} t.updated_at DESC, t.id LIMIT 1
        ) tag ON true
-       WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND p.id::text > $2
-       ORDER BY p.id
+       WHERE p.organization_id = $1 AND p.deleted_at IS NULL AND ${rowKey}::text > $2
+         ${input.mobile ? 'AND (($5::uuid[] IS NULL AND $6::uuid[] IS NULL) OR v.id=ANY($5::uuid[]) OR p.id=ANY($6::uuid[]))' : ''}
+       ORDER BY ${rowKey}
        LIMIT $3`,
-      [ctx.organizationId, cursor, input.limit + 1, syncLocations(ctx)]
+      [ctx.organizationId, cursor, input.limit + 1, syncLocations(ctx),
+        ...(input.mobile ? [input.mobile.variantIds ?? null, input.mobile.productIds ?? null] : [])]
     );
     const rows = result.rows.slice(0, input.limit);
+    const pagination = {
+      nextCursor: result.rows.length > input.limit ? rows.at(-1)?.[input.mobile ? 'variantId' : 'productId'] : null,
+      hasMore: result.rows.length > input.limit
+    };
+    if (input.mobile && !input.mobile.includeState) {
+      return { watermarkRevision: Number(revision.rows[0]?.current_revision ?? 0), items: rows, ...pagination };
+    }
     const [departments, brands, categories, specificationKeys, locations, warehouses, zones, bins, salesConfiguration] = await Promise.all([
       this.client.query(
         `SELECT id, name FROM departments WHERE organization_id = $1 AND deleted_at IS NULL AND active ORDER BY sort_order, name`,
@@ -502,8 +538,7 @@ export class SyncRepository {
         bins: bins.rows
       },
       salesConfiguration: salesConfiguration.rows[0] ?? { services: [], staff: [], shifts: [], shiftOverrides: [] },
-      nextCursor: result.rows.length > input.limit ? rows.at(-1)?.productId : null,
-      hasMore: result.rows.length > input.limit
+      ...pagination
     };
   }
 

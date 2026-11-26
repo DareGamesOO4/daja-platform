@@ -1,15 +1,16 @@
-import { Body, Controller, Get, Inject, Param, Post, Req } from '@nestjs/common';
-import { createHash, randomUUID, sign } from 'node:crypto';
+import { Body, Controller, Get, Inject, Param, Post, Query, Req, ServiceUnavailableException } from '@nestjs/common';
+import { createHash, createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto';
 import type { Request } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
-import type { Database } from '@daja/database';
+import type { Database, DbClient } from '@daja/database';
 import { requirePermission, PermissionDeniedError, ValidationFailedError } from '@daja/security';
 import { AuthRepository } from '@daja/database';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { requireScopedPermission } from './access-policy.js';
 import { CONFIG, DATABASE } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
+import type { RequestContext } from '@daja/shared';
 
 const createSchema = z.object({
   locationId: z.string().uuid(),
@@ -19,6 +20,11 @@ const createSchema = z.object({
   userId: z.string().uuid(),
   permissionsHash: z.string().min(1).max(256),
   policyVersion: z.number().int().positive()
+});
+const mobileScopeSchema = z.object({
+  locationId: uuidSchema,
+  zoneId: uuidSchema.optional(),
+  binId: uuidSchema.optional()
 });
 const uploadSchema = z
   .object({
@@ -59,6 +65,98 @@ export class OfflineInventoryController {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CONFIG) private readonly config: AppConfig
   ) {}
+
+  @Get('mobile-baseline')
+  async mobileBaseline(@Req() request: Request, @Query() query: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    return this.loadMobileBaseline(ctx, parseWithSchema(mobileScopeSchema, query));
+  }
+
+  @Post('mobile-reserve')
+  async mobileReserve(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    if (!ctx.deviceId) throw new PermissionDeniedError('offline.identity');
+    const input = parseWithSchema(z.object({ locationId: uuidSchema.optional() }).strict(), body);
+    const configuredKey = this.config.OFFLINE_PACKAGE_SIGNING_PRIVATE_KEY || this.config.OFFLINE_LEASE_SIGNING_PRIVATE_KEY;
+    if (!configuredKey) throw new ServiceUnavailableException('Mobile offline signing is not configured.');
+    const key = createPrivateKey(configuredKey.replace(/\\n/g, '\n'));
+    const verificationKey = createPublicKey(key).export({ format: 'jwk' }).x;
+    if (key.asymmetricKeyType !== 'ed25519' || !verificationKey) {
+      throw new ServiceUnavailableException('Mobile offline signing requires Ed25519.');
+    }
+    const baseline = input.locationId ? await this.loadMobileBaseline(ctx, { locationId: input.locationId }) : null;
+    const issuedAt = Date.now();
+    const payload = Buffer.from(JSON.stringify({
+      schemaVersion: 2,
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      deviceId: ctx.deviceId,
+      policyVersion: ctx.policyVersion ?? 1,
+      issuedAt: new Date(issuedAt).toISOString(),
+      expiresAt: new Date(issuedAt + 24 * 3600_000).toISOString(),
+      baseline
+    }));
+    return {
+      payload: payload.toString('base64url'),
+      signature: sign(null, payload, key).toString('base64url'),
+      verificationKey
+    };
+  }
+
+  private async loadMobileBaseline(ctx: RequestContext, scope: z.infer<typeof mobileScopeSchema>) {
+    requireScopedPermission(ctx, ['rfid_counts.sync'], scope.locationId);
+    await new AuthRepository(this.database.pool).assertLocationAccess({
+      organizationId: ctx.organizationId, userId: ctx.userId, locationId: scope.locationId
+    });
+    const client = await this.database.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const revision = await client.query<{ current_revision: string }>(
+        'SELECT current_revision FROM organization_revisions WHERE organization_id=$1', [ctx.organizationId]
+      );
+      const expectedTags = await this.mobileExpectedTags(client, ctx.organizationId, scope);
+      await client.query('COMMIT');
+      return {
+        locationId: scope.locationId,
+        baselineServerRevision: Number(revision.rows[0]?.current_revision ?? 0),
+        expectedTags
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  private async mobileExpectedTags(client: DbClient, organizationId: string, scope: z.infer<typeof mobileScopeSchema>) {
+    const { rows } = await client.query<Record<string, unknown>>(
+      `SELECT t.id AS "tagId", t.epc, COALESCE(t.variant_id,i.variant_id) AS "productVariantId", v.sku,
+              COALESCE(v.name,p.name) AS "displayName", v.barcode, $2::uuid AS "expectedLocationId",
+              COALESCE(bin.zone_id, i.current_zone_id) AS "expectedZoneId", COALESCE(bin.id,i.current_bin_id) AS "expectedBinId"
+       FROM rfid_tags t
+       LEFT JOIN inventory_items i ON i.organization_id=t.organization_id AND i.id=t.inventory_item_id AND i.deleted_at IS NULL
+       LEFT JOIN product_variants v ON v.organization_id=t.organization_id AND v.id=COALESCE(t.variant_id,i.variant_id)
+       LEFT JOIN products p ON p.organization_id=t.organization_id AND p.id=v.product_id
+       LEFT JOIN LATERAL (
+         SELECT id, location_id, metadata->>'binId' AS bin_id
+         FROM rfid_tag_events WHERE organization_id=t.organization_id AND tag_id=t.id
+           AND event_type IN ('assigned','moved','returned')
+         ORDER BY occurred_at DESC,id DESC LIMIT 1
+       ) placement ON true
+       LEFT JOIN warehouse_bins bin ON bin.organization_id=t.organization_id AND bin.deleted_at IS NULL
+         AND bin.id = CASE WHEN placement.bin_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           THEN placement.bin_id::uuid ELSE i.current_bin_id END
+       WHERE t.organization_id=$1 AND t.deleted_at IS NULL AND t.status NOT IN ('retired','sold','lost')
+         AND v.deleted_at IS NULL AND p.deleted_at IS NULL
+         AND CASE WHEN placement.id IS NULL THEN i.current_location_id ELSE placement.location_id END=$2::uuid
+         AND ($3::uuid IS NULL OR COALESCE(bin.zone_id,i.current_zone_id)=$3)
+         AND ($4::uuid IS NULL OR COALESCE(bin.id,i.current_bin_id)=$4)
+       ORDER BY t.epc`, [organizationId, scope.locationId, scope.zoneId ?? null, scope.binId ?? null]
+    );
+    return rows;
+  }
+
   @Post('packages') async create(@Req() request: Request, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.write');

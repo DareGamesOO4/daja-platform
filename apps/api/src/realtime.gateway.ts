@@ -36,6 +36,7 @@ type RealtimeEvent =
   | 'rfid.tag.assigned'
   | 'rfid.tag.status_changed'
   | 'reader.status'
+  | 'sync.changed'
   | 'sync.conflict'
   | 'orders.created'
   | 'orders.updated'
@@ -51,6 +52,7 @@ const allowedEvents: RealtimeEvent[] = [
   'rfid.tag.assigned',
   'rfid.tag.status_changed',
   'reader.status',
+  'sync.changed',
   'sync.conflict',
   'orders.created',
   'orders.updated',

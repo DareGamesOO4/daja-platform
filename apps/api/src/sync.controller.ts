@@ -123,6 +123,9 @@ export class SyncController {
     // A desktop-originated catalog change bypasses the staff catalog HTTP
     // controller, so invalidate its public cache and notify open storefronts
     // only after the transaction has committed.
+    if (result.results.some(item => item.status === 'applied')) {
+      this.realtime.publish({ organizationId: ctx.organizationId, event: 'sync.changed', payload: {} });
+    }
     await this.publishCatalogChanges(ctx.organizationId, input.events, result.results, specificationOptionsChanged);
     return result;
   }
@@ -276,7 +279,7 @@ export class SyncController {
   async pull(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
     const ctx = resolveRequestContext(request);
     requirePermission(ctx, 'sync.read');
-    return new SyncRepository(this.database.pool).pull(ctx, {
+    const result = await new SyncRepository(this.database.pool).pull(ctx, {
       afterRevision: z.coerce
         .number()
         .int()
@@ -284,6 +287,7 @@ export class SyncController {
         .parse(query.afterRevision ?? 0),
       limit: parseWithSchema(syncLimitSchema, query.limit)
     });
+    return query.client === 'mobile' ? { ...result, policyVersion: ctx.policyVersion ?? 1 } : result;
   }
 
   @Get('bootstrap')
@@ -293,6 +297,19 @@ export class SyncController {
     return new SyncRepository(this.database.pool).bootstrapSnapshot(ctx, {
       limit: parseWithSchema(syncLimitSchema, query.limit),
       cursor: query.cursor
+    });
+  }
+
+  @Get('mobile/catalog')
+  async mobileCatalog(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    const ids = (value: string | undefined) => value === undefined ? undefined
+      : parseWithSchema(z.array(uuidSchema).min(1).max(100), value.split(','));
+    return new SyncRepository(this.database.pool).bootstrapSnapshot(ctx, {
+      limit: query.layoutOnly === 'true' ? 0 : parseWithSchema(syncLimitSchema, query.limit),
+      cursor: query.cursor === undefined ? undefined : parseWithSchema(uuidSchema, query.cursor),
+      mobile: { variantIds: ids(query.variantIds), productIds: ids(query.productIds), includeState: query.state === 'true' }
     });
   }
 
