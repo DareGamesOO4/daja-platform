@@ -149,18 +149,22 @@ export class PrivacyService {
   async sendNewsletterVerification(organizationId: string, address: string) {
     const email = normalizeEmail(address);
     const token = randomToken();
+    const tokenHash = sha256(token);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     return new TransactionManager(this.database.pool, this.logger).run(async client => {
       const pending = await client.query(
         `UPDATE newsletter_subscribers SET confirmation_token_hash = $3,
-           confirmation_expires_at = now() + interval '24 hours', updated_at = now()
+           confirmation_expires_at = $4, updated_at = now()
          WHERE organization_id = $1 AND normalized_email = $2 AND active
            AND (confirmation_expires_at IS NULL OR confirmation_expires_at <= now() + interval '23 hours 59 minutes')
            AND (confirmed_at IS NULL OR confirmed_at <= now() - interval '1 minute')
-         RETURNING id`, [organizationId, email, sha256(token)]);
+         RETURNING id`, [organizationId, email, tokenHash, expiresAt]);
       if (pending.rowCount) {
         const url = new URL('/newsletter-confirm', this.config.STOREFRONT_PUBLIC_BASE_URL);
         url.searchParams.set('token', token);
-        await this.email.posaljiPotvrduEmailaZaKupon({ recipient: email, confirmationUrl: url.toString() }, client);
+        await this.email.posaljiPotvrduEmailaZaKupon({
+          recipient: email, confirmationUrl: url.toString(), tokenHash, expiresAt
+        }, client);
       }
       return { status: 'queued' as const };
     });

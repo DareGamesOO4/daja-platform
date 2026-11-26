@@ -1,10 +1,15 @@
-import { createHash } from 'node:crypto';
 import { Injectable, Inject } from '@nestjs/common';
 import type { AppConfig } from '@daja/config';
 import { CONFIG } from './tokens.js';
 import { EmailDeliveryService } from './email-delivery.service.js';
 import type { DbClient } from '@daja/database';
 import { brandedEmail, emailPreheader } from '@daja/shared';
+
+// Use the same hash and expiry that the caller persisted for the token.
+interface EmailLinkProof {
+  tokenHash: string;
+  expiresAt: Date;
+}
 
 @Injectable()
 export class NovostiEmailService {
@@ -16,7 +21,7 @@ export class NovostiEmailService {
   async posaljiPotvrduEmailaZaKupon(input: {
     recipient: string;
     confirmationUrl: string;
-  }, client?: DbClient): Promise<void> {
+  } & EmailLinkProof, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
       subject: 'Potvrdite email za 10% na prvu porudžbinu',
@@ -24,16 +29,16 @@ export class NovostiEmailService {
       html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'DAJASHOP KUPON',
         title: 'Potvrdite email adresu.', content: '<p>Još jedan korak do 10% popusta na prvu porudžbinu. Potvrdite email i koristite tu istu adresu prilikom kupovine.</p><p>Link važi 24 sata. Ako ga niste tražili, zanemarite ovu poruku.</p>',
         button: { label: 'Potvrdi email', url: input.confirmationUrl } }),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      expiresAt: input.expiresAt,
       tag: 'novosti-potvrda',
-      linkTokenHash: linkTokenHash(input.confirmationUrl)
+      linkTokenHash: input.tokenHash
     }, client);
   }
 
   async posaljiPotvrduEmailAdrese(input: {
     recipient: string;
     verificationUrl: string;
-  }, client?: DbClient): Promise<void> {
+  } & EmailLinkProof, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
       fromEmail: dajaShopSender(this.config.SES_ACCOUNT_FROM_EMAIL || this.config.SES_FROM_EMAIL),
@@ -42,16 +47,16 @@ export class NovostiEmailService {
       html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'VAŠ DAJASHOP NALOG',
         title: 'Potvrdite email adresu.', content: '<p>Dobro došli u DajaShop. Potvrdite email adresu svog naloga.</p><p>Link važi 15 minuta i može da se iskoristi jednom. Ako niste tražili verifikaciju, zanemarite ovu poruku.</p>',
         button: { label: 'Potvrdi email adresu', url: input.verificationUrl } }),
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      expiresAt: input.expiresAt,
       tag: 'potvrda-email-adrese',
-      linkTokenHash: linkTokenHash(input.verificationUrl)
+      linkTokenHash: input.tokenHash
     }, client);
   }
 
   async posaljiLinkZaPromenuLozinke(input: {
     recipient: string;
     resetUrl: string;
-  }, client?: DbClient): Promise<void> {
+  } & EmailLinkProof, client?: DbClient): Promise<void> {
     const resetUrl = escapeHtml(input.resetUrl);
     const emailAssetUrl = (path: string) =>
       escapeHtml(new URL(path, this.config.STOREFRONT_PUBLIC_BASE_URL).toString());
@@ -66,9 +71,9 @@ export class NovostiEmailService {
         darkLogoUrl: emailAssetUrl('/images/dajashop-email-logo-dark.png'),
         contactUrl: emailAssetUrl('/contact')
       }),
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      expiresAt: input.expiresAt,
       tag: 'promena-lozinke',
-      linkTokenHash: linkTokenHash(input.resetUrl)
+      linkTokenHash: input.tokenHash
     }, client);
   }
 
@@ -123,12 +128,6 @@ export class NovostiEmailService {
       ...(input.fromEmail ? { fromEmail: input.fromEmail } : {})
     }, client);
   }
-}
-
-function linkTokenHash(url: string): string {
-  const token = new URL(url).searchParams.get('token');
-  if (!token) throw new Error('Email link token is required');
-  return createHash('sha256').update(token).digest('hex');
 }
 
 function htmlPromenaLozinke(input: {

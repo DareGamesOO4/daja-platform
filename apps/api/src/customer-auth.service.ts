@@ -43,12 +43,14 @@ export class CustomerAuthService {
 
   async requestEmailVerification(input: { organizationId: string; customerId: string }) {
     const token = randomBytes(32).toString('base64url');
+    const tokenHash = sha256Hex(token);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const verification = await new StorefrontRepository(client).createCustomerEmailVerification({
         organizationId: input.organizationId,
         customerId: input.customerId,
-        tokenHash: sha256Hex(token),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+        tokenHash,
+        expiresAt
       });
       if (verification.alreadyVerified) return { status: 'already_verified' as const };
       const suppressed = await client.query(
@@ -64,7 +66,9 @@ export class CustomerAuthService {
       verificationUrl.searchParams.set('token', token);
       await this.email.posaljiPotvrduEmailAdrese({
         recipient: verification.email,
-        verificationUrl: verificationUrl.toString()
+        verificationUrl: verificationUrl.toString(),
+        tokenHash,
+        expiresAt
       }, client);
       return { status: 'queued' as const };
     });
@@ -93,23 +97,27 @@ export class CustomerAuthService {
 
   async requestPasswordReset(input: { organizationId: string; email: string }) {
     const token = randomBytes(32).toString('base64url');
+    const tokenHash = sha256Hex(token);
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const reset = await new StorefrontRepository(client).createCustomerPasswordReset({
         organizationId: input.organizationId,
         email: input.email.trim().toLowerCase(),
-        tokenHash: sha256Hex(token),
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+        tokenHash,
+        expiresAt
       });
 
-    if (!reset) return { status: 'queued' as const };
+      if (!reset) return { status: 'queued' as const };
 
-    const resetUrl = new URL('/reset-password', this.config.STOREFRONT_PUBLIC_BASE_URL);
-    resetUrl.searchParams.set('token', token);
-    await this.email.posaljiLinkZaPromenuLozinke({
-      recipient: reset.email,
-      resetUrl: resetUrl.toString()
-    }, client);
-    return { status: 'queued' as const };
+      const resetUrl = new URL('/reset-password', this.config.STOREFRONT_PUBLIC_BASE_URL);
+      resetUrl.searchParams.set('token', token);
+      await this.email.posaljiLinkZaPromenuLozinke({
+        recipient: reset.email,
+        resetUrl: resetUrl.toString(),
+        tokenHash,
+        expiresAt
+      }, client);
+      return { status: 'queued' as const };
     });
   }
 
@@ -184,14 +192,18 @@ export class CustomerAuthService {
       );
       if (principal.email) {
         const verificationToken = randomBytes(32).toString('base64url');
+        const tokenHash = sha256Hex(verificationToken);
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
         const verification = await repo.createCustomerEmailVerification({
           organizationId: principal.organizationId, customerId: principal.customerId,
-          tokenHash: sha256Hex(verificationToken), expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+          tokenHash, expiresAt
         });
-        if (!verification.alreadyVerified) {
+        if (!verification.alreadyVerified && verification.queued !== false) {
           const url = new URL('/verify-email', this.config.STOREFRONT_PUBLIC_BASE_URL);
           url.searchParams.set('token', verificationToken);
-          await this.email.posaljiPotvrduEmailAdrese({ recipient: verification.email, verificationUrl: url.toString() }, client);
+          await this.email.posaljiPotvrduEmailAdrese({
+            recipient: verification.email, verificationUrl: url.toString(), tokenHash, expiresAt
+          }, client);
         }
       }
       const hydrated = await repo.buildCustomerPrincipal({
