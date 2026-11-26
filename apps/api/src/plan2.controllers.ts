@@ -2379,7 +2379,9 @@ export class StaffCatalogController {
       }
     }
     const variant = await new CatalogRepository(this.database.pool).getVariant(ctx, variantId);
-    const result = await this.database.pool.query(
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await client.query('SELECT id FROM product_variants WHERE organization_id=$1 AND id=$2 FOR UPDATE', [ctx.organizationId, variantId]);
+      return client.query(
       `INSERT INTO variant_prices (organization_id,variant_id,amount_minor,currency,price_type,valid_from,valid_until,created_by) VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,now()),$7::timestamptz,$8) RETURNING id,amount_minor AS "amountMinor",currency,price_type AS "priceType",valid_from AS "validFrom",valid_until AS "validUntil"`,
       [
         ctx.organizationId,
@@ -2390,8 +2392,9 @@ export class StaffCatalogController {
         input.validFrom ?? null,
         input.validUntil ?? null,
         ctx.userId
-      ]
-    );
+        ]
+      );
+    });
     const product = await new CatalogRepository(this.database.pool).getProduct(
       ctx,
       variant.productId
@@ -2422,7 +2425,10 @@ export class StaffCatalogController {
     // Price records are append-only. Marking a sale cancelled preserves its
     // schedule and alert audit record while removing it from every active
     // storefront query, including a sale that is scheduled for the future.
-    const cancelled = await this.database.pool.query<{ id: string }>(
+    const cancelled = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
+      await client.query('SELECT id FROM product_variants WHERE organization_id=$1 AND id=$2 FOR UPDATE', [ctx.organizationId, variantId]);
+      await client.query("SELECT set_config('daja.price_user_id',$1,true)", [ctx.userId]);
+      return client.query<{ id: string }>(
       `UPDATE variant_prices
        SET cancelled_at = now()
        WHERE organization_id = $1
@@ -2431,8 +2437,9 @@ export class StaffCatalogController {
          AND cancelled_at IS NULL
          AND (valid_until IS NULL OR valid_until > now())
        RETURNING id`,
-      [ctx.organizationId, variantId]
-    );
+        [ctx.organizationId, variantId]
+      );
+    });
 
     await new StorefrontRepository(this.database.pool).refreshProductSnapshots({
       organizationId: ctx.organizationId,

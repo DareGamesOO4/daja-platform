@@ -15,7 +15,7 @@ import {
   type Database
 } from '@daja/database';
 import type { Logger } from '@daja/observability';
-import { requirePermission } from '@daja/security';
+import { ResourceConflictError, ValidationFailedError, requirePermission } from '@daja/security';
 import { parseWithSchema, syncLimitSchema, syncPushSchema, uuidSchema } from '@daja/validation';
 import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
@@ -23,6 +23,9 @@ import { requireScopedPermission } from './access-policy.js';
 import { OperationalSyncProjector } from './operational-sync-projector.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { CatalogDeliveryService } from './catalog-delivery.service.js';
+import { authorizeSyncEvent } from './sync-authorization.js';
+import { object, preparePriceEdit, preserveUneditedItemFields, priceFields, samePrice, type PricePlan, type PriceValue } from './sync-price-conflicts.js';
+import { asPriceFields, chosenPriceFields, compareConflict, getConflictReview, listConflictReviews } from './sync-conflict-review.js';
 
 const deviceRegisterSchema = z.object({
   deviceKey: z.string().trim().min(8).max(240),
@@ -34,8 +37,11 @@ const deviceRegisterSchema = z.object({
 });
 
 const conflictResolveSchema = z.object({
-  strategy: z.enum(['local', 'remote']),
-  reason: z.string().trim().min(1).max(2000),
+  strategy: z.enum(['local', 'remote', 'fields']),
+  reason: z.string().trim().max(2000).default(''),
+  token: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  choices: z.object({ regular: z.enum(['local', 'remote']).optional(), promotion: z.enum(['local', 'remote']).optional() }).strict().optional(),
+  newPeriod: z.object({ from: z.string().datetime(), until: z.string().datetime() }).strict().optional()
 });
 
 @Controller('devices')
@@ -84,9 +90,21 @@ export class SyncController {
         await new DeviceRepository(client).assertActiveDevice(ctx.organizationId, ctx.deviceId);
       }
       const projector = new OperationalSyncProjector(client, new R2MediaStorageAdapter(this.config));
-      const results = await new SyncRepository(client).pushBatch(ctx, input.events, (event) =>
-        projector.materialize(ctx, event)
-      );
+      const results = await new SyncRepository(client).pushBatch(ctx, input.events, async (event) => {
+        if (event.basePayload?.priceEdit) await authorizeSyncEvent(client, ctx, event);
+        const price = await preparePriceEdit(client, ctx, event);
+        if (!price) return projector.materialize(ctx, event);
+        if (price.disputes.length) {
+          return { conflict: {
+            serverVersion: price.state.version,
+            serverPayload: { regular: price.state.regular.value, promotion: price.state.promotion.value },
+            details: { kind: 'price', fields: price.disputes, name: price.state.name, sku: price.state.sku,
+              preserve: [...price.plan.preserve], localSavedAt: price.savedAt,
+              baseline: event.basePayload?.priceEdit, proposedPromotion: price.plan.promotion }
+          } };
+        }
+        return projector.materialize(ctx, price.event, price.plan);
+      }, event => authorizeSyncEvent(client, ctx, event));
       await new OutboxRepository(client).append({
         ctx,
         eventType: 'SyncBatchPushed',
@@ -281,6 +299,15 @@ export class SyncController {
   @Get('conflicts')
   async conflicts(@Req() request: Request, @Query() query: Record<string, string | undefined>) {
     const ctx = resolveRequestContext(request);
+    if (query.scope) {
+      requirePermission(ctx, 'sync.read');
+      return listConflictReviews(
+        this.database.pool, ctx, parseWithSchema(z.enum(['own', 'organization']), query.scope),
+        parseWithSchema(z.enum(['unresolved', 'resolved', 'rejected']).default('unresolved'), query.status),
+        parseWithSchema(syncLimitSchema, query.limit),
+        query.cursor ? parseWithSchema(uuidSchema, query.cursor) : undefined
+      );
+    }
     requirePermission(ctx, 'sync.conflicts');
     requireScopedPermission(ctx, ['sync.conflicts']);
     return new SyncRepository(this.database.pool).listConflicts(ctx, {
@@ -289,23 +316,83 @@ export class SyncController {
     });
   }
 
+  @Get('conflicts/:id')
+  async conflictDetail(@Req() request: Request, @Param('id') id: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    const row = await getConflictReview(this.database.pool, ctx, parseWithSchema(uuidSchema, id));
+    return this.publicConflictReview(await compareConflict(this.database.pool, ctx, row));
+  }
+
+  private publicConflictReview(review: Awaited<ReturnType<typeof compareConflict>>) {
+    if (!('live' in review)) return review;
+    const { live: _live, current: _current, ...data } = review;
+    return data;
+  }
+
   @Patch('conflicts/:id')
   async resolveConflict(@Req() request: Request, @Param('id') id: string, @Body() body: unknown) {
     const ctx = resolveRequestContext(request);
-    requirePermission(ctx, 'sync.conflicts');
+    requirePermission(ctx, 'sync.read');
     const conflictId = parseWithSchema(uuidSchema, id);
-    requireScopedPermission(ctx, ['sync.conflicts']);
     const input = parseWithSchema(conflictResolveSchema, body);
     const { specificationOptionsChanged, ...result } = await new TransactionManager(this.database.pool, this.logger).run(async (client) => {
       const sync = new SyncRepository(client);
-      const conflicts = await sync.listConflicts(ctx, { status: 'unresolved', limit: 500 });
-      const conflict = conflicts.find((candidate) => candidate.id === conflictId);
-      if (!conflict) throw new Error('Konflikt nije pronađen ili je već razrešen.');
+      const originalEvent = (await getConflictReview(client, ctx, conflictId)).eventId;
+      if (originalEvent) await sync.lockEvent(ctx.organizationId, originalEvent);
+      const conflict = await getConflictReview(client, ctx, conflictId, true);
+      const review = await compareConflict(client, ctx, conflict, true);
+      if (!('live' in review) || conflict.status !== 'unresolved') {
+        return { ...this.publicConflictReview(review), staleMediaKeys: [], specificationOptionsChanged: false, appliedEventId: undefined };
+      }
+      if ((input.token || conflict.details.kind === 'price') && input.token !== review.token)
+        throw new ResourceConflictError('Podaci na serveru su se promenili. Pogledaj nove vrednosti i ponovo potvrdi izbor.');
 
       let appliedEvent: { eventId: string; status: string } | undefined;
       let staleMediaKeys: string[] = [];
       let specificationOptionsChanged = false;
-      if (input.strategy === 'local') {
+      let fields: unknown[] = review.fields;
+      let prices: PricePlan | undefined;
+      const original = object(conflict.clientPayload.command);
+      const originalPayload = object(original.payload);
+      const payload: Record<string, unknown> = {
+        ...(review.current ? preserveUneditedItemFields(originalPayload, conflict.details.baseline, review.current) : originalPayload),
+        actorUserId: ctx.userId, deviceId: ctx.deviceId
+      };
+      const snapshot = object(conflict.clientPayload.operationalSnapshot);
+      const replay = {
+        ...conflict.clientPayload,
+        ...(original.kind ? { command: { ...original, payload } } : {}),
+        ...(snapshot.kind === 'rfid.cycle_count' ? {
+          operationalSnapshot: { ...snapshot, count: { ...object(snapshot.count), actorUserId: ctx.userId } }
+        } : {})
+      };
+      if (conflict.details.kind === 'price') {
+        if (!review.current) throw new ResourceConflictError('Artikal više nije dostupan na serveru.');
+        const selected = chosenPriceFields(asPriceFields(review, review.current), input.strategy, input.choices, input.newPeriod);
+        fields = selected;
+        const current = review.current;
+        const preserve = new Set(priceFields.filter(field => {
+          const choice = selected.find(entry => entry.field === field);
+          return choice ? choice.source === 'remote' :
+            (Array.isArray(conflict.details.preserve) && conflict.details.preserve.includes(field)) ||
+            !samePrice((conflict.serverPayload[field] ?? null) as PriceValue, current[field].value);
+        }));
+        const promotion = selected.find(entry => entry.field === 'promotion' && entry.source === 'local');
+        if (promotion && promotion.value && input.newPeriod) {
+          Object.assign(payload, { promotionalValidFrom: promotion.value.from, promotionalValidUntil: promotion.value.until });
+        }
+        const promotionValue = promotion?.value ?? (!selected.some(entry => entry.field === 'promotion')
+          ? conflict.details.proposedPromotion as PricePlan['promotion'] : undefined);
+        prices = { preserve, replacePromotion: true, ...(promotionValue ? { promotion: promotionValue } : {}) };
+      } else {
+        if (input.strategy === 'fields') throw new ValidationFailedError('Izaberi celu verziju ove stavke.');
+        fields = review.fields.map(entry => ({ ...entry, source: input.strategy,
+          value: input.strategy === 'local' ? entry.local : entry.remote }));
+      }
+
+      if (input.strategy === 'local' || prices) {
+        requirePermission(ctx, 'sync.write');
         const eventId = randomUUID();
         const projector = new OperationalSyncProjector(
           client,
@@ -315,29 +402,52 @@ export class SyncController {
           ctx,
           [{
             eventId,
-            idempotencyKey: `conflict-resolution:${conflictId}:${eventId}`,
+            idempotencyKey: `conflict-resolution:${conflictId}`,
             aggregateType: conflict.aggregateType,
             aggregateId: conflict.aggregateId,
             operation: conflict.operation,
-            baseVersion: conflict.serverVersion,
+            baseVersion: review.current?.version ?? review.live?.version ?? Number(conflict.serverVersion),
+            ...(conflict.locationId ? { locationId: conflict.locationId } : {}),
             payloadVersion: 1,
             clientTimestamp: new Date().toISOString(),
-            payload: conflict.clientPayload
+            payload: replay
           }],
-          (event) => projector.materialize(ctx, event)
+          (event) => projector.materialize(ctx, event, prices),
+          event => authorizeSyncEvent(client, ctx, event)
         );
         staleMediaKeys = projector.takeStaleMediaKeys();
         specificationOptionsChanged = projector.hasSpecificationOptionChanges(results);
         appliedEvent = results[0];
         if (!appliedEvent || appliedEvent.status !== 'applied') {
-          throw new Error('Platform verzija se promenila. Osvežite konflikt pa pokušajte ponovo.');
+          throw new ResourceConflictError('Podaci na serveru su se promenili. Pogledaj nove vrednosti i ponovo potvrdi izbor.');
         }
       }
+
+      const projector = new OperationalSyncProjector(client);
+      let canonical = !appliedEvent && review.live?.transfer
+        ? { kind: 'stock.transfer', transfer: review.live.transfer, locations: [], balances: [], tags: [] }
+        : !appliedEvent && review.live?.productId && ['variant', 'product_variant'].includes(conflict.aggregateType)
+          ? await projector.catalogSnapshot(ctx.organizationId, review.live.productId, conflict.aggregateId)
+          : undefined;
+      if (!appliedEvent && !canonical && review.live?.variantId) {
+        const { rows: [variant] } = await client.query<{ product_id: string }>(
+          'SELECT product_id FROM product_variants WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL',
+          [ctx.organizationId, review.live.variantId]
+        );
+        if (variant) canonical = await projector.catalogSnapshot(ctx.organizationId, variant.product_id, review.live.variantId);
+      }
+      await sync.appendServerEvent(ctx, {
+        aggregateId: conflict.aggregateId, aggregateType: conflict.aggregateType, operation: 'update',
+        idempotencyKey: `conflict-result:${conflictId}`,
+        locationId: conflict.locationId ?? undefined,
+        payload: { conflictResult: { conflictId, eventId: conflict.eventId, userId: conflict.userId, deviceId: conflict.deviceId },
+          ...(canonical ? { operationalSnapshot: canonical } : {}) }
+      });
 
       const resolved = await sync.resolveConflict(ctx, conflictId, {
         status: 'resolved',
         reason: input.reason,
-        resolution: { strategy: input.strategy, ...(appliedEvent ? { appliedEventId: appliedEvent.eventId } : {}) }
+        resolution: { strategy: input.strategy, fields, ...(appliedEvent ? { appliedEventId: appliedEvent.eventId } : {}) }
       });
       await new AuditRepository(client).append({
         ctx,
@@ -349,6 +459,7 @@ export class SyncController {
       });
       return {
         ...resolved,
+        ...this.publicConflictReview(await compareConflict(client, ctx, await getConflictReview(client, ctx, conflictId))),
         strategy: input.strategy,
         appliedEventId: appliedEvent?.eventId,
         aggregateType: conflict.aggregateType,
@@ -358,7 +469,7 @@ export class SyncController {
       };
     });
     await this.cleanupRelocatedMedia(result.staleMediaKeys);
-    if (input.strategy === 'local' && result.aggregateType === 'product_variant' && result.appliedEventId) {
+    if (result.aggregateType === 'product_variant' && result.appliedEventId) {
       await this.publishCatalogChanges(ctx.organizationId, [{
         eventId: result.appliedEventId,
         aggregateType: result.aggregateType,

@@ -13,6 +13,7 @@ import { normalizeEpc } from '@daja/validation';
 import type pg from 'pg';
 import { saveBultimeLink, saveEkkaLink, saveLinkelLink, saveAdditionalLink } from './supplier-links.js';
 import { authorizeSyncEvent } from './sync-authorization.js';
+import type { PricePlan } from './sync-price-conflicts.js';
 import { projectStockTransfer } from './stock-transfer-projector.js';
 import { assertGrantablePermissions, assignableLocation, grantableRole, lockAccessPolicy, manageableUser, requireActiveOwner } from './access-policy.js';
 
@@ -219,7 +220,7 @@ export class OperationalSyncProjector {
     return keys;
   }
 
-  async materialize(ctx: RequestContext, event: SyncPushEvent): Promise<SyncPushEvent> {
+  async materialize(ctx: RequestContext, event: SyncPushEvent, prices?: PricePlan): Promise<SyncPushEvent> {
     await authorizeSyncEvent(this.client, ctx, event);
     const envelope = record(event.payload);
     const operationalSnapshot = record(envelope?.operationalSnapshot);
@@ -267,19 +268,24 @@ export class OperationalSyncProjector {
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (kind === 'item.promotion.clear') {
+      await this.setPriceClockContext(prices, ctx);
       const snapshot = await this.clearItemPromotion(ctx, event, {
         kind: 'item.promotion.clear',
         payload: commandPayload
-      });
+      }, prices?.preserve.has('promotion'));
+      await this.setPriceClockContext(undefined);
       return { ...event, payload: { ...event.payload, operationalSnapshot: snapshot } };
     }
     if (kind.startsWith('item.')) {
+      await this.setPriceClockContext(prices, ctx);
       const snapshot = await this.item(
         ctx,
         event,
         { kind: kind as ItemCommand['kind'], payload: commandPayload },
-        entityIds
+        entityIds,
+        prices
       );
+      await this.setPriceClockContext(undefined);
       const canonicalRecord = record(snapshot.record);
       const canonicalVariantId = text(canonicalRecord ?? {}, 'variantId');
       return {
@@ -2311,11 +2317,19 @@ export class OperationalSyncProjector {
     return { kind: 'internal.sale.return', return: { id: returnId, saleId, locationId, itemCount: items.length, serviceItemCount: serviceItems.length } };
   }
 
+  private async setPriceClockContext(prices?: PricePlan, ctx?: RequestContext): Promise<void> {
+    await this.client.query(
+      "SELECT set_config('daja.price_saved_at', $1, true), set_config('daja.price_device_id', $2, true), set_config('daja.price_user_id', $3, true)",
+      [prices?.savedAt ?? '', ctx?.deviceId ?? '', ctx?.userId ?? '']
+    );
+  }
+
   private async item(
     ctx: RequestContext,
     event: SyncPushEvent,
     command: ItemCommand,
-    entityIds: Record<string, unknown> | undefined
+    entityIds: Record<string, unknown> | undefined,
+    prices?: PricePlan
   ): Promise<Record<string, unknown>> {
     const input = command.payload;
     const requestedSku = nullableText(input, 'sku');
@@ -2351,6 +2365,7 @@ export class OperationalSyncProjector {
     };
     const priceRsd = integer(input, 'salePriceMinor');
     const currency = text(input, 'currency') ?? 'RSD';
+    const preserveRegular = prices?.preserve.has('regular') === true;
     const variantId =
       command.kind === 'item.create' ? event.aggregateId : (text(input, 'id') ?? event.aggregateId);
     if (command.kind === 'item.create') {
@@ -2603,7 +2618,7 @@ export class OperationalSyncProjector {
       ]
     );
     await this.client.query(
-      `UPDATE product_variants SET sku = $3, barcode = COALESCE(NULLIF($4, ''), barcode), name = $5, gender = COALESCE($6, gender), current_price_amount = $7, currency = $8,
+      `UPDATE product_variants SET sku = $3, barcode = COALESCE(NULLIF($4, ''), barcode), name = $5, gender = COALESCE($6, gender), current_price_amount = COALESCE($7, current_price_amount), currency = COALESCE($8, currency),
        attributes = COALESCE($9::jsonb, attributes), active = $10, published = $11, version = version + 1, updated_at = now()
        WHERE organization_id = $1 AND id = $2`,
       [
@@ -2613,8 +2628,8 @@ export class OperationalSyncProjector {
         text(input, 'barcode') ?? null,
         variantName === undefined ? row.variant_name : variantName || null,
         catalogGender(input) ?? null,
-        priceRsd * 100,
-        currency,
+        preserveRegular ? null : priceRsd * 100,
+        preserveRegular ? null : currency,
         input.attributes === undefined ? null : JSON.stringify(variantAttributes),
         boolean(input, 'active', true),
         boolean(input, 'published', true)
@@ -2633,16 +2648,18 @@ export class OperationalSyncProjector {
       const key = `${provider}Url`;
       if (input[key] !== undefined) await saveAdditionalLink(this.client, ctx.organizationId, row.product_id, provider, nullableText(input, key) ?? null);
     }
-    await this.client.query(
-      `UPDATE variant_prices SET valid_until = now() WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sell' AND valid_until IS NULL`,
-      [ctx.organizationId, variantId]
-    );
-    await this.client.query(
-      `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
-       VALUES ($1, $2, $3, $4, 'sell', $5)`,
-      [ctx.organizationId, variantId, priceRsd * 100, currency, ctx.userId]
-    );
-    await this.addCatalogPrices(ctx, variantId, input, currency);
+    if (!preserveRegular) {
+      await this.client.query(
+        `UPDATE variant_prices SET valid_until = now() WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sell' AND valid_until IS NULL`,
+        [ctx.organizationId, variantId]
+      );
+      await this.client.query(
+        `INSERT INTO variant_prices (organization_id, variant_id, amount_minor, currency, price_type, created_by)
+         VALUES ($1, $2, $3, $4, 'sell', $5)`,
+        [ctx.organizationId, variantId, priceRsd * 100, currency, ctx.userId]
+      );
+    }
+    await this.addCatalogPrices(ctx, variantId, input, currency, prices);
     await this.setImages(ctx.organizationId, row.product_id, input);
     await persistSavedCatalogOptions();
     if (input.epc === null || input.trackByTag === false) {
@@ -2681,7 +2698,8 @@ export class OperationalSyncProjector {
   private async clearItemPromotion(
     ctx: RequestContext,
     event: SyncPushEvent,
-    command: ClearPromotionCommand
+    command: ClearPromotionCommand,
+    preserve = false
   ): Promise<Record<string, unknown>> {
     requirePermission(ctx, 'catalog.write');
     const variantId = text(command.payload, 'productVariantId') ?? event.aggregateId;
@@ -2696,7 +2714,7 @@ export class OperationalSyncProjector {
     );
     const productId = variant.rows[0]?.productId;
     if (!productId) throw new ValidationFailedError('Desktop item does not exist on Platform');
-    await this.client.query(
+    if (!preserve) await this.client.query(
       `UPDATE variant_prices SET cancelled_at = now()
        WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sale'
          AND cancelled_at IS NULL`,
@@ -2847,15 +2865,20 @@ export class OperationalSyncProjector {
     ctx: RequestContext,
     variantId: string,
     input: Record<string, unknown>,
-    currency: string
+    currency: string,
+    prices?: PricePlan
   ): Promise<void> {
-    const saleAmount = integer(input, 'promotionalPriceMinor');
+    const preservePromotion = prices?.preserve.has('promotion') === true;
+    const inputSaleAmount = integer(input, 'promotionalPriceMinor');
+    const saleAmount = preservePromotion ? undefined : prices?.promotion?.amount ??
+      (inputSaleAmount === undefined ? undefined : inputSaleAmount * 100);
     const costAmount = integer(input, 'costPriceMinor');
-    if (input.clearPromotion === true || input.promotionalPriceMinor === null) {
+    if (!preservePromotion && (input.clearPromotion === true || input.promotionalPriceMinor === null ||
+        (prices?.replacePromotion && saleAmount !== undefined))) {
       await this.client.query(
         `UPDATE variant_prices SET cancelled_at = now()
          WHERE organization_id = $1 AND variant_id = $2 AND price_type = 'sale'
-           AND cancelled_at IS NULL`,
+           AND cancelled_at IS NULL AND (valid_until IS NULL OR valid_until > now())`,
         [ctx.organizationId, variantId]
       );
     }
@@ -2866,10 +2889,10 @@ export class OperationalSyncProjector {
         [
           ctx.organizationId,
           variantId,
-          saleAmount * 100,
-          currency,
-          text(input, 'promotionalValidFrom') ?? null,
-          text(input, 'promotionalValidUntil') ?? null,
+          saleAmount,
+          prices?.promotion?.currency ?? currency,
+          prices?.promotion?.from ?? text(input, 'promotionalValidFrom') ?? null,
+          prices?.promotion?.until ?? text(input, 'promotionalValidUntil') ?? null,
           ctx.userId
         ]
       );
@@ -3028,9 +3051,10 @@ export class OperationalSyncProjector {
               p.primary_category_id AS "categoryId", c.name AS "categoryName", p.version AS "productVersion",
               v.id AS "variantId", v.sku, v.barcode, v.name AS "variantName", v.gender,
               v.current_price_amount AS "priceAmount",
+              regular_clock.saved_at AS "regularPriceSavedAt", promotion_clock.saved_at AS "promotionPriceSavedAt",
               v.currency, v.attributes, v.active, v.published, v.created_at AS "variantCreatedAt", v.updated_at AS "variantUpdatedAt",
               v.version AS "variantVersion", media.public_url AS "imageUri",
-              sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
+              sale.amount_minor AS "salePriceAmount", sale.currency AS "saleCurrency", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
               cost.amount_minor AS "costAmount",
               COALESCE(inventory.quantity, 0) AS quantity,
               COALESCE(tag.location_id, inventory.location_id) AS "locationId",
@@ -3040,6 +3064,8 @@ export class OperationalSyncProjector {
               tag.location_id AS "tagLocationId", tag.bin_id AS "tagBinId", tag.in_transit AS "tagInTransit",
               COALESCE(inventory.location_balances, '[]'::jsonb) AS "locationBalances"
        FROM products p JOIN product_variants v ON v.organization_id = p.organization_id AND v.product_id = p.id
+       LEFT JOIN variant_price_edit_clocks regular_clock ON regular_clock.organization_id=v.organization_id AND regular_clock.variant_id=v.id AND regular_clock.kind='regular'
+       LEFT JOIN variant_price_edit_clocks promotion_clock ON promotion_clock.organization_id=v.organization_id AND promotion_clock.variant_id=v.id AND promotion_clock.kind='promotion'
        LEFT JOIN supplier_product_links supplier ON supplier.organization_id = p.organization_id AND supplier.product_id = p.id AND supplier.provider_code = 'ekka'
        LEFT JOIN supplier_product_links bultime ON bultime.organization_id = p.organization_id AND bultime.product_id = p.id AND bultime.provider_code = 'bultime'
        LEFT JOIN supplier_product_links linkel ON linkel.organization_id = p.organization_id AND linkel.product_id = p.id AND linkel.provider_code = 'linkel'
@@ -3062,7 +3088,7 @@ export class OperationalSyncProjector {
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
        ) inventory ON true
        LEFT JOIN LATERAL (
-         SELECT amount_minor, valid_from, valid_until FROM variant_prices
+         SELECT amount_minor, currency, valid_from, valid_until FROM variant_prices
          WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
            AND cancelled_at IS NULL
          ORDER BY created_at DESC LIMIT 1

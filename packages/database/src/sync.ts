@@ -29,6 +29,12 @@ export interface SyncPushEvent {
   businessCommandId?: string | undefined;
 }
 
+interface SyncConflictCandidate {
+  serverVersion: number;
+  serverPayload: Record<string, unknown>;
+  details?: Record<string, unknown>;
+}
+
 export interface SyncEventRecord {
   id: string;
   schemaVersion: number;
@@ -169,7 +175,8 @@ export class SyncRepository {
   async pushBatch(
     ctx: RequestContext,
     events: SyncPushEvent[],
-    materialize?: (event: SyncPushEvent) => Promise<SyncPushEvent>
+    materialize?: (event: SyncPushEvent) => Promise<SyncPushEvent | { conflict: SyncConflictCandidate }>,
+    authorizeConflict?: (event: SyncPushEvent) => Promise<void>
   ): Promise<
     Array<{
       eventId: string;
@@ -190,6 +197,7 @@ export class SyncRepository {
       code?: string;
     }> = [];
     for (const event of events) {
+      await this.lockEvent(ctx.organizationId, event.eventId);
       const existing = await this.client.query<{ revision: string }>(
         `SELECT revision
          FROM server_sync_events
@@ -205,17 +213,34 @@ export class SyncRepository {
         });
         continue;
       }
+      const priorConflict = (await this.client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM sync_conflicts
+         WHERE organization_id=$1 AND event_id=$2 AND user_id=$3 AND device_id IS NOT DISTINCT FROM $4`,
+        [ctx.organizationId, event.eventId, ctx.userId, ctx.deviceId ?? null]
+      )).rows[0];
+      if (priorConflict) {
+        results.push(priorConflict.status === 'unresolved'
+          ? { eventId: event.eventId, status: 'conflict', conflictId: priorConflict.id }
+          : { eventId: event.eventId, status: 'duplicate' });
+        continue;
+      }
 
       // Check the stable aggregate identity before the projector mutates a
       // canonical table. This turns an offline stale write into a durable
       // sync_conflict instead of a transaction error.
       const conflict = await this.detectConflict(ctx.organizationId, event);
       if (conflict) {
+        await authorizeConflict?.(event);
         const conflictId = await this.createConflict(ctx, event, conflict);
         results.push({ eventId: event.eventId, status: 'conflict', conflictId });
         continue;
       }
       const projected = materialize === undefined ? event : await materialize(event);
+      if ('conflict' in projected) {
+        const conflictId = await this.createConflict(ctx, event, projected.conflict);
+        results.push({ eventId: event.eventId, status: 'conflict', conflictId });
+        continue;
+      }
 
       const appended = await this.appendServerEvent(ctx, {
         aggregateType: projected.aggregateType,
@@ -237,6 +262,11 @@ export class SyncRepository {
       results.push({ eventId: event.eventId, status: 'applied', revision: appended.revision });
     }
     return results;
+  }
+
+  async lockEvent(organizationId: string, eventId: string): Promise<void> {
+    await this.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`sync-event:${organizationId}:${eventId}`]);
   }
 
   async pull(
@@ -336,7 +366,8 @@ export class SyncRepository {
               v.current_price_amount AS "priceAmount", v.currency, v.attributes, v.active, v.published,
               v.created_at AS "variantCreatedAt", v.updated_at AS "variantUpdatedAt",
               v.version AS "variantVersion", media.public_url AS "imageUri",
-              sale.amount_minor AS "salePriceAmount", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
+              sale.amount_minor AS "salePriceAmount", sale.currency AS "saleCurrency", sale.valid_from AS "saleValidFrom", sale.valid_until AS "saleValidUntil",
+              regular_clock.saved_at AS "regularPriceSavedAt", promotion_clock.saved_at AS "promotionPriceSavedAt",
               cost.amount_minor AS "costAmount",
               COALESCE(inventory.quantity, 0) AS quantity, inventory.location_id AS "locationId",
               inventory.zone_id AS "zoneId", inventory.bin_id AS "binId",
@@ -365,8 +396,10 @@ export class SyncRepository {
          WHERE ib.organization_id = p.organization_id AND ib.variant_id = v.id
            AND ($4::uuid[] IS NULL OR ib.location_id = ANY($4::uuid[]))
        ) inventory ON true
+       LEFT JOIN variant_price_edit_clocks regular_clock ON regular_clock.organization_id=v.organization_id AND regular_clock.variant_id=v.id AND regular_clock.kind='regular'
+       LEFT JOIN variant_price_edit_clocks promotion_clock ON promotion_clock.organization_id=v.organization_id AND promotion_clock.variant_id=v.id AND promotion_clock.kind='promotion'
        LEFT JOIN LATERAL (
-         SELECT amount_minor, valid_from, valid_until FROM variant_prices
+         SELECT amount_minor, currency, valid_from, valid_until FROM variant_prices
          WHERE organization_id = p.organization_id AND variant_id = v.id AND price_type = 'sale'
            AND cancelled_at IS NULL
          ORDER BY created_at DESC LIMIT 1
@@ -480,7 +513,7 @@ export class SyncRepository {
   ) {
     const status = input.status ?? 'unresolved';
     const result = await this.client.query(
-      `SELECT id, aggregate_type AS "aggregateType", aggregate_id AS "aggregateId", operation,
+      `SELECT id, event_id AS "eventId", aggregate_type AS "aggregateType", aggregate_id AS "aggregateId", operation,
               base_version AS "baseVersion", server_version AS "serverVersion", client_payload AS "clientPayload",
               server_payload AS "serverPayload", status, reason, created_at AS "createdAt",
               resolved_at AS "resolvedAt"
@@ -518,7 +551,7 @@ export class SyncRepository {
     return result.rows[0];
   }
 
-  private async detectConflict(organizationId: string, event: SyncPushEvent) {
+  private async detectConflict(organizationId: string, event: SyncPushEvent): Promise<SyncConflictCandidate | null> {
     // The product editor submits one complete catalog form. A normal desktop
     // item save is therefore a deliberate last-save-wins edit, including its
     // selected gender, and must not become a false conflict merely because a
@@ -529,7 +562,9 @@ export class SyncRepository {
     if (
       typeof command === 'object' &&
       command !== null &&
-      ['item.update', 'item.delete'].includes(String((command as Record<string, unknown>).kind))
+      (['item.update', 'item.delete'].includes(String((command as Record<string, unknown>).kind)) ||
+       ((command as Record<string, unknown>).kind === 'item.promotion.clear' &&
+        (event.basePayload?.priceEdit as Record<string, unknown> | undefined)?.version === 1))
     ) {
       return null;
     }
@@ -539,15 +574,15 @@ export class SyncRepository {
     const current = await this.client.query<{ version: string; payload: Record<string, unknown> }>(
       `SELECT version::text, to_jsonb(source) AS payload
        FROM (
-         SELECT id, version FROM products WHERE organization_id = $1 AND id = $2 AND $3 = 'product'
+         SELECT id, version, jsonb_build_object('name', name, 'active', active) AS summary FROM products WHERE organization_id = $1 AND id = $2 AND $3 = 'product'
          UNION ALL
-         SELECT id, version FROM product_variants WHERE organization_id = $1 AND id = $2 AND $3 IN ('variant', 'product_variant')
+         SELECT id, version, jsonb_build_object('name', name, 'sku', sku, 'active', active) FROM product_variants WHERE organization_id = $1 AND id = $2 AND $3 IN ('variant', 'product_variant')
          UNION ALL
-         SELECT id, version FROM rfid_tags WHERE organization_id = $1 AND id = $2 AND $3 = 'rfid_tag'
+         SELECT id, version, jsonb_build_object('epc', epc, 'status', status) FROM rfid_tags WHERE organization_id = $1 AND id = $2 AND $3 = 'rfid_tag'
          UNION ALL
-         SELECT id, version FROM inventory_items WHERE organization_id = $1 AND id = $2 AND $3 = 'inventory_item'
+         SELECT id, version, jsonb_build_object('status', status) FROM inventory_items WHERE organization_id = $1 AND id = $2 AND $3 = 'inventory_item'
          UNION ALL
-         SELECT id, version FROM stock_transfers WHERE organization_id = $1 AND id = $2 AND $3 = 'transfer'
+         SELECT id, version, document FROM stock_transfers WHERE organization_id = $1 AND id = $2 AND $3 = 'transfer'
        ) source`,
       [organizationId, event.aggregateId, event.aggregateType]
     );
@@ -564,14 +599,16 @@ export class SyncRepository {
   private async createConflict(
     ctx: RequestContext,
     event: SyncPushEvent,
-    conflict: { serverVersion: number; serverPayload: Record<string, unknown> }
+    conflict: SyncConflictCandidate
   ): Promise<string> {
     const result = await this.client.query<{ id: string }>(
       `INSERT INTO sync_conflicts (
          organization_id, device_id, user_id, aggregate_type, aggregate_id, operation,
-         base_version, server_version, client_payload, server_payload, reason
+         base_version, server_version, client_payload, server_payload, reason, event_id, location_id, details
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14::jsonb)
+       ON CONFLICT (organization_id, event_id) WHERE event_id IS NOT NULL
+       DO UPDATE SET event_id = EXCLUDED.event_id
        RETURNING id`,
       [
         ctx.organizationId,
@@ -584,7 +621,10 @@ export class SyncRepository {
         conflict.serverVersion,
         JSON.stringify(redactCredentials(event.payload)),
         JSON.stringify(redactCredentials(conflict.serverPayload)),
-        'Base version does not match server version'
+        conflict.details?.kind === 'price' ? 'PRICE_CHANGED_WITHIN_MINUTE' : 'VERSION_CHANGED',
+        event.eventId,
+        event.locationId ?? ctx.locationId ?? null,
+        JSON.stringify(redactCredentials(conflict.details ?? {}))
       ]
     );
     return requireRow(result).id;
