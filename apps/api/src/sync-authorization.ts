@@ -5,6 +5,7 @@ import { PermissionDeniedError, ValidationFailedError } from '@daja/security';
 import { requireScopedPermission } from './access-policy.js';
 
 const companyProfileKeys = new Set(['company.name', 'company.legalName', 'company.taxNumber']);
+const salesSettingsKeys = new Set(['sales.services', 'sales.staff', 'sales.shifts', 'sales.shiftOverrides']);
 
 const commandPermissions: Record<string, string[]> = {
   'item.create': ['items.create', 'catalog.write'],
@@ -75,8 +76,16 @@ export async function authorizeSyncEvent(
   if (!permissions) throw new ValidationFailedError('Unsupported sync command.');
   if (kind === 'settings.update' && payload.scope === 'organization') {
     const keys = Object.keys(record(payload.values));
-    const companyProfileOnly = keys.length > 0 && keys.every((key) => companyProfileKeys.has(key));
-    requireScopedPermission(ctx, companyProfileOnly ? [...permissions, 'organization.profile.configure'] : permissions);
+    if (!keys.length || keys.some(key => !companyProfileKeys.has(key) && !salesSettingsKeys.has(key))) {
+      requireScopedPermission(ctx, permissions);
+      return;
+    }
+    if (keys.some(key => companyProfileKeys.has(key))) {
+      requireScopedPermission(ctx, [...permissions, 'organization.profile.configure']);
+    }
+    if (keys.some(key => salesSettingsKeys.has(key))) {
+      requireScopedPermission(ctx, [...permissions, 'organization.sales.configure']);
+    }
     return;
   }
   const required =

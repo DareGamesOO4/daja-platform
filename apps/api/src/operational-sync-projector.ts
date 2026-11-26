@@ -2136,7 +2136,9 @@ export class OperationalSyncProjector {
       throw new ValidationFailedError('Desktop organization settings command is incomplete');
     }
     const company = [text(values, 'company.name'), text(values, 'company.legalName'), text(values, 'company.taxNumber')];
-    const updatesCompany = company.some((value) => value !== undefined);
+    const writesLegalName = Object.hasOwn(values, 'company.legalName');
+    const writesTaxNumber = Object.hasOwn(values, 'company.taxNumber');
+    const updatesCompany = company[0] !== undefined || writesLegalName || writesTaxNumber;
     const organizationColumns = 'id, name, legal_name AS "legalName", tax_number AS "taxNumber", version::text AS version';
     const { rows: [organization] } = await this.client.query<{
       id: string;
@@ -2147,12 +2149,12 @@ export class OperationalSyncProjector {
     }>(
       updatesCompany
         ? `UPDATE organizations
-         SET name = COALESCE($2, name), legal_name = COALESCE($3, legal_name),
-             tax_number = COALESCE($4, tax_number), version = version + 1, updated_at = now()
+         SET name = COALESCE($2, name), legal_name = CASE WHEN $5 THEN $3 ELSE legal_name END,
+             tax_number = CASE WHEN $6 THEN $4 ELSE tax_number END, version = version + 1, updated_at = now()
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING ${organizationColumns}`
         : `SELECT ${organizationColumns} FROM organizations WHERE id = $1 AND deleted_at IS NULL`,
-      updatesCompany ? [ctx.organizationId, ...company] : [ctx.organizationId]
+      updatesCompany ? [ctx.organizationId, ...company, writesLegalName, writesTaxNumber] : [ctx.organizationId]
     );
     if (!organization)
       throw new ValidationFailedError('Desktop organization does not exist on Platform');
