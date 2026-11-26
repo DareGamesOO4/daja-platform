@@ -21,7 +21,7 @@ import { StorefrontRepository, TransactionManager, type CustomerPrincipal, type 
 import type { Logger } from '@daja/observability';
 import { AppError, requirePermission, ValidationFailedError, signJwt, verifyJwt } from '@daja/security';
 import { browserRequest } from './runtime/edge-ingress.js';
-import { beginBrowserOAuth, beginBrowserPhone, readBrowserPhone, clearBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth } from './runtime/browser-session.js';
+import { beginBrowserOAuth, beginBrowserPhone, readBrowserPhone, clearBrowserPhone, browserSessionStatus, storeBrowserTokens, validateBrowserOAuth, cookieValue, storeWelcomeVerification, WELCOME_COOKIE } from './runtime/browser-session.js';
 import { parseWithSchema, uuidSchema } from '@daja/validation';
 import { CustomerAuthService, serializeCustomerPrincipal } from './customer-auth.service.js';
 import { CustomerPasskeysService } from './customer-passkeys.service.js';
@@ -42,7 +42,7 @@ import { CONFIG, DATABASE, LOGGER } from './tokens.js';
 import { resolveRequestContext } from './runtime/request-context.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { importRemoteImage } from './remote-media.service.js';
-import { PromotionsService } from './promotions.service.js';
+import { PromotionsService, KOD_DOBRODOSLICE } from './promotions.service.js';
 import { WhatsAppNotificationsService } from './whatsapp-notifications.service.js';
 import { OrderWhatsAppService } from './order-whatsapp.service.js';
 import { WhatsAppOtpService } from './whatsapp-otp.service.js';
@@ -91,7 +91,6 @@ const passwordResetSchema = z.object({
 });
 const emailVerificationTokenSchema = z.string().trim().min(32).max(256);
 const adminSessionSchema = z.object({ deviceId: z.string().uuid() });
-const KOD_DOBRODOSLICE = 'DOBRODOSLI10';
 
 const addressSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
@@ -146,7 +145,7 @@ const reviewSchema = z.object({
 
 const newsletterSchema = z.object({
   deliveryChannel: z.enum(['email', 'sms', 'whatsapp']).default('email'),
-  email: z.string().email().optional(),
+  email: z.string().trim().max(254).email().optional(),
   managementToken: z.string().trim().min(24).max(160).optional(),
   source: z.string().trim().min(1).max(80).optional(),
   acceptedMarketing: z.literal(true),
@@ -655,7 +654,7 @@ export class StorefrontOrdersController {
     const input = parseWithSchema(orderSchema, body);
     const organizationId = publicOrganizationId(this.config);
     const order = await new TransactionManager(this.database.pool, this.logger).run(
-      client => this.placeOrder(client, organizationId, customer, input)
+      client => this.placeOrder(client, organizationId, customer, input, cookieValue(request.headers.cookie, WELCOME_COOKIE))
     );
     this.publishOrderCreated(organizationId, order);
     return this.orderReceipt(order, organizationId, !customer);
@@ -688,7 +687,7 @@ export class StorefrontOrdersController {
         if (!receipt) throw new AppError('CHECKOUT_ATTEMPT_UNAVAILABLE', 'Checkout attempt not ready', 409);
         return { ...receipt, created: false };
       }
-      const order = await this.placeOrder(client, organizationId, customer, input);
+      const order = await this.placeOrder(client, organizationId, customer, input, cookieValue(request.headers.cookie, WELCOME_COOKIE));
       await attempt.finish(order.docId);
       return { order, guest: !customer, created: true };
     });
@@ -740,7 +739,7 @@ export class StorefrontOrdersController {
     }
   }
 
-  private async placeOrder(client: DbClient, organizationId: string, customer: CustomerPrincipal | null, input: z.infer<typeof orderSchema>) {
+  private async placeOrder(client: DbClient, organizationId: string, customer: CustomerPrincipal | null, input: z.infer<typeof orderSchema>, welcomeToken: string | undefined) {
     if (input.termsVersion && input.termsVersion !== LEGAL_POLICY_VERSION) {
       throw new AppError('CHECKOUT_TERMS_CHANGED', 'Uslovi kupovine su ažurirani. Osvežite stranicu i pročitajte važeće uslove pre slanja porudžbine.', 409);
     }
@@ -763,6 +762,8 @@ export class StorefrontOrdersController {
         customer,
         code: input.promoCode,
         items: cart.items,
+        welcomeToken,
+        checkoutEmail: typeof input.customer.email === 'string' ? input.customer.email : '',
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
       },
@@ -854,6 +855,7 @@ export class StorefrontOrdersController {
         customer,
         code: input.code,
         items: input.items,
+        welcomeToken: cookieValue(request.headers.cookie, WELCOME_COOKIE),
         shippingMethod: input.shippingMethod,
         paymentMethod: input.paymentMethod
       });
@@ -1183,21 +1185,25 @@ export class StorefrontContentController {
       organizationId,
       email,
       source: input.source ?? 'site',
-      policyVersion: input.policyVersion,
       ...(customer?.email?.toLowerCase() === email.toLowerCase()
         ? { customerId: customer.customerId }
         : {})
     });
-    // Anonymous callers receive status only, never subscriber identifiers or
-    // signed unsubscribe links. Unsubscribe links are sent to the mailbox owner.
+    const verifiedAccount = customer?.emailVerified && customer.email?.toLowerCase() === email.toLowerCase() ? customer : null;
+    const welcomeCode = verifiedAccount &&
+      await this.privacy.nemaPrethodnihPorudzbina({ organizationId, email, customerId: verifiedAccount.customerId }) &&
+      await this.promotions.welcomeCodeAvailable(organizationId, KOD_DOBRODOSLICE) ? KOD_DOBRODOSLICE : null;
     return {
-      active: subscriber.active,
-      alreadySubscribed: subscriber.alreadySubscribed,
-      isFirstSubscription: subscriber.isFirstSubscription,
-      requiresConfirmation: subscriber.requiresConfirmation,
-      poslatMailDobrodoslice: false,
-      imaPravoNaKodDobrodoslice: false
+      ...subscriber, emailVerified: Boolean(verifiedAccount),
+      ...(welcomeCode ? { kodDobrodoslice: welcomeCode } : {})
     };
+  }
+
+  @Post('newsletter/email-verification')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  sendNewsletterVerification(@Body() body: unknown) {
+    const { email } = parseWithSchema(z.object({ email: z.string().trim().max(254).email() }), body);
+    return this.privacy.sendNewsletterVerification(publicOrganizationId(this.config), email);
   }
 
   @Post('product-alerts/confirm')
@@ -1209,13 +1215,14 @@ export class StorefrontContentController {
 
   @Post('newsletter/confirm')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  async confirmNewsletter(@Body() body: unknown) {
+  async confirmNewsletter(@Req() request: Request, @Res({ passthrough: true }) response: Response, @Body() body: unknown) {
     const { token } = parseWithSchema(z.object({ token: z.string().min(24).max(160) }), body);
-    return new TransactionManager(this.database.pool, this.logger).run(async client => {
-      const subscriber = await this.privacy.confirmNewsletter(token, client);
-      const eligible = await this.privacy.nemaPrethodnihPorudzbina({ organizationId: subscriber.organization_id, email: subscriber.email }) &&
-        await this.promotions.welcomeCodeAvailable(subscriber.organization_id, KOD_DOBRODOSLICE);
-      if (!subscriber.welcome_queued_at) {
+    const organizationId = publicOrganizationId(this.config);
+    const result = await new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const subscriber = await this.privacy.confirmNewsletter(organizationId, token, client);
+      const eligible = await this.privacy.nemaPrethodnihPorudzbina({ organizationId, email: subscriber.email }, client) &&
+        await this.promotions.welcomeCodeAvailable(organizationId, KOD_DOBRODOSLICE, client);
+      if (!subscriber.active && !subscriber.welcome_queued_at) {
         await this.novostiEmail.posaljiPorukuDobrodoslice({ recipient: subscriber.email,
           odjavaUrl: subscriber.odjavaUrl, newsletterSubscriberId: subscriber.id,
           ...(eligible ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {}) }, client);
@@ -1223,6 +1230,8 @@ export class StorefrontContentController {
       }
       return { status: 'confirmed', active: true, ...(eligible ? { kodDobrodoslice: KOD_DOBRODOSLICE } : {}) };
     });
+    if (result.kodDobrodoslice && browserRequest(request)) storeWelcomeVerification(response, token);
+    return result;
   }
 
 }

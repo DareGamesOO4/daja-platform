@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type pg from 'pg';
 import type { CustomerPrincipal, Database } from '@daja/database';
@@ -5,6 +6,8 @@ import { ValidationFailedError } from '@daja/security';
 import { DATABASE } from './tokens.js';
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
+
+export const KOD_DOBRODOSLICE = 'DOBRODOSLI10';
 type CustomerTargetType = 'include' | 'exclude';
 type DiscountType = 'percentage' | 'fixed' | 'free_shipping';
 
@@ -123,8 +126,8 @@ export interface PromotionResolution {
 export class PromotionsService {
   constructor(@Inject(DATABASE) private readonly database: Database) {}
 
-  async welcomeCodeAvailable(organizationId: string, code: string): Promise<boolean> {
-    const result = await this.database.pool.query(
+  async welcomeCodeAvailable(organizationId: string, code: string, client: Queryable = this.database.pool): Promise<boolean> {
+    const result = await client.query(
       `SELECT id FROM promotions WHERE organization_id=$1 AND code=$2
          AND deleted_at IS NULL AND active
          AND (starts_at IS NULL OR starts_at <= now())
@@ -382,6 +385,8 @@ export class PromotionsService {
       customer: CustomerPrincipal | null;
       code: string | null | undefined;
       items: Array<Record<string, unknown>>;
+      welcomeToken?: string | undefined;
+      checkoutEmail?: string | undefined;
       shippingMethod?: 'courier' | 'pickup' | undefined;
       paymentMethod?: 'cod' | 'pickup' | undefined;
     },
@@ -412,7 +417,31 @@ export class PromotionsService {
       throw new ValidationFailedError('Promo kod je dostigao ukupan broj dozvoljenih korišćenja.');
     }
 
-    await this.assertAudience(promotion, input.customer, client);
+    let welcomeEmail: string | undefined;
+    if (code === KOD_DOBRODOSLICE) {
+      const checkoutEmail = input.checkoutEmail?.trim().toLowerCase();
+      if (input.welcomeToken && /^[a-zA-Z0-9_-]{24,160}$/.test(input.welcomeToken)) {
+        const verified = await client.query<{ normalized_email: string }>(
+          `SELECT normalized_email FROM newsletter_subscribers
+           WHERE organization_id=$1 AND last_confirmation_hash=$2 AND active
+             AND confirmed_at > now() - interval '30 days'
+           ${lockPromotion ? 'FOR SHARE' : ''}`,
+          [input.organizationId, createHash('sha256').update(input.welcomeToken).digest('hex')]
+        );
+        welcomeEmail = verified.rows[0]?.normalized_email;
+      }
+      if (checkoutEmail !== undefined && checkoutEmail !== welcomeEmail) {
+        const accountEmail = input.customer?.email?.trim().toLowerCase();
+        if (checkoutEmail !== accountEmail) {
+          throw new ValidationFailedError('Za kupon dobrodošlice unesite potvrđenu email adresu u porudžbinu.');
+        }
+        welcomeEmail = undefined;
+      }
+      if (!input.customer && !welcomeEmail) {
+        throw new ValidationFailedError('Potvrdite email preko linka za kupon dobrodošlice i otvorite korpu u istom pregledaču.');
+      }
+    }
+    await this.assertAudience(promotion, input.customer, client, welcomeEmail);
     this.assertCheckoutRules(promotion, input.shippingMethod, input.paymentMethod);
 
     const lines = pricedLines ?? await canonicalCartLines(client, input.organizationId, input.items);
@@ -535,9 +564,10 @@ export class PromotionsService {
   private async assertAudience(
     promotion: PromotionRow,
     customer: CustomerPrincipal | null,
-    client: Queryable
+    client: Queryable,
+    welcomeEmail?: string
   ) {
-    if (promotion.login_requirement === 'authenticated' && !customer) {
+    if (promotion.login_requirement === 'authenticated' && !customer && !welcomeEmail) {
       throw new ValidationFailedError('Prijavite se da biste koristili ovaj promo kod.');
     }
     if (promotion.login_requirement === 'guest' && customer) {
@@ -568,7 +598,7 @@ export class PromotionsService {
       promotion.max_customer_order_count !== null ||
       promotion.min_customer_lifetime_spend !== null;
     if (!customerRuleRequired) return;
-    if (!customer) throw new ValidationFailedError('Prijavite se da biste koristili ovaj promo kod.');
+    if (!customer && !welcomeEmail) throw new ValidationFailedError('Prijavite se da biste koristili ovaj promo kod.');
 
     const status = await client.query<{
       email_verified: boolean;
@@ -576,29 +606,37 @@ export class PromotionsService {
       order_count: string;
       lifetime_spend: string;
     }>(
-      `SELECT c.email_verified,
+      `WITH account AS (
+         SELECT id, normalized_email, email_verified FROM customers
+         WHERE organization_id = $1 AND id = $2 AND deleted_at IS NULL
+         FOR UPDATE
+       ), contact AS (
+         SELECT id, COALESCE($3, normalized_email) AS normalized_email,
+           ($3::text IS NOT NULL OR email_verified) AS email_verified FROM account
+         UNION ALL
+         SELECT NULL::uuid, $3, true WHERE $3 IS NOT NULL AND $2::uuid IS NULL
+       )
+       SELECT c.email_verified,
               EXISTS (
                 SELECT 1 FROM newsletter_subscribers newsletter
-                WHERE newsletter.organization_id = c.organization_id
+                WHERE newsletter.organization_id = $1
                   AND newsletter.normalized_email = c.normalized_email
                   AND newsletter.active
               ) AS newsletter_subscribed,
               (
                 SELECT COUNT(*) FROM orders customer_orders
-                WHERE customer_orders.organization_id = c.organization_id
+                WHERE customer_orders.organization_id = $1
                   AND customer_orders.deleted_at IS NULL
                   AND (customer_orders.customer_id = c.id OR lower(customer_orders.customer_email) = c.normalized_email)
               )::text AS order_count,
               (
                 SELECT COALESCE(SUM(total_amount), 0) FROM orders customer_orders
-                WHERE customer_orders.organization_id = c.organization_id
+                WHERE customer_orders.organization_id = $1
                   AND customer_orders.deleted_at IS NULL
                   AND (customer_orders.customer_id = c.id OR lower(customer_orders.customer_email) = c.normalized_email)
               )::text AS lifetime_spend
-       FROM customers c
-       WHERE c.organization_id = $1 AND c.id = $2 AND c.deleted_at IS NULL
-       FOR UPDATE`,
-      [customer.organizationId, customer.customerId]
+       FROM contact c`,
+      [promotion.organization_id, customer?.customerId ?? null, welcomeEmail ?? null]
     );
     const customerStatus = status.rows[0];
     if (!customerStatus) throw new ValidationFailedError('Korisnički nalog nije dostupan.');
@@ -615,6 +653,17 @@ export class PromotionsService {
       missingRequirements.push('Promo kod važi samo za prvu porudžbinu, a već imate prethodnu porudžbinu.');
     }
     if (missingRequirements.length) throw new ValidationFailedError(missingRequirements.join(' '));
+    if (welcomeEmail && promotion.per_customer_usage_limit !== null) {
+      const used = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM promotion_redemptions pr
+         JOIN orders o ON o.id = pr.order_id AND o.organization_id = pr.organization_id
+         WHERE pr.organization_id = $1 AND pr.promotion_id = $2 AND lower(o.customer_email) = $3`,
+        [promotion.organization_id, promotion.id, welcomeEmail]
+      );
+      if (Number(used.rows[0]?.count ?? 0) >= promotion.per_customer_usage_limit) {
+        throw new ValidationFailedError('Dostigli ste limit korišćenja ovog promo koda.');
+      }
+    }
     if (
       promotion.min_customer_order_count !== null &&
       orderCount < promotion.min_customer_order_count

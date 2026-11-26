@@ -13,17 +13,17 @@ export class NovostiEmailService {
     private readonly delivery: EmailDeliveryService
   ) {}
 
-  async posaljiPotvrduPrijave(input: {
+  async posaljiPotvrduEmailaZaKupon(input: {
     recipient: string;
     confirmationUrl: string;
   }, client?: DbClient): Promise<void> {
     await this.posaljiEmail({
       recipient: input.recipient,
-      subject: 'Potvrdite prijavu za DajaShop novosti',
-      text: `Potvrdite prijavu za DajaShop novosti otvaranjem ovog linka: ${input.confirmationUrl}`,
-      html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'DAJASHOP NOVOSTI',
-        title: 'Potvrdite prijavu.', content: '<p>Još samo jedan korak vas deli od DajaShop novosti. Potvrdite da želite da primate naše ponude i obaveštenja.</p><p>Link važi 24 sata. Ako niste tražili prijavu, zanemarite ovu poruku.</p>',
-        button: { label: 'Potvrdi prijavu', url: input.confirmationUrl } }),
+      subject: 'Potvrdite email za 10% na prvu porudžbinu',
+      text: `Potvrdite email za DajaShop kupon: ${input.confirmationUrl}\n\nLink važi 24 sata. Ako niste tražili ovaj link, zanemarite poruku.`,
+      html: brandedEmail({ siteUrl: this.config.STOREFRONT_PUBLIC_BASE_URL, eyebrow: 'DAJASHOP KUPON',
+        title: 'Potvrdite email adresu.', content: '<p>Još jedan korak do 10% popusta na prvu porudžbinu. Potvrdite email i koristite tu istu adresu prilikom kupovine.</p><p>Link važi 24 sata. Ako ga niste tražili, zanemarite ovu poruku.</p>',
+        button: { label: 'Potvrdi email', url: input.confirmationUrl } }),
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       tag: 'novosti-potvrda',
       linkTokenHash: linkTokenHash(input.confirmationUrl)
@@ -188,7 +188,7 @@ function tekstDobrodoslice(input: {
         '',
         'Kako se koristi:',
         '1. Otvorite ' + input.shopUrl + ' i dodajte artikle u korpu.',
-        '2. Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka i verifikujte email. Newsletter pretplata mora biti aktivna.',
+        '2. Prilikom kupovine koristite istu adresu koju ste potvrdili za kupon. Otvorite korpu u pregledaču u kojem ste potvrdili email.',
         '3. Kod se može automatski primeniti pri otvaranju korpe. Ako se ne prikaže, unesite ga ručno u polje „Kod”.',
         '4. Uslovi koda se proveravaju ponovo pri završetku porudžbine.',
         ''
@@ -225,7 +225,7 @@ function htmlDobrodoslice(input: {
       '<h2 style="margin:0 0 10px;color:#18181b;font-size:16px;line-height:1.35;font-weight:700">Kako se koristi kod</h2>' +
       '<table class="welcome-steps" role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f4f5" style="width:100%;border-collapse:collapse;background-color:#f4f4f5">' +
       korakHtml('1', 'Dodajte željene artikle u korpu.') +
-      korakHtml('2', 'Prijavite se na nalog sa istom email adresom na koju je stigla ova poruka i verifikujte email. Newsletter pretplata mora biti aktivna.') +
+      korakHtml('2', 'Prilikom kupovine koristite istu adresu koju ste potvrdili za kupon. Otvorite korpu u pregledaču u kojem ste potvrdili email.') +
       korakHtml('3', 'Kod se može automatski primeniti pri ulasku u korpu. Ako se ne prikaže, unesite ga ručno u polje „Kod”.') +
       korakHtml('4', 'Uslovi koda se proveravaju ponovo pri završetku porudžbine.') +
       '</table></section>'

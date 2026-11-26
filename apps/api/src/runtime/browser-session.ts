@@ -12,6 +12,12 @@ export const BROWSER_COOKIES = {
   staff: '__Host-daja_staff', csrf: '__Host-daja_csrf', oauth: '__Host-daja_oauth', passkey: '__Host-daja_passkey', phone: '__Host-daja_phone'
 } as const;
 
+export const WELCOME_COOKIE = '__Host-daja_welcome';
+
+export function storeWelcomeVerification(response: Response, token: string): void {
+  setCookie(response, WELCOME_COOKIE, token, 30 * 86400);
+}
+
 export function cookieValue(header: string | undefined, name: string): string | undefined {
   if (!header || header.length > 16_384) return undefined;
   const values = header.split(';').map(part => part.trim()).filter(part => part.startsWith(`${name}=`));

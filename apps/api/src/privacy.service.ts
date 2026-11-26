@@ -14,6 +14,7 @@ import {
 
 const CONSENT_RETENTION_YEARS = 5;
 const MARKETING_PROOF_RETENTION_YEARS = 3;
+const NEWSLETTER_CONSENT_VERSION = '2026-11-26-newsletter-v1';
 
 export interface ConsentCategories {
   preferences: boolean;
@@ -116,59 +117,76 @@ export class PrivacyService {
 
   async subscribeNewsletter(input: {
     organizationId: string; email: string; source: string;
-    policyVersion?: string | undefined; customerId?: string | null | undefined;
+    customerId?: string | null | undefined;
   }) {
     const email = normalizeEmail(input.email);
     return new TransactionManager(this.database.pool, this.logger).run(async client => {
-      const existing = await client.query<{ id: string; email: string; active: boolean }>(
-        'SELECT id, email, active FROM newsletter_subscribers WHERE organization_id = $1 AND normalized_email = $2 FOR UPDATE',
-        [input.organizationId, email]);
-      const current = existing.rows[0];
-      if (current?.active) return { active: true, alreadySubscribed: true, isFirstSubscription: false,
-        requiresConfirmation: false };
-      const token = randomToken();
-      const pending = await client.query<{ id: string; email: string; active: boolean }>(
+      const saved = await client.query<{ id: string }>(
         `INSERT INTO newsletter_subscribers (organization_id, email, source, active, consent_status,
-           consent_version, consented_at, revoked_at, confirmation_token_hash, confirmation_expires_at)
-         VALUES ($1,$2,$3,false,'explicit',$4,now(),NULL,$5,now() + interval '24 hours')
+           consent_version, consented_at)
+         VALUES ($1,$2,$3,true,'explicit',$4,now())
          ON CONFLICT (organization_id, normalized_email) DO UPDATE SET
-           source = EXCLUDED.source, consent_status = 'explicit', consent_version = EXCLUDED.consent_version,
-           consented_at = now(), revoked_at = NULL, confirmation_token_hash = EXCLUDED.confirmation_token_hash,
-           confirmation_expires_at = EXCLUDED.confirmation_expires_at, updated_at = now()
+           active = true, source = EXCLUDED.source, consent_status = 'explicit',
+           consent_version = EXCLUDED.consent_version, consented_at = now(),
+           last_confirmation_hash = CASE WHEN newsletter_subscribers.revoked_at IS NULL
+             THEN newsletter_subscribers.last_confirmation_hash END,
+           revoked_at = NULL, updated_at = now()
          WHERE NOT newsletter_subscribers.active
-           AND (newsletter_subscribers.confirmation_expires_at IS NULL
-                OR newsletter_subscribers.confirmation_expires_at < now() + interval '23 hours 59 minutes')
-         RETURNING id, email, active`,
-        [input.organizationId, email, input.source, input.policyVersion ?? LEGAL_POLICY_VERSION, sha256(token)]);
-      const subscriber = pending.rows[0];
+         RETURNING id`,
+        [input.organizationId, email, input.source, NEWSLETTER_CONSENT_VERSION]);
+      const subscriber = saved.rows[0];
       if (subscriber) {
-        const url = new URL('/newsletter-confirm', this.config.STOREFRONT_PUBLIC_BASE_URL);
-        url.searchParams.set('token', token);
-        await this.email.posaljiPotvrduPrijave({ recipient: email, confirmationUrl: url.toString() }, client);
+        await this.recordMarketingEvent({
+          organizationId: input.organizationId, contact: email, customerId: input.customerId,
+          newsletterSubscriberId: subscriber.id, purpose: 'newsletter', action: 'granted',
+          policyVersion: NEWSLETTER_CONSENT_VERSION, source: input.source
+        }, client);
       }
-      return { active: false, alreadySubscribed: false,
-        isFirstSubscription: !current, requiresConfirmation: true, status: 'pending_confirmation' as const };
+      return { active: true, alreadySubscribed: !subscriber, requiresConfirmation: false };
     });
   }
 
-  async confirmNewsletter(token: string, client: DbClient) {
+  async sendNewsletterVerification(organizationId: string, address: string) {
+    const email = normalizeEmail(address);
+    const token = randomToken();
+    return new TransactionManager(this.database.pool, this.logger).run(async client => {
+      const pending = await client.query(
+        `UPDATE newsletter_subscribers SET confirmation_token_hash = $3,
+           confirmation_expires_at = now() + interval '24 hours', updated_at = now()
+         WHERE organization_id = $1 AND normalized_email = $2 AND active
+           AND (confirmation_expires_at IS NULL OR confirmation_expires_at <= now() + interval '23 hours 59 minutes')
+           AND (confirmed_at IS NULL OR confirmed_at <= now() - interval '1 minute')
+         RETURNING id`, [organizationId, email, sha256(token)]);
+      if (pending.rowCount) {
+        const url = new URL('/newsletter-confirm', this.config.STOREFRONT_PUBLIC_BASE_URL);
+        url.searchParams.set('token', token);
+        await this.email.posaljiPotvrduEmailaZaKupon({ recipient: email, confirmationUrl: url.toString() }, client);
+      }
+      return { status: 'queued' as const };
+    });
+  }
+
+  async confirmNewsletter(organizationId: string, token: string, client: DbClient) {
     const found = await client.query<{ id: string; email: string; organization_id: string;
       welcome_queued_at: Date | null; consent_version: string; active: boolean; repeated: boolean }>(
       `SELECT *, (last_confirmation_hash = $1 AND active AND confirmed_at > now() - interval '24 hours') AS repeated
-       FROM newsletter_subscribers WHERE
-         (confirmation_token_hash = $1 AND confirmation_expires_at > now() AND NOT active)
-         OR (last_confirmation_hash = $1 AND active AND confirmed_at > now() - interval '24 hours')
-       FOR UPDATE`, [sha256(token)]);
+       FROM newsletter_subscribers WHERE organization_id = $2 AND (
+         (confirmation_token_hash = $1 AND confirmation_expires_at > now() AND revoked_at IS NULL)
+         OR (last_confirmation_hash = $1 AND active AND confirmed_at > now() - interval '24 hours'))
+       FOR UPDATE`, [sha256(token), organizationId]);
     const subscriber = found.rows[0];
-    if (!subscriber) throw new ValidationFailedError('Link je istekao ili je povučen. Zatražite novu prijavu na novosti.');
+    if (!subscriber) throw new ValidationFailedError('Link je istekao ili je povučen. Zatražite novi verifikacioni link.');
     if (!subscriber.repeated) {
       await client.query(`UPDATE newsletter_subscribers SET active = true, confirmed_at = now(), updated_at = now(),
         last_confirmation_hash = confirmation_token_hash, confirmation_token_hash = NULL, confirmation_expires_at = NULL,
         revoked_at = NULL WHERE id = $1`, [subscriber.id]);
-      await client.query(`INSERT INTO marketing_consent_events (organization_id, subject_email_hash,
-        newsletter_subscriber_id, purpose, action, policy_version, source)
-        VALUES ($1,$2,$3,'newsletter','granted',$4,'email_confirmation')`,
-        [subscriber.organization_id, sha256(subscriber.email.toLowerCase()), subscriber.id, subscriber.consent_version]);
+      if (!subscriber.active) {
+        await this.recordMarketingEvent({
+          organizationId, contact: subscriber.email, newsletterSubscriberId: subscriber.id,
+          purpose: 'newsletter', action: 'granted', policyVersion: subscriber.consent_version,
+          source: 'email_confirmation'
+        }, client);
+      }
     }
     return { ...subscriber, odjavaUrl: this.odjavaUrlNovosti(subscriber.id) };
   }
@@ -177,8 +195,8 @@ export class PrivacyService {
     organizationId: string;
     email: string;
     customerId?: string | null | undefined;
-  }): Promise<boolean> {
-    const result = await this.database.pool.query<{ has_orders: boolean }>(
+  }, client: DbClient = this.database.pool): Promise<boolean> {
+    const result = await client.query<{ has_orders: boolean }>(
       `SELECT EXISTS (
          SELECT 1
          FROM orders
@@ -224,7 +242,7 @@ export class PrivacyService {
     const result = await this.database.pool.query<{ id: string; email: string; customer_id: string | null }>(
       `UPDATE newsletter_subscribers
        SET active = false, revoked_at = COALESCE(revoked_at, now()), updated_at = now(),
-           confirmation_token_hash = NULL, confirmation_expires_at = NULL
+           confirmation_token_hash = NULL, confirmation_expires_at = NULL, last_confirmation_hash = NULL
        WHERE organization_id = $1 AND id = $2 AND (active OR confirmation_token_hash IS NOT NULL)
        RETURNING id, email, NULL::uuid AS customer_id`,
       [input.organizationId, input.subscriberId]
