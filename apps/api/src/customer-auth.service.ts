@@ -14,6 +14,7 @@ import {
   AuthenticationRequiredError,
   InvalidCredentialsError,
   InvalidTokenError,
+  ResourceConflictError,
   sha256Hex,
   signJwt,
   ValidationFailedError,
@@ -158,6 +159,16 @@ export class CustomerAuthService {
         phone: input.identity.includes('@') ? null : input.identity,
         displayName: input.name,
         passwordHash: await hash(input.password, { type: argon2id })
+      }).catch((error: unknown) => {
+        if (error && typeof error === 'object' && 'code' in error && error.code === '23505' && 'constraint' in error) {
+          if (error.constraint === 'customers_org_email_uq') {
+            throw new ResourceConflictError('Ovaj email je već registrovan. Prijavite se ili obnovite lozinku.');
+          }
+          if (error.constraint === 'customers_org_phone_uq') {
+            throw new ResourceConflictError('Ovaj broj telefona je već povezan sa drugim nalogom.');
+          }
+        }
+        throw error;
       });
       const session = await this.createSession(
         repo,
