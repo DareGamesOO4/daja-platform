@@ -42,17 +42,35 @@ export const groupSaveSchema = z.object({
 }).strict();
 export const groupRevisionSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedCatalogRevision: z.string().length(32) }).strict();
 
+const orientStarBrand = 'ORIENT STAR';
+const orientStarKeyPrefix = 'orient-star:';
+// The family ends before the two-digit model number and dial letter.
+// Accept the optional three-character suffix on full manufacturer references.
+const orientStarReference = '^(RE-[A-Z]{2}[0-9][0-9A-Z])[0-9]{2}[A-Z](?:[0-9]{2}[A-Z])?$';
+const orientStarReferencePattern = new RegExp(orientStarReference);
+
+function isOrientStar(product: GroupProduct): boolean {
+  return product.brand?.trim().toUpperCase() === orientStarBrand;
+}
+
 function prefix(product: GroupProduct): string | null {
   if (product.departmentSlug === 'naocare' || /^nao[čc]are$/i.test(product.department || '')) {
     const model = product.name.toUpperCase().match(/(?:^|[^A-Z0-9])([A-Z]{0,8}[0-9]{3,}[A-Z]?)(?=[\s-]|$)/)?.[1];
     return model ? `naocare:${product.brandId || product.brand || ''}:${model}` : null;
+  }
+  if (isOrientStar(product)) {
+    const family = orientStarReferencePattern.exec(product.name.trim().toUpperCase())?.[1];
+    return family ? orientStarKeyPrefix + family : null;
   }
   const name = product.name;
   const parts = name.split('-');
   return parts.length < 2 ? null : parts.slice(0, -1).join('-');
 }
 function matchesPrefix(product: GroupProduct, value: string): boolean {
-  return value.startsWith('naocare:') ? prefix(product) === value : product.name.startsWith(value);
+  if (value.startsWith('naocare:') || value.startsWith(orientStarKeyPrefix) || isOrientStar(product)) {
+    return prefix(product) === value;
+  }
+  return product.name.startsWith(value);
 }
 function key(group: GroupRecord): string {
   return group.kind === 'automatic' ? `auto:${group.source_prefix!}` : group.id;
@@ -119,8 +137,12 @@ export function groupOverview(state: GroupState): GroupOverview {
         (policy?.group_id === record.id && policy.kind === 'manual' || !longerRule);
     }).map(p => p.id) : [];
     const first = state.products.find(p => memberIds.includes(p.id));
+    const sourcePrefix = record.source_prefix || '';
+    const automaticName = sourcePrefix.startsWith('naocare:')
+      ? `${first?.brand || ''} ${sourcePrefix.split(':').at(-1)}`.trim()
+      : sourcePrefix.startsWith(orientStarKeyPrefix) ? sourcePrefix.slice(orientStarKeyPrefix.length) : sourcePrefix;
     groups.push({ key: groupKey, id: record.id || null, kind: record.kind, prefix: record.source_prefix,
-      internalName: record.internal_name, name: record.internal_name || (record.kind === 'automatic' ? record.source_prefix!.startsWith('naocare:') ? `${first?.brand || ''} ${record.source_prefix!.split(':').at(-1)}`.trim() : record.source_prefix! : first ? `Grupa — ${first.name}` : 'Nova grupa'),
+      internalName: record.internal_name, name: record.internal_name || (record.kind === 'automatic' ? automaticName : first ? `Grupa — ${first.name}` : 'Nova grupa'),
       followAuto: record.follow_auto, customized: record.customized, createdBy: record.created_by_user_id,
       revision: state.revision, catalogRevision: state.catalogRevision, memberIds, automaticMemberIds,
       manualMemberIds: state.policies.filter(p => p.group_id === record.id && p.kind === 'manual').map(p => p.product_id),
@@ -154,6 +176,16 @@ export function resolveGroupMembers(state: GroupState, productId: string): strin
   return state.products.filter(p => matchesPrefix(p, base) && !owners.has(p.id)).map(p => p.id);
 }
 
+const orientStarBrandSql = `upper(btrim(b.name)) = '${orientStarBrand}'`;
+const orientStarKeySql = `'${orientStarKeyPrefix}' || substring(upper(btrim(p.name)) FROM $3::text)`;
+
+function matchesAutomaticPrefixSql(value: string): string {
+  return `CASE WHEN left(${value},8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=${value}
+    WHEN left(${value},${orientStarKeyPrefix.length})='${orientStarKeyPrefix}' OR ${orientStarBrandSql}
+      THEN d.slug IS DISTINCT FROM 'naocare' AND ${orientStarBrandSql} AND (${orientStarKeySql})=${value}
+    ELSE left(p.name, length(${value}))=${value} END`;
+}
+
 // Public product pages need only one group, not the admin catalog snapshot.
 export async function loadPublicGroupMembers(db: Client, organizationId: string, slug: string): Promise<{ sourceId: string; ids: string[]; groupId: string } | null> {
   const result = await db.query<{ sourceId: string; ids: string[]; groupKey: string }>(`WITH source AS (
@@ -162,15 +194,16 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
       CASE WHEN policy.product_id IS NOT NULL THEN policy.group_id
         WHEN rule.follow_auto THEN rule.id ELSE NULL END AS owner_id,
       CASE WHEN d.slug='naocare' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)
+        WHEN ${orientStarBrandSql} THEN ${orientStarKeySql}
         WHEN strpos(p.name, '-') > 0 THEN regexp_replace(p.name, '-[^-]*$', '') ELSE NULL END AS base
     FROM products p
     LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
+    LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id
     LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
     LEFT JOIN LATERAL (
       SELECT g.id, g.follow_auto FROM catalog_variant_groups g
       WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
-        AND CASE WHEN left(g.source_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=g.source_prefix
-          ELSE left(p.name, length(g.source_prefix))=g.source_prefix END
+        AND ${matchesAutomaticPrefixSql('g.source_prefix')}
       ORDER BY length(g.source_prefix) DESC LIMIT 1
     ) rule ON true
     WHERE p.organization_id=$1 AND p.slug=$2 AND p.deleted_at IS NULL AND p.active AND p.published
@@ -186,12 +219,12 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
       ELSE 'product:' || t.id::text END AS "groupKey", ARRAY(
     SELECT p.id FROM products p
     LEFT JOIN departments d ON d.id=p.department_id AND d.organization_id=p.organization_id
+    LEFT JOIN brands b ON b.id=p.brand_id AND b.organization_id=p.organization_id
     LEFT JOIN catalog_variant_group_products policy ON policy.organization_id=p.organization_id AND policy.product_id=p.id
     LEFT JOIN LATERAL (
       SELECT g.id, g.follow_auto FROM catalog_variant_groups g
       WHERE g.organization_id=p.organization_id AND g.kind='automatic' AND g.customized
-        AND CASE WHEN left(g.source_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=g.source_prefix
-          ELSE left(p.name, length(g.source_prefix))=g.source_prefix END
+        AND ${matchesAutomaticPrefixSql('g.source_prefix')}
       ORDER BY length(g.source_prefix) DESC LIMIT 1
     ) rule ON true
     WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND p.active AND p.published
@@ -202,16 +235,14 @@ export async function loadPublicGroupMembers(db: Client, organizationId: string,
         OR (t.has_owner AND t.owner_id IS NOT NULL AND (
           policy.group_id=t.owner_id
           OR (policy.product_id IS NULL AND t.owner_kind='automatic' AND t.customized AND t.follow_auto
-            AND CASE WHEN left(t.owner_prefix,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=t.owner_prefix
-              ELSE left(p.name, length(t.owner_prefix))=t.owner_prefix END AND rule.id=t.owner_id AND rule.follow_auto)
+            AND ${matchesAutomaticPrefixSql('t.owner_prefix')} AND rule.id=t.owner_id AND rule.follow_auto)
         ))
         OR (NOT t.has_owner AND policy.product_id IS NULL AND rule.id IS NULL
           AND ((t.base IS NULL AND p.id=t.id) OR (t.base IS NOT NULL AND
-            CASE WHEN left(t.base,8)='naocare:' THEN catalog_eyewear_group_key(p.name,d.slug,p.brand_id::text)=t.base
-              ELSE left(p.name, length(t.base))=t.base END)))
+            ${matchesAutomaticPrefixSql('t.base')})))
       )
     ORDER BY p.name, p.id
-  ) AS ids FROM target t`, [organizationId, slug]);
+  ) AS ids FROM target t`, [organizationId, slug, orientStarReference]);
   const row = result.rows[0];
   if (!row) return null;
   return { sourceId: row.sourceId, ids: row.ids,
