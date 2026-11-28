@@ -6,6 +6,7 @@ import {
   AuthRepository,
   TransactionManager,
   type Database,
+  type DbClient,
   type StaffPrincipal,
   type CustomerPrincipal
 } from '@daja/database';
@@ -207,6 +208,36 @@ export class AuthService {
    * The email is checked against a server-side allowlist before a staff user is
    * provisioned, so a frontend build variable can never grant API permissions.
    */
+  async canCreateStorefrontStaffSession(customer: CustomerPrincipal): Promise<boolean> {
+    const email = customer.email?.trim().toLowerCase();
+    if (!email || customer.authMethod !== 'google' || !await this.hasStorefrontGoogleIdentity(this.database.pool, customer)) return false;
+    return this.storefrontAdminEmails().includes(email) ||
+      Boolean(await this.storefrontContributor(this.database.pool, customer.organizationId, email));
+  }
+
+  private async hasStorefrontGoogleIdentity(client: Pick<DbClient, 'query'>, customer: CustomerPrincipal): Promise<boolean> {
+    const { rowCount } = await client.query(
+      `SELECT 1 FROM customer_identities
+       WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google' AND active
+       LIMIT 1`,
+      [customer.organizationId, customer.customerId]
+    );
+    return rowCount === 1;
+  }
+
+  private async storefrontContributor(client: Pick<DbClient, 'query'>, organizationId: string, email: string) {
+    const { rows } = await client.query<{ id: string; organizationId: string }>(
+      `SELECT u.id, u.organization_id AS "organizationId"
+       FROM users u
+       JOIN user_role_assignments ura ON ura.user_id = u.id AND ura.organization_id = u.organization_id AND ura.deleted_at IS NULL
+       JOIN roles r ON r.id = ura.role_id AND r.organization_id = u.organization_id AND r.code = 'catalog_contributor' AND r.deleted_at IS NULL
+       WHERE u.organization_id = $1 AND u.normalized_email = lower($2) AND u.active
+       LIMIT 1`,
+      [organizationId, email]
+    );
+    return rows[0];
+  }
+
   async loginConfiguredStorefrontAdmin(input: {
     customer: CustomerPrincipal;
     deviceId: string;
@@ -220,31 +251,16 @@ export class AuthService {
     }
 
     return new TransactionManager(this.database.pool, this.logger).run(async (client) => {
-      const googleIdentity = await client.query(
-        `SELECT 1 FROM customer_identities
-         WHERE organization_id = $1 AND customer_id = $2 AND provider = 'google' AND active
-         LIMIT 1`,
-        [input.customer.organizationId, input.customer.customerId]
-      );
-      if (googleIdentity.rowCount !== 1) {
+      if (!await this.hasStorefrontGoogleIdentity(client, input.customer)) {
         throw new PermissionDeniedError('admin.google_identity');
       }
-      const configuredAdmin = this.storefrontAdminEmails().includes(email);
-      const user = configuredAdmin
+      const user = this.storefrontAdminEmails().includes(email)
         ? await this.provisionStorefrontAdmin(client, {
             organizationId: input.customer.organizationId,
             email,
             displayName: input.customer.displayName
           })
-        : (await client.query<{ id: string; organizationId: string }>(
-            `SELECT u.id, u.organization_id AS "organizationId"
-             FROM users u
-             JOIN user_role_assignments ura ON ura.user_id = u.id AND ura.organization_id = u.organization_id AND ura.deleted_at IS NULL
-             JOIN roles r ON r.id = ura.role_id AND r.organization_id = u.organization_id AND r.code = 'catalog_contributor' AND r.deleted_at IS NULL
-             WHERE u.organization_id = $1 AND u.normalized_email = lower($2) AND u.active
-             LIMIT 1`,
-            [input.customer.organizationId, email]
-          )).rows[0];
+        : await this.storefrontContributor(client, input.customer.organizationId, email);
       if (!user) throw new PermissionDeniedError('admin.access');
       const repo = new AuthRepository(client);
       const familyId = randomUUID();

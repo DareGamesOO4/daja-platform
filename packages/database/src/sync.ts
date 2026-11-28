@@ -346,6 +346,34 @@ export class SyncRepository {
     };
   }
 
+  async status(organizationId: string) {
+    const { rows: [row] } = await this.client.query<{ revision: string | number; policyVersion: string | number }>(
+      `SELECT COALESCE((SELECT current_revision FROM organization_revisions WHERE organization_id = $1), 0) AS revision,
+              COALESCE((SELECT policy_version FROM organization_access_policies WHERE organization_id = $1), 1) AS "policyVersion"`,
+      [organizationId]
+    );
+    return { revision: Number(row?.revision ?? 0), policyVersion: Number(row?.policyVersion ?? 1), serverTime: new Date().toISOString() };
+  }
+
+  async mobileStartupSummary(ctx: Pick<RequestContext, 'organizationId' | 'scopedGrants' | 'isOwner'>) {
+    const [catalog, locations] = await Promise.all([
+      this.client.query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM product_variants v
+         JOIN products p ON p.organization_id = v.organization_id AND p.id = v.product_id AND p.deleted_at IS NULL
+         WHERE v.organization_id = $1 AND v.deleted_at IS NULL`,
+        [ctx.organizationId]
+      ),
+      this.client.query(
+        `SELECT id, code, name, type, active, version FROM locations
+         WHERE organization_id = $1 AND deleted_at IS NULL AND active
+           AND ($2::uuid[] IS NULL OR id = ANY($2::uuid[]))
+         ORDER BY code, name`,
+        [ctx.organizationId, syncLocations(ctx)]
+      )
+    ]);
+    return { catalogVariantCount: Number(catalog.rows[0]?.count ?? 0), locations: locations.rows };
+  }
+
   async bootstrapSnapshot(
     ctx: Pick<RequestContext, 'organizationId' | 'scopedGrants' | 'isOwner'>,
     input: {

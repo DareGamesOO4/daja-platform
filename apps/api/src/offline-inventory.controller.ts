@@ -79,6 +79,30 @@ export class OfflineInventoryController {
     requirePermission(ctx, 'sync.read');
     if (!ctx.deviceId) throw new PermissionDeniedError('offline.identity');
     const input = parseWithSchema(z.object({ locationId: uuidSchema.optional() }).strict(), body);
+    const makeReserve = this.mobileReserveSigner(ctx);
+    const baseline = input.locationId ? await this.loadMobileBaseline(ctx, { locationId: input.locationId }) : null;
+    return makeReserve(baseline);
+  }
+
+  @Post('mobile-reserve/batch')
+  async mobileReserveBatch(@Req() request: Request, @Body() body: unknown) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    if (!ctx.deviceId) throw new PermissionDeniedError('offline.identity');
+    const input = parseWithSchema(z.object({
+      includePermit: z.boolean(),
+      locationIds: z.array(uuidSchema).max(10)
+    }).strict(), body);
+    const makeReserve = this.mobileReserveSigner(ctx);
+    const locations = [];
+    for (const locationId of new Set(input.locationIds)) {
+      const baseline = await this.loadMobileBaseline(ctx, { locationId });
+      locations.push({ locationId, reserve: makeReserve(baseline) });
+    }
+    return { permit: input.includePermit ? makeReserve(null) : null, locations };
+  }
+
+  private mobileReserveSigner(ctx: RequestContext) {
     const configuredKey = this.config.OFFLINE_PACKAGE_SIGNING_PRIVATE_KEY || this.config.OFFLINE_LEASE_SIGNING_PRIVATE_KEY;
     if (!configuredKey) throw new ServiceUnavailableException('Mobile offline signing is not configured.');
     const key = createPrivateKey(configuredKey.replace(/\\n/g, '\n'));
@@ -86,22 +110,23 @@ export class OfflineInventoryController {
     if (key.asymmetricKeyType !== 'ed25519' || !verificationKey) {
       throw new ServiceUnavailableException('Mobile offline signing requires Ed25519.');
     }
-    const baseline = input.locationId ? await this.loadMobileBaseline(ctx, { locationId: input.locationId }) : null;
-    const issuedAt = Date.now();
-    const payload = Buffer.from(JSON.stringify({
-      schemaVersion: 2,
-      organizationId: ctx.organizationId,
-      userId: ctx.userId,
-      deviceId: ctx.deviceId,
-      policyVersion: ctx.policyVersion ?? 1,
-      issuedAt: new Date(issuedAt).toISOString(),
-      expiresAt: new Date(issuedAt + 24 * 3600_000).toISOString(),
-      baseline
-    }));
-    return {
-      payload: payload.toString('base64url'),
-      signature: sign(null, payload, key).toString('base64url'),
-      verificationKey
+    return (baseline: unknown) => {
+      const issuedAt = Date.now();
+      const payload = Buffer.from(JSON.stringify({
+        schemaVersion: 2,
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        deviceId: ctx.deviceId,
+        policyVersion: ctx.policyVersion ?? 1,
+        issuedAt: new Date(issuedAt).toISOString(),
+        expiresAt: new Date(issuedAt + 24 * 3600_000).toISOString(),
+        baseline
+      }));
+      return {
+        payload: payload.toString('base64url'),
+        signature: sign(null, payload, key).toString('base64url'),
+        verificationKey
+      };
     };
   }
 

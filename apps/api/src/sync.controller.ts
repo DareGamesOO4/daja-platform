@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 import { randomUUID } from 'node:crypto';
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '@daja/config';
@@ -273,6 +273,18 @@ export class SyncController {
         }
       });
     }
+  }
+
+  @Get('status')
+  @Header('Cache-Control', 'private, no-store')
+  async status(@Req() request: Request, @Query('include') include?: string) {
+    const ctx = resolveRequestContext(request);
+    requirePermission(ctx, 'sync.read');
+    if (ctx.deviceId) await new DeviceRepository(this.database.pool).assertActiveDevice(ctx.organizationId, ctx.deviceId);
+    const repository = new SyncRepository(this.database.pool);
+    const status = await repository.status(ctx.organizationId);
+    if (include !== 'mobileStartup' || status.policyVersion !== (ctx.policyVersion ?? 1)) return status;
+    return { ...status, mobileStartup: await repository.mobileStartupSummary(ctx) };
   }
 
   @Get('pull')

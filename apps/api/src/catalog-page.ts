@@ -88,7 +88,7 @@ function activeFilters(params: URLSearchParams, nodes: Node[], fixedGender?: str
       ? selected.every(option => matches(product, option)) : selected.some(option => matches(product, option)) }] : [];
   });
 }
-async function productsSnapshot(pool: Pool, organizationId: string, department?: string, includeHidden = false): Promise<Product[]> {
+async function productsSnapshot(pool: Pool, organizationId: string, department?: string, includeHidden = false, limit?: number): Promise<Product[]> {
   // Filter/sort metadata stays on the server. Only selected cards load media.
   const result = await pool.query<Product>(`SELECT p.id, p.name, p.slug, COALESCE(d.slug,'satovi') AS department,
     b.name AS brand, c.name AS category, v.gender, v.current_price_amount::double precision / 100 AS price,
@@ -104,7 +104,7 @@ async function productsSnapshot(pool: Pool, organizationId: string, department?:
     LEFT JOIN categories c ON c.id=p.primary_category_id AND c.organization_id=p.organization_id AND c.deleted_at IS NULL
     WHERE p.organization_id=$1 AND p.deleted_at IS NULL AND ($3::boolean OR (p.active AND p.published))
       AND ($2::text IS NULL OR COALESCE(d.slug,'satovi')=$2)
-    ORDER BY p.updated_at DESC, p.id DESC`, [organizationId, department ?? null, includeHidden]);
+    ORDER BY p.updated_at DESC, p.id DESC LIMIT $4`, [organizationId, department ?? null, includeHidden, limit ?? null]);
   return result.rows;
 }
 async function cards(pool: Pool, organizationId: string, ids: string[], includeHidden = false) {
@@ -362,7 +362,7 @@ const homeSlugs = ['casio-mtp-1314pl-8a','daniel-3271','qq-classic-qw12','ga-100
 export async function publicHomeProducts(pool: Pool, organizationId: string) {
   // Same selection as the former 64-card homepage seed; send only the six
   // cards that its public recommendations section actually renders.
-  const products = (await productsSnapshot(pool,organizationId)).slice(0,64);
+  const products = await productsSnapshot(pool, organizationId, undefined, false, 64);
   const curated = homeSlugs.flatMap(slug => products.filter(product => product.slug === slug));
   const chosen = [...curated,...products.filter(product => !curated.some(item => item.id === product.id))].slice(0,6);
   return {items:await cards(pool,organizationId,chosen.map(product => product.id))};

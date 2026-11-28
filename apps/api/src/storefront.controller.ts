@@ -202,7 +202,8 @@ export class CustomerAuthController {
     @Inject(DesktopGoogleOAuthService) private readonly desktopGoogle: DesktopGoogleOAuthService,
     @Inject(PhoneOtpService) private readonly phoneOtp: PhoneOtpService,
     @Inject(WhatsAppOtpService) private readonly whatsappOtp: WhatsAppOtpService,
-    private readonly realtime: RealtimeGateway
+    private readonly realtime: RealtimeGateway,
+    @Inject(DATABASE) private readonly database: Database
   ) {}
 
   @Get('security-capabilities')
@@ -258,10 +259,17 @@ export class CustomerAuthController {
   }
 
   @Get('me')
-  async me(@Req() request: Request) {
-    return {
-      user: serializeCustomerPrincipal(await this.auth.requireCustomer(bearerToken(request)))
-    };
+  async me(@Req() request: Request, @Query('include') include?: string) {
+    const customer = await this.auth.requireCustomer(bearerToken(request));
+    const user = serializeCustomerPrincipal(customer);
+    if (include !== 'profile') return { user };
+    const [profile, staffCandidate] = await Promise.all([
+      new StorefrontRepository(this.database.pool).getCustomer({
+        organizationId: customer.organizationId, customerId: customer.customerId
+      }).catch(() => null),
+      this.staffAuth.canCreateStorefrontStaffSession(customer).catch(() => undefined)
+    ]);
+    return { user, profile, staffCandidate };
   }
 
   @Post('password')
